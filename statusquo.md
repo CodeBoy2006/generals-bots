@@ -33,3 +33,15 @@
 - **Status:** Completed
 - **Next Steps:** Use the v3 checkpoint as a warm start for PPO or self-play if stronger-than-Expander performance is required.
 - **Context:** Final 8x8 generated-map sampled policy reached 90.8%, 92.1%, and 93.0% win rate over 2048-game/500-step independent evaluations against Random; it is not stronger than Expander.
+
+## [2026-05-13 20:15] Chinese Project Manual
+- **Changes:** Added `docs/zh-manual.md` with a detailed Chinese project guide, setup instructions, core API explanation, experiment commands, PPO workflow, evaluation guidance, and current benchmark-script caveats.
+- **Status:** Completed
+- **Next Steps:** Keep the manual in sync if the README examples or `GeneralsEnv` interface are updated.
+- **Context:** The manual intentionally documents the current `reset(key) -> (pool, state)` and `step(state, actions, pool)` interface and warns that older benchmark scripts still need interface cleanup before use.
+
+## [2026-05-13 20:17] README Chinese Summary
+- **Changes:** Replaced the original README with a concise Chinese summary derived from `docs/zh-manual.md`, covering setup, project layout, current environment API, common experiments, validation, and caveats.
+- **Status:** Completed
+- **Next Steps:** None for this documentation-only update.
+- **Context:** The README now points readers to `docs/zh-manual.md` for the detailed manual and no longer contains the original English README content.
