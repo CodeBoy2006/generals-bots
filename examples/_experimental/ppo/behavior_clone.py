@@ -20,14 +20,22 @@ import optax
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
 
-from common import expander_target_probs, make_state_pool
+from common import (
+    TEACHER_NAME_TO_ID,
+    TEACHER_NAMES,
+    action_to_index,
+    action_to_target_probs,
+    expander_target_probs,
+    heuristic_action,
+    make_state_pool,
+)
 from network import PolicyValueNetwork, obs_to_array
 from train import random_action
 
 
 @eqx.filter_jit
-def collect_teacher_batch(states, pool, key, steps, truncation):
-    """Roll out Expander-vs-Random games and collect teacher labels for player 0."""
+def collect_teacher_batch(states, pool, key, steps, truncation, teacher_id):
+    """Roll out teacher-vs-Random games and collect labels for player 0."""
     num_envs = states.armies.shape[0]
 
     def body(carry, _):
@@ -35,21 +43,38 @@ def collect_teacher_batch(states, pool, key, steps, truncation):
         obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
 
-        key, k1 = jrandom.split(key)
-        random_keys = jrandom.split(k1, num_envs)
-        targets = jax.vmap(expander_target_probs)(obs_p0)
-        key, k0 = jrandom.split(key)
-        teacher_indices = jax.vmap(lambda k, p: jrandom.categorical(k, jnp.log(p + 1e-8)))(jrandom.split(k0, num_envs), targets)
+        key, teacher_key, random_key = jrandom.split(key, 3)
+        teacher_keys = jrandom.split(teacher_key, num_envs)
+        random_keys = jrandom.split(random_key, num_envs)
         grid_size = obs_p0.armies.shape[-1]
-        grid_cells = grid_size * grid_size
-        teacher_dirs = teacher_indices // grid_cells
-        teacher_positions = teacher_indices % grid_cells
-        teacher_rows = teacher_positions // grid_size
-        teacher_cols = teacher_positions % grid_size
-        teacher_is_pass = teacher_dirs == 8
-        teacher_is_half = (teacher_dirs >= 4) & (teacher_dirs < 8)
-        teacher_actual_dirs = jnp.where(teacher_is_pass, 0, jnp.where(teacher_is_half, teacher_dirs - 4, teacher_dirs))
-        actions_p0 = jnp.stack([teacher_is_pass, teacher_rows, teacher_cols, teacher_actual_dirs, teacher_is_half], axis=1).astype(jnp.int32)
+
+        def collect_soft(_):
+            target_probs = jax.vmap(expander_target_probs)(obs_p0)
+            sampled_indices = jax.vmap(lambda k, p: jrandom.categorical(k, jnp.log(p + 1e-8)))(
+                teacher_keys, target_probs
+            )
+            grid_cells = grid_size * grid_size
+            teacher_dirs = sampled_indices // grid_cells
+            teacher_positions = sampled_indices % grid_cells
+            teacher_rows = teacher_positions // grid_size
+            teacher_cols = teacher_positions % grid_size
+            teacher_is_pass = teacher_dirs == 8
+            teacher_is_half = (teacher_dirs >= 4) & (teacher_dirs < 8)
+            teacher_actual_dirs = jnp.where(
+                teacher_is_pass, 0, jnp.where(teacher_is_half, teacher_dirs - 4, teacher_dirs)
+            )
+            teacher_actions = jnp.stack(
+                [teacher_is_pass, teacher_rows, teacher_cols, teacher_actual_dirs, teacher_is_half], axis=1
+            ).astype(jnp.int32)
+            return teacher_actions, target_probs, sampled_indices
+
+        def collect_hard(_):
+            teacher_actions = jax.vmap(lambda k, o: heuristic_action(teacher_id - 1, k, o))(teacher_keys, obs_p0)
+            teacher_indices = jax.vmap(lambda a: action_to_index(a, grid_size))(teacher_actions)
+            target_probs = jax.vmap(lambda a: action_to_target_probs(a, grid_size))(teacher_actions)
+            return teacher_actions, target_probs, teacher_indices
+
+        actions_p0, targets, teacher_indices = jax.lax.cond(teacher_id == 0, collect_soft, collect_hard, None)
         actions_p1 = jax.vmap(random_action)(random_keys, obs_p1)
 
         new_states, infos = jax.vmap(game.step)(states, jnp.stack([actions_p0, actions_p1], axis=1))
@@ -113,10 +138,11 @@ def make_initial_states(pool, num_envs):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Behavior-clone the experimental PPO policy from Expander.")
+    parser = argparse.ArgumentParser(description="Behavior-clone the experimental PPO policy from heuristic teachers.")
     parser.add_argument("num_envs", nargs="?", type=int, default=512)
     parser.add_argument("--grid-size", type=int, default=8)
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
+    parser.add_argument("--teacher", choices=TEACHER_NAMES, default="expander-soft")
     parser.add_argument("--num-steps", type=int, default=32)
     parser.add_argument("--num-iterations", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -153,8 +179,9 @@ def main():
     if min_generals_distance is None:
         min_generals_distance = max(3, args.grid_size // 2)
 
-    print("Behavior cloning from Expander")
+    print("Behavior cloning from heuristic teacher")
     print(f"Device:        {jax.devices()[0]}")
+    print(f"Teacher:       {args.teacher}")
     print(f"Environments:  {args.num_envs}")
     print(f"Grid:          {args.grid_size}x{args.grid_size} ({args.map_generator})")
     print(f"Iterations:    {args.num_iterations} x {args.num_steps} steps")
@@ -189,6 +216,7 @@ def main():
             key,
             args.num_steps,
             args.truncation,
+            TEACHER_NAME_TO_ID[args.teacher],
         )
         network, opt_state, loss, accuracy = train_bc_step(
             network,

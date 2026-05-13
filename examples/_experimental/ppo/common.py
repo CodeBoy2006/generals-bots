@@ -6,9 +6,15 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
+from generals.agents._heuristic_logic import HEURISTIC_NAMES, heuristic_action
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
 from generals.core.grid import generate_grid
+
+TEACHER_NAMES = ("expander-soft",) + HEURISTIC_NAMES
+TEACHER_NAME_TO_ID = {name: idx for idx, name in enumerate(TEACHER_NAMES)}
+OPPONENT_NAMES = ("random",) + HEURISTIC_NAMES
+OPPONENT_NAME_TO_ID = {name: idx for idx, name in enumerate(OPPONENT_NAMES)}
 
 
 def make_simple_general_grid(key, grid_size):
@@ -85,6 +91,13 @@ def action_to_index(action, grid_size):
     return encoded_dir * grid_size * grid_size + row * grid_size + col
 
 
+def action_to_target_probs(action, grid_size):
+    """Encode one teacher action as a one-hot policy target."""
+    grid_cells = grid_size * grid_size
+    index = action_to_index(action, grid_size)
+    return jax.nn.one_hot(index, 9 * grid_cells, dtype=jnp.float32)
+
+
 def normalize_action(action):
     """Keep pass actions at a canonical in-bounds source cell."""
     is_pass = action[0] > 0
@@ -119,6 +132,16 @@ def sampled_policy_action(network, obs, key):
     mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
     action, _, _, _ = network(obs_arr, mask, key, None)
     return normalize_action(action)
+
+
+def opponent_action(opponent_id, key, obs, random_action_fn):
+    """Dispatch a random or heuristic opponent action."""
+    return jax.lax.cond(
+        opponent_id == 0,
+        lambda _: random_action_fn(key, obs),
+        lambda _: heuristic_action(opponent_id - 1, key, obs),
+        None,
+    )
 
 
 def expander_target_probs(obs):

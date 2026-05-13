@@ -1,4 +1,4 @@
-"""Batch evaluation for experimental PPO policy checkpoints."""
+"""Batch evaluation for built-in heuristic agents."""
 
 import argparse
 import sys
@@ -16,16 +16,16 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
+from generals.agents._heuristic_logic import HEURISTIC_NAME_TO_ID, HEURISTIC_NAMES, heuristic_action
 from generals.core import game
 
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, greedy_policy_action, make_grids, opponent_action, sampled_policy_action
-from network import PolicyValueNetwork
+from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, make_grids, opponent_action
 from train import random_action
 
 
 @eqx.filter_jit
-def evaluate_batch(network, states, key, max_steps, opponent, policy_mode):
-    """Evaluate a network against Random or a heuristic on a batch of states."""
+def evaluate_heuristic_batch(states, key, max_steps, agent_id, opponent_id):
+    """Evaluate one heuristic as player 0 against a random or heuristic player 1."""
     num_envs = states.armies.shape[0]
 
     def body(carry, _):
@@ -34,34 +34,31 @@ def evaluate_batch(network, states, key, max_steps, opponent, policy_mode):
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
 
         key, k0, k1 = jrandom.split(key, 3)
-        policy_keys = jrandom.split(k0, num_envs)
-        actions_p0 = jax.lax.cond(
-            policy_mode == 0,
-            lambda _: jax.vmap(lambda o: greedy_policy_action(network, o))(obs_p0),
-            lambda _: jax.vmap(lambda o, k: sampled_policy_action(network, o, k))(obs_p0, policy_keys),
-            None,
-        )
+        agent_keys = jrandom.split(k0, num_envs)
         opponent_keys = jrandom.split(k1, num_envs)
-        actions_p1 = jax.vmap(lambda k, o: opponent_action(opponent, k, o, random_action))(opponent_keys, obs_p1)
+        actions_p0 = jax.vmap(lambda k, o: heuristic_action(agent_id, k, o))(agent_keys, obs_p0)
+        actions_p1 = jax.vmap(lambda k, o: opponent_action(opponent_id, k, o, random_action))(opponent_keys, obs_p1)
 
         new_states, infos = jax.vmap(game.step)(states, jnp.stack([actions_p0, actions_p1], axis=1))
         keep_old = jax.vmap(game.get_info)(states).is_done
-        final_states = jax.tree.map(lambda old, new: jnp.where(keep_old.reshape(num_envs, *([1] * (old.ndim - 1))), old, new), states, new_states)
+        final_states = jax.tree.map(
+            lambda old, new: jnp.where(keep_old.reshape(num_envs, *([1] * (old.ndim - 1))), old, new),
+            states,
+            new_states,
+        )
         return (final_states, key), infos
 
     (states, key), _ = jax.lax.scan(body, (states, key), None, length=max_steps)
-    info = jax.vmap(game.get_info)(states)
-    return info
+    return jax.vmap(game.get_info)(states)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate an experimental PPO policy checkpoint.")
-    parser.add_argument("model_path")
+    parser = argparse.ArgumentParser(description="Evaluate built-in heuristic agents.")
+    parser.add_argument("--agent", choices=HEURISTIC_NAMES, default="balanced")
+    parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="expander")
     parser.add_argument("--num-games", type=int, default=1024)
     parser.add_argument("--grid-size", type=int, default=8)
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
-    parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="random")
-    parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="greedy")
     parser.add_argument("--max-steps", type=int, default=250)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
@@ -80,6 +77,12 @@ def parse_args():
         parser.error("--num-games must be positive")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
+        parser.error("mountain density must satisfy 0 <= min <= max <= 1")
+    if not (2 <= args.num_cities_min <= args.num_cities_max):
+        parser.error("city count must satisfy 2 <= min <= max")
+    if args.city_army_min >= args.city_army_max:
+        parser.error("city army range must satisfy min < max")
     return args
 
 
@@ -90,10 +93,7 @@ def main():
         min_generals_distance = max(3, args.grid_size // 2)
 
     key = jrandom.PRNGKey(args.seed)
-    key, net_key, map_key, eval_key = jrandom.split(key, 4)
-    network = PolicyValueNetwork(net_key, grid_size=args.grid_size)
-    network = eqx.tree_deserialise_leaves(args.model_path, network)
-
+    key, map_key, eval_key = jrandom.split(key, 3)
     grids = make_grids(
         map_key,
         args.num_games,
@@ -107,10 +107,14 @@ def main():
     )
     states = jax.vmap(game.create_initial_state)(grids)
 
-    opponent_code = OPPONENT_NAME_TO_ID[args.opponent]
-    policy_mode = 0 if args.policy_mode == "greedy" else 1
     t0 = time.time()
-    info = evaluate_batch(network, states, eval_key, args.max_steps, opponent_code, policy_mode)
+    info = evaluate_heuristic_batch(
+        states,
+        eval_key,
+        args.max_steps,
+        HEURISTIC_NAME_TO_ID[args.agent],
+        OPPONENT_NAME_TO_ID[args.opponent],
+    )
     jax.block_until_ready(info.winner)
     elapsed = time.time() - t0
 
@@ -123,12 +127,11 @@ def main():
     draw_rate = draws / args.num_games
     mean_time = float(jnp.mean(info.time))
 
-    print("Policy evaluation")
-    print(f"Model:              {args.model_path}")
+    print("Heuristic evaluation")
     print(f"Device:             {jax.devices()[0]}")
     print(f"Grid:               {args.grid_size}x{args.grid_size} ({args.map_generator})")
+    print(f"Agent:              {args.agent}")
     print(f"Opponent:           {args.opponent}")
-    print(f"Policy mode:        {args.policy_mode}")
     print(f"Games:              {args.num_games}")
     print(f"Max steps:          {args.max_steps}")
     print(f"Wins/Losses/Draws:  {wins}/{losses}/{draws}")

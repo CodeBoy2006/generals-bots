@@ -22,6 +22,7 @@ from generals.core import game
 from generals.core.grid import generate_grid
 from generals.core.rewards import composite_reward_fn
 
+from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
 from network import PolicyValueNetwork, obs_to_array
 
 
@@ -96,7 +97,7 @@ def make_initial_states(pool, num_envs):
 
 
 @eqx.filter_jit
-def rollout_step(states, pool, network, key, truncation):
+def rollout_step(states, pool, network, key, truncation, opponent_id):
     """Vectorized rollout step for all environments."""
     num_envs = states.armies.shape[0]
     
@@ -113,9 +114,9 @@ def rollout_step(states, pool, network, key, truncation):
         obs_arr, masks, jnp.stack(keys), None
     )
     
-    # Random actions for p1
+    # Opponent actions for p1
     key, *keys = jrandom.split(key, num_envs + 1)
-    actions_p1 = jax.vmap(random_action)(jnp.stack(keys), obs_p1_prior)
+    actions_p1 = jax.vmap(lambda k, o: opponent_action(opponent_id, k, o, random_action))(jnp.stack(keys), obs_p1_prior)
     
     # Step game
     actions = jnp.stack([actions_p0, actions_p1], axis=1)
@@ -230,6 +231,7 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate.")
     parser.add_argument("--grid-size", type=int, default=4, help="Square map size used by the policy network.")
     parser.add_argument("--truncation", type=int, default=500, help="Maximum game steps before an auto-reset.")
+    parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="random", help="Player-1 training opponent.")
     parser.add_argument("--pool-size", type=int, default=2048, help="Number of pre-generated reset states.")
     parser.add_argument(
         "--map-generator",
@@ -281,6 +283,7 @@ def main():
     print("JAX PPO (Raw Game API - Max Performance)")
     print(f"Environments:  {num_envs}")
     print(f"Device:        {jax.devices()[0]}")
+    print(f"Opponent:      {args.opponent}")
     print(f"Grid:          {grid_size}x{grid_size} ({args.map_generator}, truncation={args.truncation})")
     if args.map_generator == "generated":
         print(f"Mountains:     {args.mountain_density_min:.2f}-{args.mountain_density_max:.2f}")
@@ -296,6 +299,7 @@ def main():
     optimizer = optax.adam(lr)
     params = eqx.filter(network, eqx.is_inexact_array)
     opt_state = optimizer.init(params)
+    opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
 
     print(f"Parameters: {sum(x.size for x in jax.tree.leaves(params)):,}")
     
@@ -316,7 +320,7 @@ def main():
     
     print("\nWarming up...")
     for _ in range(3):
-        states, _, key = rollout_step(states, pool, network, key, args.truncation)
+        states, _, key = rollout_step(states, pool, network, key, args.truncation, opponent_id)
     jax.block_until_ready(states)
     
     print("Training...\n")
@@ -327,7 +331,7 @@ def main():
         # Collect rollout
         rollout_data = []
         for _ in range(num_steps):
-            states, data, key = rollout_step(states, pool, network, key, args.truncation)
+            states, data, key = rollout_step(states, pool, network, key, args.truncation, opponent_id)
             rollout_data.append(data)
         jax.block_until_ready(states)
         

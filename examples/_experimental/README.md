@@ -88,5 +88,39 @@ uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-bc-8x8
   --policy-mode sample
 ```
 
+The PPO stack also exposes a built-in heuristic pool that can be used as a
+teacher, opponent, or standalone evaluation target:
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/behavior_clone.py 128 \
+  --grid-size 8 \
+  --teacher balanced \
+  --pool-size 4096 \
+  --num-steps 32 \
+  --num-iterations 2000 \
+  --lr 0.0007 \
+  --model-path /tmp/generals-bc-balanced.eqx
+
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 64 \
+  --grid-size 8 \
+  --map-generator generated \
+  --opponent mixed \
+  --num-steps 64 \
+  --num-iterations 10 \
+  --pool-size 512 \
+  --model-path /tmp/generals-ppo-mixed.eqx
+
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/evaluate_heuristics.py \
+  --agent general-hunter \
+  --opponent expander \
+  --num-games 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --max-steps 500
+```
+
 ### `visualize_policy.py`
 Visualization tools for trained policies. Work in progress.
