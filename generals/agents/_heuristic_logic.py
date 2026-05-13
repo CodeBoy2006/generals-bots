@@ -26,33 +26,48 @@ HEURISTIC_NAMES = (
 HEURISTIC_NAME_TO_ID = {name: idx for idx, name in enumerate(HEURISTIC_NAMES)}
 
 
-def _distance_to_mask(mask: jnp.ndarray, row: jnp.ndarray, col: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Return whether a mask is nonempty and Manhattan distance to its nearest cell."""
+def _map_scale(observation) -> jnp.ndarray:
+    """Return a floating-point scale factor that grows with the map size."""
+    h, w = observation.armies.shape
+    return jnp.array(jnp.maximum(h, w), dtype=jnp.float32)
+
+
+def _land_ratio(observation) -> jnp.ndarray:
+    """Return the fraction of the map currently owned by the player."""
+    total_cells = jnp.maximum(observation.armies.size, 1)
+    return observation.owned_land_count.astype(jnp.float32) / total_cells
+
+
+def _large_map_factor(scale: jnp.ndarray) -> jnp.ndarray:
+    """Return a 0-1 factor that activates on larger maps."""
+    return jnp.clip((scale - 8.0) / 8.0, 0.0, 1.0)
+
+
+def _frontier_mask(owned_cells: jnp.ndarray) -> jnp.ndarray:
+    """Cells on the edge of owned territory."""
+    padded = jnp.pad(owned_cells, 1, mode="constant", constant_values=False)
+    north = padded[:-2, 1:-1]
+    south = padded[2:, 1:-1]
+    west = padded[1:-1, :-2]
+    east = padded[1:-1, 2:]
+    return owned_cells & (~north | ~south | ~west | ~east)
+
+
+def _distance_map(mask: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return a map of Manhattan distance to the nearest True cell in mask."""
     h, w = mask.shape
-    rows = jnp.arange(h)[:, None]
-    cols = jnp.arange(w)[None, :]
-    dist = jnp.abs(rows - row) + jnp.abs(cols - col)
-    large = jnp.array(h + w + 1, dtype=dist.dtype)
-    masked_dist = jnp.where(mask, dist, large)
-    has_target = jnp.any(mask)
-    return has_target, jnp.min(masked_dist)
+    coords = jnp.argwhere(mask, size=h * w, fill_value=-1)
+    valid = jnp.all(coords >= 0, axis=-1)
 
+    rows = jnp.arange(h, dtype=jnp.int32)[:, None, None]
+    cols = jnp.arange(w, dtype=jnp.int32)[None, :, None]
+    target_rows = coords[:, 0]
+    target_cols = coords[:, 1]
 
-def _approach_score(
-    mask: jnp.ndarray,
-    src_row: jnp.ndarray,
-    src_col: jnp.ndarray,
-    dest_row: jnp.ndarray,
-    dest_col: jnp.ndarray,
-    improvement_weight: float,
-    closeness_weight: float,
-) -> jnp.ndarray:
-    """Score moves that reduce Manhattan distance to the nearest target mask."""
-    has_target, source_dist = _distance_to_mask(mask, src_row, src_col)
-    _, dest_dist = _distance_to_mask(mask, dest_row, dest_col)
-    improvement = jnp.maximum(source_dist - dest_dist, 0).astype(jnp.float32)
-    closeness = 1.0 / (dest_dist.astype(jnp.float32) + 1.0)
-    return jnp.where(has_target, improvement * improvement_weight + closeness * closeness_weight, 0.0)
+    large = jnp.array(h + w + 1, dtype=jnp.int32)
+    dist = jnp.abs(rows - target_rows[None, None, :]) + jnp.abs(cols - target_cols[None, None, :])
+    dist = jnp.where(valid[None, None, :], dist, large)
+    return jnp.min(dist, axis=-1), jnp.any(mask)
 
 
 def _valid_positions(observation) -> tuple[jnp.ndarray, jnp.ndarray, int, int, int]:
@@ -184,17 +199,47 @@ def _expansion_score(
     )
 
 
+def _score_from_distance_map(
+    distance_map: jnp.ndarray,
+    has_target: jnp.ndarray,
+    src_row: jnp.ndarray,
+    src_col: jnp.ndarray,
+    dest_row: jnp.ndarray,
+    dest_col: jnp.ndarray,
+    scale: jnp.ndarray,
+    improvement_weight: float,
+    closeness_weight: float,
+) -> jnp.ndarray:
+    """Score moves that reduce the distance to a global target map."""
+    source_dist = distance_map[src_row, src_col]
+    dest_dist = distance_map[dest_row, dest_col]
+    improvement = jnp.maximum(source_dist - dest_dist, 0).astype(jnp.float32)
+    normalized_dest = dest_dist.astype(jnp.float32) / jnp.maximum(scale, 1.0)
+    closeness = 1.0 / (normalized_dest + 1.0)
+    return jnp.where(has_target, improvement * improvement_weight + closeness * closeness_weight, 0.0)
+
+
+def _distance_to_mask(mask: jnp.ndarray, row: jnp.ndarray, col: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return whether a mask is nonempty and the distance from one cell to it."""
+    distance_map, has_target = _distance_map(mask)
+    return has_target, distance_map[row, col]
+
+
 def _expander_scores(observation):
     positions, num_valid, h, w, max_moves = _valid_positions(observation)
+    scale = _map_scale(observation)
+    large_map = _large_map_factor(scale)
+    own_frontier = _frontier_mask(observation.owned_cells)
+    frontier_dist, frontier_exists = _distance_map(own_frontier)
 
     def evaluate(idx):
         move = positions[idx]
         (
             is_valid,
-            _src_row,
-            _src_col,
-            _dest_row,
-            _dest_col,
+            src_row,
+            src_col,
+            dest_row,
+            dest_col,
             source_armies,
             _dest_armies,
             dest_owned,
@@ -211,7 +256,14 @@ def _expander_scores(observation):
         is_expansion = ~dest_owned & (dest_opponent | dest_neutral)
         opponent_multiplier = jnp.where(dest_opponent, 2.0, 1.0)
         base_score = source_armies.astype(jnp.float32)
-        score = jnp.where(is_expansion & can_capture_all, base_score * 10.0 * opponent_multiplier, base_score)
+        frontier_score = _score_from_distance_map(
+            frontier_dist, frontier_exists, src_row, src_col, dest_row, dest_col, scale, 4.0, 2.0
+        )
+        score = jnp.where(
+            is_expansion & can_capture_all,
+            base_score * (10.0 + 6.0 * large_map) * opponent_multiplier,
+            base_score + frontier_score,
+        )
         score = jnp.where(is_valid & can_capture_all, score, 0.0)
         return score, jnp.int32(0)
 
@@ -234,7 +286,11 @@ def expander_greedy_action(observation) -> jnp.ndarray:
 @jax.jit
 def city_rush_action(key: jnp.ndarray, observation) -> jnp.ndarray:
     positions, num_valid, h, w, max_moves = _valid_positions(observation)
+    scale = _map_scale(observation)
+    large_map = _large_map_factor(scale)
+    opening = _land_ratio(observation) < (0.10 + 0.04 * large_map)
     city_targets = (observation.cities & ~observation.owned_cells) | observation.structures_in_fog
+    city_dist, city_exists = _distance_map(city_targets)
 
     def evaluate(idx):
         move = positions[idx]
@@ -261,21 +317,21 @@ def city_rush_action(key: jnp.ndarray, observation) -> jnp.ndarray:
         direct_structure_fog = observation.structures_in_fog[dest_row, dest_col]
         attack_target = (dest_neutral | dest_opponent | direct_city) & ~dest_owned
         safe_attack = can_capture_all | dest_unknown
-        approach = _approach_score(city_targets, src_row, src_col, dest_row, dest_col, 18.0, 10.0)
+        approach = _score_from_distance_map(city_dist, city_exists, src_row, src_col, dest_row, dest_col, scale, 20.0, 12.0)
         expansion = _expansion_score(source_armies, dest_owned, dest_neutral, dest_opponent, can_capture_all)
 
         capture_score = expansion
-        capture_score = capture_score + jnp.where(dest_neutral & can_capture_all, 55.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_opponent & can_capture_all, 90.0, 0.0)
+        capture_score = capture_score + jnp.where(dest_neutral & can_capture_all, 55.0 + 15.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_opponent & can_capture_all, 90.0 + 20.0 * large_map, 0.0)
         capture_score = capture_score + jnp.where(
-            direct_city & can_capture_all, 260.0 + source_armies.astype(jnp.float32), 0.0
+            direct_city & can_capture_all, 260.0 + source_armies.astype(jnp.float32) + 60.0 * large_map, 0.0
         )
-        capture_score = capture_score + jnp.where(direct_structure_fog, 12.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_general & can_capture_all, 1200.0, 0.0)
+        capture_score = capture_score + jnp.where(direct_structure_fog, 12.0 + 10.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_general & can_capture_all, 1200.0 + 120.0 * large_map, 0.0)
         capture_score = jnp.where(attack_target & ~safe_attack, capture_score * 0.05, capture_score)
-        approach_score = source_armies.astype(jnp.float32) * 0.8 + approach
-        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * 0.25)
-        split = (dest_owned | (can_capture_half & direct_structure_fog & (source_armies > 8))).astype(jnp.int32)
+        approach_score = source_armies.astype(jnp.float32) * (0.8 + 0.2 * large_map) + approach
+        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * (0.25 + 0.15 * large_map))
+        split = (dest_owned | (~opening & can_capture_half & direct_structure_fog & (source_armies > 14))).astype(jnp.int32)
         return jnp.where(is_valid, capture_score, 0.0), jnp.where(is_valid, approach_score, 0.0), split
 
     capture_scores, approach_scores, splits = jax.vmap(evaluate)(jnp.arange(max_moves))
@@ -286,12 +342,16 @@ def city_rush_action(key: jnp.ndarray, observation) -> jnp.ndarray:
 @jax.jit
 def general_hunter_action(key: jnp.ndarray, observation) -> jnp.ndarray:
     positions, num_valid, h, w, max_moves = _valid_positions(observation)
+    scale = _map_scale(observation)
+    large_map = _large_map_factor(scale)
+    opening = _land_ratio(observation) < (0.10 + 0.04 * large_map)
     visible_general = observation.generals & observation.opponent_cells
     visible_enemy = observation.opponent_cells
     exploration = observation.fog_cells | observation.structures_in_fog
     has_general = jnp.any(visible_general)
     has_enemy = jnp.any(visible_enemy)
     target_mask = jnp.where(has_general, visible_general, jnp.where(has_enemy, visible_enemy, exploration))
+    target_dist, target_exists = _distance_map(target_mask)
 
     def evaluate(idx):
         move = positions[idx]
@@ -314,21 +374,21 @@ def general_hunter_action(key: jnp.ndarray, observation) -> jnp.ndarray:
             can_capture_half,
         ) = _move_parts(observation, move, h, w)
 
-        approach = _approach_score(target_mask, src_row, src_col, dest_row, dest_col, 30.0, 16.0)
+        approach = _score_from_distance_map(target_dist, target_exists, src_row, src_col, dest_row, dest_col, scale, 32.0, 18.0)
         attack_target = (dest_neutral | dest_opponent | (dest_city & ~dest_owned)) & ~dest_owned
         safe_attack = can_capture_all | dest_unknown
         expansion = _expansion_score(source_armies, dest_owned, dest_neutral, dest_opponent, can_capture_all)
 
         capture_score = expansion
-        capture_score = capture_score + jnp.where(dest_general & can_capture_all, 2000.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_opponent & can_capture_all, 180.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_city & ~dest_owned & can_capture_all, 90.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_neutral & can_capture_all, 28.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_unknown, 10.0, 0.0)
+        capture_score = capture_score + jnp.where(dest_general & can_capture_all, 2000.0 + 180.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_opponent & can_capture_all, 180.0 + 20.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_city & ~dest_owned & can_capture_all, 90.0 + 25.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_neutral & can_capture_all, 28.0 + 12.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_unknown, 10.0 + 6.0 * large_map, 0.0)
         capture_score = jnp.where(attack_target & ~safe_attack, capture_score * 0.08, capture_score)
-        approach_score = source_armies.astype(jnp.float32) * 0.9 + approach
-        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * 0.25)
-        split = (dest_owned | (can_capture_half & dest_unknown & (source_armies > 10))).astype(jnp.int32)
+        approach_score = source_armies.astype(jnp.float32) * (0.9 + 0.15 * large_map) + approach
+        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * (0.25 + 0.15 * large_map))
+        split = (dest_owned | (~opening & can_capture_half & dest_unknown & (source_armies > 16))).astype(jnp.int32)
         return jnp.where(is_valid, capture_score, 0.0), jnp.where(is_valid, approach_score, 0.0), split
 
     capture_scores, approach_scores, splits = jax.vmap(evaluate)(jnp.arange(max_moves))
@@ -339,8 +399,13 @@ def general_hunter_action(key: jnp.ndarray, observation) -> jnp.ndarray:
 @jax.jit
 def defensive_expander_action(key: jnp.ndarray, observation) -> jnp.ndarray:
     positions, num_valid, h, w, max_moves = _valid_positions(observation)
+    scale = _map_scale(observation)
+    large_map = _large_map_factor(scale)
+    opening = _land_ratio(observation) < (0.10 + 0.04 * large_map)
     own_general = observation.generals & observation.owned_cells
+    own_general_dist, has_own_general = _distance_map(own_general)
     frontier = observation.neutral_cells | observation.opponent_cells | observation.fog_cells | observation.structures_in_fog
+    frontier_dist, frontier_exists = _distance_map(frontier)
 
     def evaluate(idx):
         move = positions[idx]
@@ -363,37 +428,45 @@ def defensive_expander_action(key: jnp.ndarray, observation) -> jnp.ndarray:
             can_capture_half,
         ) = _move_parts(observation, move, h, w)
 
-        has_general, source_general_dist = _distance_to_mask(own_general, src_row, src_col)
-        _, dest_general_dist = _distance_to_mask(own_general, dest_row, dest_col)
-        near_general_source = has_general & (source_general_dist <= 2)
-        moving_toward_general = has_general & (dest_general_dist < source_general_dist)
-        moving_away_from_general = has_general & (dest_general_dist > source_general_dist)
-        approach_frontier = _approach_score(frontier, src_row, src_col, dest_row, dest_col, 8.0, 5.0)
+        source_general_dist = own_general_dist[src_row, src_col]
+        dest_general_dist = own_general_dist[dest_row, dest_col]
+        near_general_source = has_own_general & (source_general_dist <= 2)
+        moving_toward_general = has_own_general & (dest_general_dist < source_general_dist)
+        moving_away_from_general = has_own_general & (dest_general_dist > source_general_dist)
+        approach_frontier = _score_from_distance_map(frontier_dist, frontier_exists, src_row, src_col, dest_row, dest_col, scale, 10.0, 6.0)
 
-        prefer_half = dest_owned | (near_general_source & (dest_owned | can_capture_half)) | (
-            can_capture_half & (source_armies > 12) & ~dest_general
+        prefer_half = dest_owned | (near_general_source & dest_owned) | (
+            ~opening & can_capture_half & (source_armies > 18 + 6 * large_map) & ~dest_general & dest_unknown
         )
         selected_can_capture = jnp.where(prefer_half, can_capture_half, can_capture_all)
         attack_target = (dest_neutral | dest_opponent | (dest_city & ~dest_owned)) & ~dest_owned
-        expansion = _expansion_score(source_armies, dest_owned, dest_neutral, dest_opponent, selected_can_capture, 8.0, 16.0)
+        expansion = _expansion_score(
+            source_armies,
+            dest_owned,
+            dest_neutral,
+            dest_opponent,
+            selected_can_capture,
+            8.0 + 2.0 * large_map,
+            16.0 + 6.0 * large_map,
+        )
 
         capture_score = expansion
-        capture_score = capture_score + jnp.where(dest_neutral & selected_can_capture, 45.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_opponent & selected_can_capture, 85.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_city & ~dest_owned & selected_can_capture, 105.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_general & selected_can_capture, 1500.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_unknown, 8.0, 0.0)
+        capture_score = capture_score + jnp.where(dest_neutral & selected_can_capture, 45.0 + 10.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_opponent & selected_can_capture, 85.0 + 15.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_city & ~dest_owned & selected_can_capture, 105.0 + 20.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_general & selected_can_capture, 1500.0 + 120.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_unknown, 8.0 + 4.0 * large_map, 0.0)
         capture_score = jnp.where(attack_target & ~selected_can_capture & ~dest_unknown, capture_score * 0.05, capture_score)
-        capture_score = jnp.where(source_general & ~prefer_half & (source_armies < 8), capture_score * 0.35, capture_score)
+        capture_score = jnp.where(source_general & ~prefer_half & (source_armies < 8 + 4 * large_map), capture_score * 0.35, capture_score)
         capture_score = jnp.where(
-            near_general_source & moving_away_from_general & (observation.owned_land_count < 4),
+            near_general_source & moving_away_from_general & (observation.owned_land_count < 4 + 2 * large_map),
             capture_score * 0.65,
             capture_score,
         )
-        approach_score = source_armies.astype(jnp.float32) * 0.7 + approach_frontier
-        approach_score = approach_score + jnp.where(dest_owned & moving_toward_general, 55.0, 0.0)
-        approach_score = approach_score + jnp.where(dest_owned & near_general_source, 25.0, 0.0)
-        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * 0.25)
+        approach_score = source_armies.astype(jnp.float32) * (0.7 + 0.15 * large_map) + approach_frontier
+        approach_score = approach_score + jnp.where(dest_owned & moving_toward_general, 55.0 + 20.0 * large_map, 0.0)
+        approach_score = approach_score + jnp.where(dest_owned & near_general_source, 25.0 + 10.0 * large_map, 0.0)
+        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * (0.25 + 0.15 * large_map))
         split = prefer_half.astype(jnp.int32)
         return jnp.where(is_valid, capture_score, 0.0), jnp.where(is_valid, approach_score, 0.0), split
 
@@ -405,11 +478,19 @@ def defensive_expander_action(key: jnp.ndarray, observation) -> jnp.ndarray:
 @jax.jit
 def balanced_strategic_action(key: jnp.ndarray, observation) -> jnp.ndarray:
     positions, num_valid, h, w, max_moves = _valid_positions(observation)
+    scale = _map_scale(observation)
+    large_map = _large_map_factor(scale)
+    opening = _land_ratio(observation) < (0.10 + 0.04 * large_map)
     visible_general = observation.generals & observation.opponent_cells
     city_targets = (observation.cities & ~observation.owned_cells) | observation.structures_in_fog
     enemy_targets = observation.opponent_cells
     exploration = observation.fog_cells | observation.structures_in_fog
     own_general = observation.generals & observation.owned_cells
+    own_general_dist, has_own_general = _distance_map(own_general)
+    city_dist, city_exists = _distance_map(city_targets)
+    enemy_dist, enemy_exists = _distance_map(enemy_targets)
+    explore_dist, explore_exists = _distance_map(exploration)
+    general_dist, general_exists = _distance_map(visible_general)
 
     def evaluate(idx):
         move = positions[idx]
@@ -432,12 +513,12 @@ def balanced_strategic_action(key: jnp.ndarray, observation) -> jnp.ndarray:
             can_capture_half,
         ) = _move_parts(observation, move, h, w)
 
-        general_approach = _approach_score(visible_general, src_row, src_col, dest_row, dest_col, 45.0, 24.0)
-        city_approach = _approach_score(city_targets, src_row, src_col, dest_row, dest_col, 16.0, 8.0)
-        enemy_approach = _approach_score(enemy_targets, src_row, src_col, dest_row, dest_col, 18.0, 10.0)
-        explore_approach = _approach_score(exploration, src_row, src_col, dest_row, dest_col, 5.0, 3.0)
-        has_own_general, source_general_dist = _distance_to_mask(own_general, src_row, src_col)
-        _, dest_general_dist = _distance_to_mask(own_general, dest_row, dest_col)
+        general_approach = _score_from_distance_map(general_dist, general_exists, src_row, src_col, dest_row, dest_col, scale, 50.0 + 12.0 * large_map, 28.0 + 6.0 * large_map)
+        city_approach = _score_from_distance_map(city_dist, city_exists, src_row, src_col, dest_row, dest_col, scale, 18.0 + 8.0 * large_map, 10.0 + 4.0 * large_map)
+        enemy_approach = _score_from_distance_map(enemy_dist, enemy_exists, src_row, src_col, dest_row, dest_col, scale, 20.0 + 8.0 * large_map, 12.0 + 4.0 * large_map)
+        explore_approach = _score_from_distance_map(explore_dist, explore_exists, src_row, src_col, dest_row, dest_col, scale, 6.0 + 4.0 * large_map, 4.0 + 2.0 * large_map)
+        source_general_dist = own_general_dist[src_row, src_col]
+        dest_general_dist = own_general_dist[dest_row, dest_col]
 
         army_ratio = observation.owned_army_count.astype(jnp.float32) / (
             observation.opponent_army_count.astype(jnp.float32) + 1.0
@@ -445,8 +526,9 @@ def balanced_strategic_action(key: jnp.ndarray, observation) -> jnp.ndarray:
         aggression = jnp.clip(army_ratio, 0.65, 1.8)
         near_general_source = has_own_general & (source_general_dist <= 2)
         prefer_half = dest_owned | (
-            can_capture_half
-            & (source_armies > 10)
+            ~opening
+            & can_capture_half
+            & (source_armies > 10 + 4 * large_map)
             & ~dest_general
             & ~(dest_city & ~dest_owned)
             & ~(dest_opponent & (army_ratio < 1.1))
@@ -465,22 +547,22 @@ def balanced_strategic_action(key: jnp.ndarray, observation) -> jnp.ndarray:
         )
 
         capture_score = expansion
-        capture_score = capture_score + jnp.where(dest_general & selected_can_capture, 2200.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_opponent & selected_can_capture, 150.0 * aggression, 0.0)
-        capture_score = capture_score + jnp.where(dest_city & ~dest_owned & selected_can_capture, 190.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_neutral & selected_can_capture, 62.0, 0.0)
-        capture_score = capture_score + jnp.where(dest_unknown, 10.0, 0.0)
+        capture_score = capture_score + jnp.where(dest_general & selected_can_capture, 2200.0 + 220.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_opponent & selected_can_capture, 150.0 * aggression + 25.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_city & ~dest_owned & selected_can_capture, 190.0 + 30.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_neutral & selected_can_capture, 62.0 + 18.0 * large_map, 0.0)
+        capture_score = capture_score + jnp.where(dest_unknown, 10.0 + 6.0 * large_map, 0.0)
         capture_score = jnp.where(attack_target & ~selected_can_capture & ~dest_unknown, capture_score * 0.05, capture_score)
-        capture_score = jnp.where(source_general & ~prefer_half & (source_armies < 8), capture_score * 0.35, capture_score)
+        capture_score = jnp.where(source_general & ~prefer_half & (source_armies < 8 + 4 * large_map), capture_score * 0.35, capture_score)
         capture_score = jnp.where(
-            near_general_source & moving_away_from_general & (observation.owned_land_count < 4),
+            near_general_source & moving_away_from_general & (observation.owned_land_count < 4 + 2 * large_map),
             capture_score * 0.65,
             capture_score,
         )
-        approach_score = source_armies.astype(jnp.float32) * 0.85
+        approach_score = source_armies.astype(jnp.float32) * (0.85 + 0.15 * large_map)
         approach_score = approach_score + general_approach + city_approach + enemy_approach + explore_approach
-        approach_score = approach_score + jnp.where(dest_owned & (dest_general_dist < source_general_dist), 28.0, 0.0)
-        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * 0.25)
+        approach_score = approach_score + jnp.where(dest_owned & (dest_general_dist < source_general_dist), 28.0 + 10.0 * large_map, 0.0)
+        approach_score = jnp.where(dest_owned | dest_unknown, approach_score, approach_score * (0.25 + 0.15 * large_map))
         split = prefer_half.astype(jnp.int32)
         return jnp.where(is_valid, capture_score, 0.0), jnp.where(is_valid, approach_score, 0.0), split
 
@@ -492,7 +574,19 @@ def balanced_strategic_action(key: jnp.ndarray, observation) -> jnp.ndarray:
 @jax.jit
 def mixed_heuristic_action(key: jnp.ndarray, observation) -> jnp.ndarray:
     selector_key, action_key = jrandom.split(key)
-    weights = jnp.array([0.24, 0.18, 0.18, 0.18, 0.22], dtype=jnp.float32)
+    scale = _map_scale(observation)
+    large_map = _large_map_factor(scale)
+    weights = jnp.array(
+        [
+            0.30 - 0.02 * large_map,
+            0.18 - 0.02 * large_map,
+            0.16 + 0.02 * large_map,
+            0.12 - 0.04 * large_map,
+            0.24 + 0.06 * large_map,
+        ],
+        dtype=jnp.float32,
+    )
+    weights = weights / jnp.sum(weights)
     selected = jrandom.choice(selector_key, 5, p=weights)
     branches = (
         expander_action,

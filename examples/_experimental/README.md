@@ -120,6 +120,10 @@ uv run python examples/_experimental/ppo/evaluate_heuristics.py \
   --grid-size 8 \
   --map-generator generated \
   --max-steps 500
+
+For larger maps, the same heuristic pool is meant to be evaluated and trained
+with `--grid-size 12` or `--grid-size 16` plus longer horizon settings such as
+`--max-steps 500` or higher.
 ```
 
 ### `visualize_policy.py`

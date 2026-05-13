@@ -21,6 +21,19 @@ def create_medium_grid():
     return grid
 
 
+def create_large_grid(size=12):
+    grid = jnp.zeros((size, size), dtype=jnp.int32)
+    grid = grid.at[0, 0].set(1)
+    grid = grid.at[size - 1, size - 1].set(2)
+    grid = grid.at[2, 4].set(45)
+    grid = grid.at[5, 8].set(44)
+    grid = grid.at[7, 2].set(43)
+    grid = grid.at[3, 5].set(-2)
+    grid = grid.at[8, 9].set(-2)
+    grid = grid.at[1, 10].set(-2)
+    return grid
+
+
 def assert_action_shape_and_legality(action, obs):
     assert action.shape == (5,)
     assert action.dtype == jnp.int32
@@ -63,3 +76,12 @@ def test_heuristic_action_vmapped_batch():
     assert actions.shape == (3, 5)
     for idx in range(3):
         assert_action_shape_and_legality(actions[idx], jax.tree.map(lambda x: x[idx], obs))
+
+
+@pytest.mark.parametrize("heuristic_id", range(len(HEURISTIC_NAMES)))
+def test_heuristic_action_large_map_smoke(heuristic_id):
+    state = game.create_initial_state(create_large_grid())
+    state = state._replace(armies=state.armies.at[0, 0].set(45))
+    obs = game.get_observation(state, 0)
+    action = heuristic_action(jnp.int32(heuristic_id), jrandom.PRNGKey(100 + heuristic_id), obs)
+    assert_action_shape_and_legality(action, obs)
