@@ -13,6 +13,24 @@ VISIBLE_PATH: Color = (200, 200, 200)
 VISIBLE_MOUNTAIN: Color = (187, 187, 187)
 BLACK: Color = (0, 0, 0)
 WHITE: Color = (230, 230, 230)
+SELECTED_CELL: Color = (255, 214, 64)
+VALID_TARGET: Color = (46, 204, 113)
+
+
+def get_valid_target_cells(selected_cell: tuple[int, int] | None, mountains: np.ndarray) -> list[tuple[int, int]]:
+    """Return adjacent in-bounds, non-mountain targets for a selected source cell."""
+    if selected_cell is None:
+        return []
+
+    row, col = selected_cell
+    height, width = mountains.shape
+    targets = []
+    for row_delta, col_delta in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        target_row = row + row_delta
+        target_col = col + col_delta
+        if 0 <= target_row < height and 0 <= target_col < width and not bool(mountains[target_row, target_col]):
+            targets.append((target_row, target_col))
+    return targets
 
 
 class Renderer:
@@ -62,6 +80,7 @@ class Renderer:
             "time": pygame.Surface((self.right_panel_width / 2, height)),
             "speed": pygame.Surface((self.right_panel_width / 2, height)),
         }
+        self.game_status_panel = pygame.Surface((self.right_panel_width, height))
         # Game area and tiles
         self.game_area = pygame.Surface((self.display_grid_width, self.display_grid_height))
         self.tiles = [
@@ -167,8 +186,29 @@ class Renderer:
             pygame.draw.rect(self.info_panel[key], BLACK, rect_dim, 1)
 
             self.right_panel.blit(self.info_panel[key], (i * 2 * gui_cell_width, 3 * gui_cell_height))
+
+        if self.mode == GuiMode.GAME:
+            self.render_game_status(gui_cell_height)
         # Render right_panel on the screen
         self.screen.blit(self.right_panel, (self.display_grid_width, 0))
+
+    def render_game_status(self, gui_cell_height: int):
+        """Draw compact playable-mode interaction status."""
+        split_state = "On" if self.properties.split_enabled else "Off"
+        selected_cell = self.properties.selected_cell
+        selected_text = str(selected_cell) if selected_cell is not None else "-"
+        text = f"{self.properties.last_game_message} | Sel {selected_text} | Split {split_state}"
+
+        self.game_status_panel.fill(WHITE)
+        text_surface = self._debug_font.render(text, True, BLACK)
+        while text and text_surface.get_width() > self.game_status_panel.get_width() - 8:
+            text = text[:-4] + "..." if len(text) > 4 else text[:-1]
+            text_surface = self._debug_font.render(text, True, BLACK)
+        center = (self.game_status_panel.get_width() // 2, self.game_status_panel.get_height() // 2)
+        self.game_status_panel.blit(text_surface, text_surface.get_rect(center=center))
+        rect_dim = (0, 0, self.game_status_panel.get_width(), self.game_status_panel.get_height())
+        pygame.draw.rect(self.game_status_panel, BLACK, rect_dim, 1)
+        self.right_panel.blit(self.game_status_panel, (0, 4 * gui_cell_height))
 
     def render_grid(self):
         """
@@ -240,6 +280,8 @@ class Renderer:
         if self.properties.show_tile_types:
             self.draw_tile_types()
 
+        self.draw_game_selection_highlights()
+
         # Blit tiles to the self.game_area
         square_size = Dimension.SQUARE_SIZE.value
         for i, j in np.ndindex(self.grid_height, self.grid_width):
@@ -273,6 +315,25 @@ class Renderer:
         y_offset = (square_size - img_height) // 2
         for i, j in self.channel_to_indices(channel):
             self.tiles[i][j].blit(image, (x_offset, y_offset))
+
+    def draw_game_selection_highlights(self):
+        """Draw selected source and legal targets in playable mode."""
+        if self.mode != GuiMode.GAME:
+            return
+
+        selected_cell = self.properties.selected_cell
+        if selected_cell is None:
+            return
+
+        square_size = Dimension.SQUARE_SIZE.value
+        selected_row, selected_col = selected_cell
+        if 0 <= selected_row < self.grid_height and 0 <= selected_col < self.grid_width:
+            rect = (1, 1, square_size - 2, square_size - 2)
+            pygame.draw.rect(self.tiles[selected_row][selected_col], SELECTED_CELL, rect, 4)
+
+        for target_row, target_col in get_valid_target_cells(selected_cell, self.game.channels.mountains):
+            rect = (3, 3, square_size - 6, square_size - 6)
+            pygame.draw.rect(self.tiles[target_row][target_col], VALID_TARGET, rect, 3)
 
     def draw_tile_types(self):
         """
