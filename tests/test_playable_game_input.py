@@ -40,18 +40,24 @@ def test_click_source_then_adjacent_target_creates_move_action():
     handler.handle_mouse_event(mouse_event(0, 0))
     assert handler.command.action is None
     assert handler.command.selected_cell == (0, 0)
+    assert handler.properties.selected_cell == (0, 0)
+    assert handler.properties.last_game_message == "Selected: (0, 0)"
 
     handler.reset_command()
     handler.handle_mouse_event(mouse_event(0, 1))
 
     assert handler.command.action.tolist() == [0, 0, 0, 3, 0]
     assert handler.command.selected_cell is None
+    assert handler.properties.selected_cell is None
+    assert handler.properties.last_game_message == "Move queued"
 
 
 def test_split_toggle_applies_to_next_move():
     handler = make_handler(make_state())
 
     handler.handle_key_event(key_event(pygame.K_s))
+    assert handler.properties.split_enabled is True
+    assert handler.properties.last_game_message == "Split: On"
     handler.reset_command()
     handler.handle_mouse_event(mouse_event(0, 0))
     handler.reset_command()
@@ -65,6 +71,8 @@ def test_pass_and_cancel_commands_do_not_require_mouse_selection():
 
     handler.handle_key_event(key_event(pygame.K_p))
     assert handler.command.action.tolist() == [1, 0, 0, 0, 0]
+    assert handler.properties.selected_cell is None
+    assert handler.properties.last_game_message == "Pass queued"
 
     handler.reset_command()
     handler.handle_mouse_event(mouse_event(0, 0))
@@ -74,6 +82,8 @@ def test_pass_and_cancel_commands_do_not_require_mouse_selection():
     handler.handle_key_event(key_event(pygame.K_ESCAPE))
     assert handler.command.cancel_selection is True
     assert handler.command.selected_cell is None
+    assert handler.properties.selected_cell is None
+    assert handler.properties.last_game_message == "Canceled"
 
 
 def test_invalid_source_click_does_not_create_action():
@@ -83,3 +93,18 @@ def test_invalid_source_click_does_not_create_action():
 
     assert handler.command.action is None
     assert handler.command.selected_cell is None
+    assert handler.properties.selected_cell is None
+    assert handler.properties.last_game_message == "Invalid source"
+
+
+def test_invalid_target_keeps_source_selected_and_sets_message():
+    handler = make_handler(make_state())
+
+    handler.handle_mouse_event(mouse_event(0, 0))
+    handler.reset_command()
+    handler.handle_mouse_event(mouse_event(2, 2))
+
+    assert handler.command.action is None
+    assert handler.command.selected_cell == (0, 0)
+    assert handler.properties.selected_cell == (0, 0)
+    assert handler.properties.last_game_message == "Invalid target"

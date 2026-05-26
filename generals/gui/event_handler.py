@@ -177,8 +177,9 @@ class GameEventHandler(EventHandler):
     def __init__(self, properties: Properties):
         super().__init__(properties)
         self._command = GameCommand()
-        self._selected_cell: tuple[int, int] | None = None
-        self._split_next = False
+        self._selected_cell = properties.selected_cell
+        self._split_next = properties.split_enabled
+        self._sync_interaction_state()
 
     @property
     def command(self) -> GameCommand:
@@ -186,8 +187,7 @@ class GameEventHandler(EventHandler):
 
     def reset_command(self):
         self._command = GameCommand()
-        self._command.selected_cell = self._selected_cell
-        self._command.split_enabled = self._split_next
+        self._sync_interaction_state()
 
     def handle_key_event(self, event: Event) -> GameCommand:
         match event.key:
@@ -196,16 +196,20 @@ class GameEventHandler(EventHandler):
             case Keybindings.P.value:
                 self._selected_cell = None
                 self.command.action = create_action(to_pass=True)
+                self._sync_interaction_state("Pass queued")
             case Keybindings.S.value:
                 self._split_next = not self._split_next
+                self._sync_interaction_state(f"Split: {'On' if self._split_next else 'Off'}")
             case Keybindings.ESCAPE.value:
                 self._selected_cell = None
                 self.command.cancel_selection = True
+                self._sync_interaction_state("Canceled")
             case Keybindings.R.value:
                 self._selected_cell = None
                 self.command.restart = True
-        self.command.selected_cell = self._selected_cell
-        self.command.split_enabled = self._split_next
+                self._sync_interaction_state("Restart requested")
+            case _:
+                self._sync_interaction_state()
         return self.command
 
     def handle_mouse_event(self, event: Event) -> None:
@@ -217,8 +221,7 @@ class GameEventHandler(EventHandler):
         if event.button == 3:
             self._selected_cell = None
             self.command.cancel_selection = True
-            self.command.selected_cell = self._selected_cell
-            self.command.split_enabled = self._split_next
+            self._sync_interaction_state("Canceled")
             return
 
         if event.button != 1:
@@ -231,18 +234,20 @@ class GameEventHandler(EventHandler):
         if self._selected_cell is None:
             if self._is_valid_source(clicked_cell):
                 self._selected_cell = clicked_cell
+                self._sync_interaction_state(f"Selected: {clicked_cell}")
+            else:
+                self._sync_interaction_state("Invalid source")
         else:
             action = self._action_from_selection(self._selected_cell, clicked_cell)
             if action is not None:
                 self.command.action = action
                 self._selected_cell = None
+                self._sync_interaction_state("Move queued")
             elif self._is_valid_source(clicked_cell):
                 self._selected_cell = clicked_cell
+                self._sync_interaction_state(f"Selected: {clicked_cell}")
             else:
-                self._selected_cell = None
-
-        self.command.selected_cell = self._selected_cell
-        self.command.split_enabled = self._split_next
+                self._sync_interaction_state("Invalid target")
 
     def _cell_from_pos(self, x: int, y: int) -> tuple[int, int] | None:
         square_size = Dimension.SQUARE_SIZE.value
@@ -273,6 +278,14 @@ class GameEventHandler(EventHandler):
         if bool(self.properties.game.channels.mountains[target_row, target_col]):
             return None
         return create_action(row=row, col=col, direction=direction, to_split=self._split_next)
+
+    def _sync_interaction_state(self, message: str | None = None) -> None:
+        self.properties.selected_cell = self._selected_cell
+        self.properties.split_enabled = self._split_next
+        if message is not None:
+            self.properties.last_game_message = message
+        self.command.selected_cell = self.properties.selected_cell
+        self.command.split_enabled = self.properties.split_enabled
 
 
 class TrainEventHandler(EventHandler):
