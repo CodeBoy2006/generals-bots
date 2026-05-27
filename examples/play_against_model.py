@@ -157,14 +157,17 @@ def main() -> None:
             if not isinstance(command, GameCommand) or command.action is None:
                 continue
 
+            human_action = command.action
             key, action_key = jrandom.split(key)
             model_obs = game.get_observation(state, model_player)
             model_action = policy_agent.act(model_obs, action_key)
 
-            actions = [None, None]
-            actions[args.human_player] = command.action
-            actions[model_player] = model_action
-            state, info = game.step(state, jnp.stack(actions))
+            actions = (
+                jnp.stack((human_action, model_action))
+                if args.human_player == 0
+                else jnp.stack((model_action, human_action))
+            )
+            state, info = game.step(state, actions)
             game_adapter.update_from_state(state, info)
             step_count += 1
     finally:

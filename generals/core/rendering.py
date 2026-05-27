@@ -78,7 +78,7 @@ class JaxGameAdapter:
         self.channels = JaxChannelsAdapter(state, agents)
 
         # Grid dimensions
-        self.grid_dims = state.armies.shape
+        self.grid_dims: tuple[int, int] = (int(state.armies.shape[0]), int(state.armies.shape[1]))
 
         # General positions
         self.general_positions = {}
@@ -123,6 +123,7 @@ class JaxGameAdapter:
                 general_positions=jnp.array([self.general_positions[agent] for agent in self.agents]),
                 time=jnp.int32(self.time),
                 winner=jnp.int32(-1),
+                pool_idx=jnp.int32(0),
             )
             self._info = game.get_info(state)
 

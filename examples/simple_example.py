@@ -29,6 +29,7 @@ pool, state = env.reset(key)
 
 step_count = 0
 terminated = truncated = False
+final_timestep = None
 
 while not (terminated or truncated):
     # Get observations for both players
@@ -41,11 +42,14 @@ while not (terminated or truncated):
         agent_1.act(obs_1, k2),
     ])
 
-    timestep, state = env.step(state, actions, pool)
+    final_timestep, state = env.step(state, actions, pool)
 
-    terminated = bool(timestep.terminated)
-    truncated = bool(timestep.truncated)
+    terminated = bool(final_timestep.terminated)
+    truncated = bool(final_timestep.truncated)
     step_count += 1
 
-winner = timestep.info.winner
+if final_timestep is None:
+    raise RuntimeError("Game loop exited before any environment step ran.")
+
+winner = final_timestep.info.winner
 print(f"Game over! Winner: {winner}")
