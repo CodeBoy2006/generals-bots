@@ -153,3 +153,9 @@
 - **Status:** Completed
 - **Next Steps:** Restart the match with `./play-v5.command` so the first visible board is already clickable.
 - **Context:** Initial Generals states place each general at 1 army, while GUI source selection correctly requires `armies > 1`; without two opening pass turns, every first-frame click is rejected as an invalid source.
+
+## [2026-06-15 21:55] Automatic Playable Ticks
+- **Changes:** Added `--auto-tick` and `--tick-rate` to playable PPO matches, made `play-v5.command` auto-advance at 2 turns/sec, and covered tick timing/action selection with tests.
+- **Status:** Completed
+- **Next Steps:** Launch with `./play-v5.command`; idle human turns now pass automatically while selected-source targeting pauses auto-pass.
+- **Context:** Automatic ticks keep the board moving without requiring a human action every turn, while still letting manual clicks override the idle pass action.

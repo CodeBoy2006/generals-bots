@@ -1,7 +1,13 @@
 import jax.numpy as jnp
 import pytest
 
-from examples.play_against_model import advance_until_human_can_move, human_can_move, parse_args
+from examples.play_against_model import (
+    advance_until_human_can_move,
+    auto_tick_due,
+    choose_human_action,
+    human_can_move,
+    parse_args,
+)
 from generals.core import game
 
 
@@ -61,6 +67,18 @@ def test_parse_args_rejects_preview_top_k_above_range(monkeypatch):
         parse_with_args(monkeypatch, "--preview-top-k", "6")
 
 
+def test_parse_args_accepts_auto_tick_options(monkeypatch):
+    args = parse_with_args(monkeypatch, "--auto-tick", "--tick-rate", "2.5")
+
+    assert args.auto_tick is True
+    assert args.tick_rate == 2.5
+
+
+def test_parse_args_rejects_nonpositive_tick_rate(monkeypatch):
+    with pytest.raises(SystemExit):
+        parse_with_args(monkeypatch, "--tick-rate", "0")
+
+
 def test_advance_until_human_can_move_skips_initial_no_move_turns():
     grid = jnp.zeros((4, 4), dtype=jnp.int32)
     grid = grid.at[0, 0].set(1)
@@ -75,3 +93,18 @@ def test_advance_until_human_can_move_skips_initial_no_move_turns():
     assert int(warmed_state.time) == 2
     assert int(warmed_info.time) == 2
     assert human_can_move(warmed_state, human_player=0) is True
+
+
+def test_auto_tick_due_waits_for_interval_and_pauses_during_selection():
+    assert auto_tick_due(auto_tick=True, selected_cell=None, now=10.0, last_tick=9.4, tick_rate=2.0) is True
+    assert auto_tick_due(auto_tick=True, selected_cell=None, now=10.0, last_tick=9.8, tick_rate=2.0) is False
+    assert auto_tick_due(auto_tick=True, selected_cell=(1, 1), now=10.0, last_tick=9.4, tick_rate=2.0) is False
+    assert auto_tick_due(auto_tick=False, selected_cell=None, now=10.0, last_tick=9.4, tick_rate=2.0) is False
+
+
+def test_choose_human_action_passes_only_on_auto_tick():
+    manual_action = jnp.array([0, 2, 3, 1, 0], dtype=jnp.int32)
+
+    assert choose_human_action(manual_action, auto_tick_ready=True).tolist() == manual_action.tolist()
+    assert choose_human_action(None, auto_tick_ready=True).tolist() == [1, 0, 0, 0, 0]
+    assert choose_human_action(None, auto_tick_ready=False) is None

@@ -24,5 +24,7 @@ exec uv run --python 3.12 python examples/play_against_model.py "$model_path" \
   --policy-mode greedy \
   --human-player 0 \
   --fps 30 \
+  --auto-tick \
+  --tick-rate 2 \
   --preview-top-k 3 \
   "$@"

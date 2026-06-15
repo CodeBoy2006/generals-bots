@@ -116,6 +116,8 @@ uv run python examples/visualization_example.py
 `generals-ppo-8x8-expander-gpu-v5.eqx`，默认玩家为 player 0，PPO 为
 player 1，8x8 generated 地图，greedy 策略，并展示 Top-3 候选动作。
 开局会自动跳过双方都无法移动的初始 pass 回合，因此窗口第一帧即可点击自己的格子移动。
+脚本默认启用自动 tick，每秒推进 2 回合；如果你没有提交动作，人类回合会自动 pass。
+选中源格等待目标格时，自动 pass 会暂停，避免点目标前回合被跳过。
 macOS 下也可以在 Finder 中双击该脚本启动。若 checkpoint 不在仓库根目录，
 可设置 `MODEL_PATH=/path/to/model.eqx ./play-v5.command`。
 
@@ -126,6 +128,8 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
   --grid-size 8 \
   --map-generator generated \
   --policy-mode greedy \
+  --auto-tick \
+  --tick-rate 2 \
   --human-player 0 \
   --fps 30 \
   --preview-top-k 3
@@ -138,6 +142,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 - 右键或 `Esc` 取消选中，终局后按 `R` 重开，`Q` 退出。
 - 选中的源格会显示黄色边框，可移动目标格会显示绿色边框。
 - 右侧面板会显示当前选择、split 状态和最近一次点击结果。
+- `--auto-tick` 会在没有人类动作时自动 pass 并推进回合；`--tick-rate` 控制每秒自动推进次数。
 - 默认会在棋盘和右侧面板展示 PPO 模型下一步 Top-K 候选动作、概率和 value。
 - `--preview-top-k` 可设置展示 1-5 个候选，`--no-ai-preview` 可关闭预览。
 - `--policy-mode sample` 时预览显示的是采样分布，实际动作仍按概率抽样。

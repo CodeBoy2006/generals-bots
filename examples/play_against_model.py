@@ -51,6 +51,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="greedy")
     parser.add_argument("--human-player", type=int, choices=(0, 1), default=0)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--auto-tick",
+        action="store_true",
+        help="Advance turns automatically when no human action is queued.",
+    )
+    parser.add_argument(
+        "--tick-rate",
+        type=float,
+        default=2.0,
+        help="Automatic game turns per second when --auto-tick is set.",
+    )
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--show-tile-types", action="store_true")
@@ -72,6 +83,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--fps must be positive")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    if args.tick_rate <= 0:
+        parser.error("--tick-rate must be positive")
     if not (1 <= args.preview_top_k <= 5):
         parser.error("--preview-top-k must be between 1 and 5")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
@@ -125,6 +138,28 @@ def advance_until_human_can_move(
     return state, info, auto_passes
 
 
+def auto_tick_due(
+    auto_tick: bool,
+    selected_cell: tuple[int, int] | None,
+    now: float,
+    last_tick: float,
+    tick_rate: float,
+) -> bool:
+    """Return whether an idle human turn should be auto-passed now."""
+    if not auto_tick or selected_cell is not None:
+        return False
+    return now - last_tick >= 1.0 / tick_rate
+
+
+def choose_human_action(command_action: jnp.ndarray | None, auto_tick_ready: bool) -> jnp.ndarray | None:
+    """Use a queued human action, or pass when an automatic tick is due."""
+    if command_action is not None:
+        return command_action
+    if auto_tick_ready:
+        return create_action(to_pass=True)
+    return None
+
+
 def print_game_result(info: game.GameInfo, names: list[str], step_count: int, reached_limit: bool = False) -> None:
     if reached_limit and int(info.winner) < 0:
         print(f"Reached max steps ({step_count}) without a winner. Press R to restart or Q to quit.")
@@ -169,9 +204,12 @@ def main() -> None:
     print(f"Playing as player {args.human_player} on {args.grid_size}x{args.grid_size}.")
     if args.ai_preview:
         print(f"AI preview: showing top {args.preview_top_k} PPO candidate actions in the right panel.")
+    if args.auto_tick:
+        print(f"Auto tick: {args.tick_rate:g} turns/sec. Idle human turns pass automatically.")
 
     step_count = 0
     terminal_reported = False
+    last_tick = time.monotonic()
 
     try:
         while True:
@@ -192,6 +230,7 @@ def main() -> None:
                 game_adapter.update_from_state(state, info)
                 step_count = 0
                 terminal_reported = False
+                last_tick = time.monotonic()
                 print("Starting new game.")
                 continue
 
@@ -202,10 +241,21 @@ def main() -> None:
                 time.sleep(0.02)
                 continue
 
-            if not isinstance(command, GameCommand) or command.action is None:
+            if not isinstance(command, GameCommand):
                 continue
 
-            human_action = command.action
+            now = time.monotonic()
+            auto_ready = auto_tick_due(
+                args.auto_tick,
+                command.selected_cell,
+                now,
+                last_tick,
+                args.tick_rate,
+            )
+            human_action = choose_human_action(command.action, auto_ready)
+            if human_action is None:
+                continue
+
             key, action_key = jrandom.split(key)
             model_obs = game.get_observation(state, model_player)
             model_action = policy_agent.act(model_obs, action_key)
@@ -218,6 +268,7 @@ def main() -> None:
             state, info = game.step(state, actions)
             game_adapter.update_from_state(state, info)
             step_count += 1
+            last_tick = now
     finally:
         gui.close()
 
