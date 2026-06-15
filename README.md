@@ -153,6 +153,29 @@ uv run python examples/_experimental/ppo/train.py 64 \
   --model-path /tmp/generals-ppo-8x8-generated.eqx
 ```
 
+从已有 checkpoint 继续 PPO，并使用多 epoch/minibatch 更新：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 700 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --opponent expander \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v4.eqx \
+  --model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx
+```
+
 行为克隆 warm start：
 
 ```bash
@@ -170,14 +193,17 @@ uv run python examples/_experimental/ppo/behavior_clone.py 128 \
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-bc-8x8-soft.eqx \
+uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
   --num-games 2048 \
   --grid-size 8 \
   --map-generator generated \
   --max-steps 500 \
-  --opponent random \
-  --policy-mode sample
+  --opponent expander \
+  --policy-mode sample \
+  --policy-player 0
 ```
+
+使用 `--policy-player 1` 可做镜像座位评估，避免只测 player 0 带来的出生点偏差。
 
 ## 验证
 

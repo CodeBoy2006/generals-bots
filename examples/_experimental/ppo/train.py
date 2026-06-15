@@ -96,6 +96,18 @@ def make_initial_states(pool, num_envs):
     return states._replace(pool_idx=pool_idx)
 
 
+def load_or_create_network(key, grid_size, init_model_path=None):
+    """Create a policy network and optionally restore its leaves from a checkpoint."""
+    network = PolicyValueNetwork(key, grid_size=grid_size)
+    if init_model_path is None:
+        return network
+
+    path = Path(init_model_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Warm-start checkpoint not found: {path}")
+    return eqx.tree_deserialise_leaves(path, network)
+
+
 @eqx.filter_jit
 def rollout_step(states, pool, network, key, truncation, opponent_id):
     """Vectorized rollout step for all environments."""
@@ -223,11 +235,77 @@ def train_step(network, opt_state, batch, optimizer):
     return network, opt_state, loss
 
 
+@eqx.filter_jit
+def train_minibatch_step(network, opt_state, minibatch, optimizer):
+    """Single PPO update for an already-flattened minibatch."""
+    obs, masks, actions, old_logprobs, advantages, returns = minibatch
+
+    def loss_fn(net):
+        losses = jax.vmap(lambda o, m, a, olp, adv, r: ppo_loss(net, o, m, a, olp, adv, r))(
+            obs,
+            masks,
+            actions,
+            old_logprobs,
+            advantages,
+            returns,
+        )
+        return jnp.mean(losses)
+
+    loss, grads = eqx.filter_value_and_grad(loss_fn)(network)
+    params = eqx.filter(network, eqx.is_inexact_array)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    network = eqx.apply_updates(network, updates)
+
+    return network, opt_state, loss
+
+
+def flatten_training_batch(batch):
+    """Flatten rollout time/environment axes into a single PPO sample axis."""
+    obs, masks, actions, old_logprobs, advantages, returns = batch
+    batch_size = obs.shape[0] * obs.shape[1]
+    return (
+        obs.reshape(batch_size, *obs.shape[2:]),
+        masks.reshape(batch_size, *masks.shape[2:]),
+        actions.reshape(batch_size, -1),
+        old_logprobs.reshape(batch_size),
+        advantages.reshape(batch_size),
+        returns.reshape(batch_size),
+    )
+
+
+def train_epoch(network, opt_state, batch, optimizer, key, num_epochs=1, minibatch_size=None):
+    """Run one or more PPO epochs over a rollout batch with optional minibatching."""
+    flat_batch = flatten_training_batch(batch)
+    batch_size = flat_batch[0].shape[0]
+    actual_minibatch_size = batch_size if minibatch_size is None else min(minibatch_size, batch_size)
+    num_complete_batches = max(batch_size // actual_minibatch_size, 1)
+    avg_loss = 0.0
+
+    for _ in range(num_epochs):
+        key, permutation_key = jrandom.split(key)
+        permutation = jrandom.permutation(permutation_key, batch_size)
+        shuffled = tuple(x[permutation] for x in flat_batch)
+        epoch_loss = 0.0
+
+        for batch_idx in range(num_complete_batches):
+            start = batch_idx * actual_minibatch_size
+            end = start + actual_minibatch_size
+            minibatch = tuple(x[start:end] for x in shuffled)
+            network, opt_state, loss = train_minibatch_step(network, opt_state, minibatch, optimizer)
+            epoch_loss += loss
+
+        avg_loss = epoch_loss / num_complete_batches
+
+    return network, opt_state, avg_loss, key
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train the experimental raw-game JAX PPO agent.")
     parser.add_argument("num_envs", nargs="?", type=int, default=128, help="Number of parallel environments.")
     parser.add_argument("--num-steps", type=int, default=128, help="Rollout steps per PPO iteration.")
     parser.add_argument("--num-iterations", type=int, default=50, help="Number of PPO iterations.")
+    parser.add_argument("--num-epochs", type=int, default=1, help="PPO epochs per rollout batch.")
+    parser.add_argument("--minibatch-size", type=int, default=None, help="Minibatch size for PPO updates.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate.")
     parser.add_argument("--grid-size", type=int, default=4, help="Square map size used by the policy network.")
     parser.add_argument("--truncation", type=int, default=500, help="Maximum game steps before an auto-reset.")
@@ -257,7 +335,9 @@ def main():
     )
     parser.add_argument("--city-army-min", type=int, default=40, help="Generated city minimum starting army.")
     parser.add_argument("--city-army-max", type=int, default=51, help="Generated city maximum starting army.")
+    parser.add_argument("--init-model-path", default=None, help="Optional checkpoint to warm-start PPO from.")
     parser.add_argument("--model-path", default="jax_ppo_model.eqx", help="Path where the trained model is saved.")
+    parser.add_argument("--seed", type=int, default=42, help="Training PRNG seed.")
     args = parser.parse_args()
 
     num_envs = args.num_envs
@@ -279,6 +359,10 @@ def main():
         parser.error("city count must satisfy 2 <= min <= max")
     if not (args.city_army_min < args.city_army_max):
         parser.error("city army range must satisfy min < max")
+    if args.num_epochs <= 0:
+        parser.error("--num-epochs must be positive")
+    if args.minibatch_size is not None and args.minibatch_size <= 0:
+        parser.error("--minibatch-size must be positive when provided")
     
     print("JAX PPO (Raw Game API - Max Performance)")
     print(f"Environments:  {num_envs}")
@@ -290,12 +374,15 @@ def main():
         print(f"Cities:        {args.num_cities_min}-{args.num_cities_max}")
         print(f"General dist:  min={min_generals_distance}, max={args.max_generals_distance}")
     print(f"Reset pool:    {args.pool_size}")
+    print(f"PPO updates:   epochs={args.num_epochs}, minibatch={args.minibatch_size or num_envs * num_steps}")
+    if args.init_model_path is not None:
+        print(f"Warm start:    {args.init_model_path}")
     print()
     
     # Initialize
-    key = jrandom.PRNGKey(42)
+    key = jrandom.PRNGKey(args.seed)
     key, net_key = jrandom.split(key)
-    network = PolicyValueNetwork(net_key, grid_size=grid_size)
+    network = load_or_create_network(net_key, grid_size=grid_size, init_model_path=args.init_model_path)
     optimizer = optax.adam(lr)
     params = eqx.filter(network, eqx.is_inexact_array)
     opt_state = optimizer.init(params)
@@ -352,7 +439,16 @@ def main():
 
         # Train
         batch = (obs, masks, actions, logprobs, policy_advantages, returns)
-        network, opt_state, loss = train_step(network, opt_state, batch, optimizer)
+        key, update_key = jrandom.split(key)
+        network, opt_state, loss, key = train_epoch(
+            network,
+            opt_state,
+            batch,
+            optimizer,
+            update_key,
+            args.num_epochs,
+            args.minibatch_size,
+        )
         jax.block_until_ready(network)
         
         elapsed = time.time() - t0
