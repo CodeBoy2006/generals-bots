@@ -7,6 +7,7 @@ from examples._experimental.ppo.common import POLICY_INPUT_NAME_TO_ID, policy_ne
 from examples._experimental.ppo.evaluate_policy import evaluate_policy_opponent_batch, summarize_policy_results
 from examples._experimental.ppo.train import (
     apply_general_target_rewards,
+    apply_path_assignment_rewards,
     apply_terminal_reward,
     load_or_create_network,
     resolve_opponent_source,
@@ -193,6 +194,44 @@ def test_apply_general_target_rewards_adds_state_shaping_to_rollout_rewards():
         general_target_reward_scale=1.0,
         general_target_max_distance=8,
         general_target_min_army=2,
+    )
+
+    assert adjusted[0] > 0.0
+    assert adjusted[1] < 0.0
+
+
+def make_path_assignment_state(player_cell):
+    grid = jnp.zeros((5, 5), dtype=jnp.int32)
+    grid = grid.at[0, 0].set(1).at[2, 4].set(2)
+    grid = grid.at[0, 2].set(-2).at[1, 2].set(-2).at[2, 2].set(-2).at[3, 2].set(-2)
+    state = game.create_initial_state(grid)
+    row, col = player_cell
+    return state._replace(
+        armies=state.armies.at[0, 0].set(1).at[row, col].set(6),
+        ownership=state.ownership.at[0, row, col].set(True),
+        ownership_neutral=state.ownership_neutral.at[row, col].set(False),
+    )
+
+
+def test_apply_path_assignment_rewards_adds_shortest_path_shaping_to_rollout_rewards():
+    prior = make_path_assignment_state((2, 1))
+    closer = make_path_assignment_state((3, 1))
+    farther = make_path_assignment_state((2, 1))
+    prior_states = jax.tree.map(lambda a, b: jnp.stack([a, b]), prior, closer)
+    current_states = jax.tree.map(lambda a, b: jnp.stack([a, b]), closer, farther)
+    rewards = jnp.array([0.0, 0.0], dtype=jnp.float32)
+
+    adjusted = apply_path_assignment_rewards(
+        rewards,
+        prior_states,
+        current_states,
+        learner_player=0,
+        path_assignment_reward_scale=1.0,
+        path_assignment_max_distance=25,
+        path_assignment_min_army=2,
+        path_assignment_general_weight=1.0,
+        path_assignment_city_weight=0.0,
+        path_assignment_frontier_weight=0.0,
     )
 
     assert adjusted[0] > 0.0

@@ -20,7 +20,11 @@ import optax
 from generals.core.action import compute_valid_move_mask
 from generals.core import game
 from generals.core.grid import generate_grid
-from generals.core.rewards import composite_reward_fn, general_target_reward_fn
+from generals.core.rewards import (
+    composite_reward_fn,
+    general_target_reward_fn,
+    path_assignment_reward_fn,
+)
 
 from common import (
     OPPONENT_NAME_TO_ID,
@@ -229,6 +233,38 @@ def apply_general_target_rewards(
     return rewards + shaping
 
 
+def apply_path_assignment_rewards(
+    rewards,
+    prior_states,
+    states,
+    learner_player,
+    path_assignment_reward_scale,
+    path_assignment_max_distance,
+    path_assignment_min_army,
+    path_assignment_general_weight,
+    path_assignment_city_weight,
+    path_assignment_frontier_weight,
+):
+    """Add shortest-path target-assignment shaping for transport progress."""
+    if path_assignment_reward_scale <= 0.0:
+        return rewards
+
+    shaping = jax.vmap(
+        lambda prior_state, state: path_assignment_reward_fn(
+            prior_state,
+            state,
+            learner_player,
+            path_assignment_reward_scale,
+            path_assignment_max_distance,
+            path_assignment_min_army,
+            path_assignment_general_weight,
+            path_assignment_city_weight,
+            path_assignment_frontier_weight,
+        )
+    )(prior_states, states)
+    return rewards + shaping
+
+
 @eqx.filter_jit
 def rollout_step(
     states,
@@ -243,6 +279,12 @@ def rollout_step(
     general_target_reward_scale=0.0,
     general_target_max_distance=16,
     general_target_min_army=2,
+    path_assignment_reward_scale=0.0,
+    path_assignment_max_distance=64,
+    path_assignment_min_army=2,
+    path_assignment_general_weight=1.0,
+    path_assignment_city_weight=0.8,
+    path_assignment_frontier_weight=0.25,
 ):
     """Vectorized rollout step for all environments."""
     num_envs = states.armies.shape[0]
@@ -291,6 +333,18 @@ def rollout_step(
         general_target_max_distance,
         general_target_min_army,
     )
+    rewards = apply_path_assignment_rewards(
+        rewards,
+        states,
+        new_states,
+        learner_player,
+        path_assignment_reward_scale,
+        path_assignment_max_distance,
+        path_assignment_min_army,
+        path_assignment_general_weight,
+        path_assignment_city_weight,
+        path_assignment_frontier_weight,
+    )
     rewards = apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale)
     
     # Terminated/truncated
@@ -333,6 +387,12 @@ def rollout_step_policy_opponent(
     general_target_reward_scale=0.0,
     general_target_max_distance=16,
     general_target_min_army=2,
+    path_assignment_reward_scale=0.0,
+    path_assignment_max_distance=64,
+    path_assignment_min_army=2,
+    path_assignment_general_weight=1.0,
+    path_assignment_city_weight=0.8,
+    path_assignment_frontier_weight=0.25,
 ):
     """Vectorized rollout step against a frozen policy checkpoint opponent."""
     num_envs = states.armies.shape[0]
@@ -384,6 +444,18 @@ def rollout_step_policy_opponent(
         general_target_reward_scale,
         general_target_max_distance,
         general_target_min_army,
+    )
+    rewards = apply_path_assignment_rewards(
+        rewards,
+        states,
+        new_states,
+        learner_player,
+        path_assignment_reward_scale,
+        path_assignment_max_distance,
+        path_assignment_min_army,
+        path_assignment_general_weight,
+        path_assignment_city_weight,
+        path_assignment_frontier_weight,
     )
     rewards = apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale)
 
@@ -583,6 +655,42 @@ def main():
         help="Minimum army count for owned cells that count as pressure toward the opponent general.",
     )
     parser.add_argument(
+        "--path-assignment-reward-scale",
+        type=float,
+        default=0.0,
+        help="Optional shortest-path target-assignment shaping reward for transport progress.",
+    )
+    parser.add_argument(
+        "--path-assignment-max-distance",
+        type=int,
+        default=None,
+        help="Distance horizon for --path-assignment-reward-scale. Defaults to grid_size squared.",
+    )
+    parser.add_argument(
+        "--path-assignment-min-army",
+        type=int,
+        default=2,
+        help="Minimum army count for owned cells that receive path-assignment transport shaping.",
+    )
+    parser.add_argument(
+        "--path-assignment-general-weight",
+        type=float,
+        default=1.0,
+        help="Target-assignment weight for the enemy general shortest-path field.",
+    )
+    parser.add_argument(
+        "--path-assignment-city-weight",
+        type=float,
+        default=0.8,
+        help="Target-assignment weight for non-owned city shortest-path fields.",
+    )
+    parser.add_argument(
+        "--path-assignment-frontier-weight",
+        type=float,
+        default=0.25,
+        help="Target-assignment weight for nearest non-owned passable frontier cells.",
+    )
+    parser.add_argument(
         "--policy-input",
         choices=POLICY_INPUT_NAMES,
         default="observation",
@@ -690,6 +798,24 @@ def main():
     if args.general_target_min_army <= 0:
         parser.error("--general-target-min-army must be positive")
     general_target_max_distance = args.general_target_max_distance or max(1, 2 * (grid_size - 1))
+    if args.path_assignment_reward_scale < 0.0:
+        parser.error("--path-assignment-reward-scale must be non-negative")
+    if args.path_assignment_max_distance is not None and args.path_assignment_max_distance <= 0:
+        parser.error("--path-assignment-max-distance must be positive when provided")
+    if args.path_assignment_min_army <= 0:
+        parser.error("--path-assignment-min-army must be positive")
+    if args.path_assignment_general_weight < 0.0:
+        parser.error("--path-assignment-general-weight must be non-negative")
+    if args.path_assignment_city_weight < 0.0:
+        parser.error("--path-assignment-city-weight must be non-negative")
+    if args.path_assignment_frontier_weight < 0.0:
+        parser.error("--path-assignment-frontier-weight must be non-negative")
+    if (
+        args.path_assignment_reward_scale > 0.0
+        and args.path_assignment_general_weight + args.path_assignment_city_weight + args.path_assignment_frontier_weight <= 0.0
+    ):
+        parser.error("at least one path-assignment target weight must be positive when reward scale is enabled")
+    path_assignment_max_distance = args.path_assignment_max_distance or max(1, grid_size * grid_size)
     if args.input_channels is not None and args.input_channels <= 0:
         parser.error("--input-channels must be positive")
     if args.init_input_channels is not None and args.init_input_channels <= 0:
@@ -752,6 +878,14 @@ def main():
             "General target:"
             f" scale={args.general_target_reward_scale:g}, "
             f"max_dist={general_target_max_distance}, min_army={args.general_target_min_army}"
+        )
+    if args.path_assignment_reward_scale > 0.0:
+        print(
+            "Path assign:  "
+            f"scale={args.path_assignment_reward_scale:g}, max_dist={path_assignment_max_distance}, "
+            f"min_army={args.path_assignment_min_army}, "
+            f"weights=general:{args.path_assignment_general_weight:g}/"
+            f"city:{args.path_assignment_city_weight:g}/frontier:{args.path_assignment_frontier_weight:g}"
         )
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
@@ -816,6 +950,12 @@ def main():
                 args.general_target_reward_scale,
                 general_target_max_distance,
                 args.general_target_min_army,
+                args.path_assignment_reward_scale,
+                path_assignment_max_distance,
+                args.path_assignment_min_army,
+                args.path_assignment_general_weight,
+                args.path_assignment_city_weight,
+                args.path_assignment_frontier_weight,
             )
         else:
             active_opponent_network = network if opponent_source == "current" else opponent_network
@@ -834,6 +974,12 @@ def main():
                 args.general_target_reward_scale,
                 general_target_max_distance,
                 args.general_target_min_army,
+                args.path_assignment_reward_scale,
+                path_assignment_max_distance,
+                args.path_assignment_min_army,
+                args.path_assignment_general_weight,
+                args.path_assignment_city_weight,
+                args.path_assignment_frontier_weight,
             )
     jax.block_until_ready(states)
     
@@ -859,6 +1005,12 @@ def main():
                     args.general_target_reward_scale,
                     general_target_max_distance,
                     args.general_target_min_army,
+                    args.path_assignment_reward_scale,
+                    path_assignment_max_distance,
+                    args.path_assignment_min_army,
+                    args.path_assignment_general_weight,
+                    args.path_assignment_city_weight,
+                    args.path_assignment_frontier_weight,
                 )
             else:
                 active_opponent_network = network if opponent_source == "current" else opponent_network
@@ -877,6 +1029,12 @@ def main():
                     args.general_target_reward_scale,
                     general_target_max_distance,
                     args.general_target_min_army,
+                    args.path_assignment_reward_scale,
+                    path_assignment_max_distance,
+                    args.path_assignment_min_army,
+                    args.path_assignment_general_weight,
+                    args.path_assignment_city_weight,
+                    args.path_assignment_frontier_weight,
                 )
             rollout_data.append(data)
         jax.block_until_ready(states)

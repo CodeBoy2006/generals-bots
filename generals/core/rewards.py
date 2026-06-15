@@ -58,6 +58,113 @@ def general_target_reward_fn(
 
 
 @jax.jit
+def shortest_path_distance_map(
+    passable: jnp.ndarray,
+    targets: jnp.ndarray,
+) -> jnp.ndarray:
+    """Return cardinal shortest-path distances to the nearest target."""
+    unreachable = passable.size + 1
+    distances = jnp.where(passable & targets, 0, unreachable).astype(jnp.int32)
+
+    def relax(_, current):
+        padded = jnp.pad(current, 1, mode="constant", constant_values=unreachable)
+        neighbor_min = jnp.min(
+            jnp.stack(
+                [
+                    padded[:-2, 1:-1],
+                    padded[2:, 1:-1],
+                    padded[1:-1, :-2],
+                    padded[1:-1, 2:],
+                ]
+            ),
+            axis=0,
+        )
+        relaxed = jnp.minimum(current, neighbor_min + 1)
+        return jnp.where(passable, relaxed, unreachable)
+
+    return jax.lax.fori_loop(0, passable.size, relax, distances)
+
+
+@jax.jit
+def path_target_distance_cache(state: GameState, player: int) -> jnp.ndarray:
+    """Cache shortest-path distance maps for assignment target families."""
+    opponent = 1 - player
+    target = state.general_positions[opponent]
+    general_targets = jnp.zeros_like(state.passable).at[target[0], target[1]].set(True)
+    city_targets = state.cities & ~state.ownership[player] & state.passable
+    frontier_targets = ~state.ownership[player] & state.passable
+    return jnp.stack(
+        [
+            shortest_path_distance_map(state.passable, general_targets),
+            shortest_path_distance_map(state.passable, city_targets),
+            shortest_path_distance_map(state.passable, frontier_targets),
+        ]
+    )
+
+
+@jax.jit
+def path_assignment_potential(
+    state: GameState,
+    player: int,
+    max_distance: int = 64,
+    min_army: int = 2,
+    general_weight: float = 1.0,
+    city_weight: float = 0.8,
+    frontier_weight: float = 0.25,
+) -> jnp.ndarray:
+    """Return weighted transport potential from strong owned cells to assigned targets."""
+    distance_cache = path_target_distance_cache(state, player)
+    max_distance_f = jnp.maximum(jnp.asarray(max_distance, dtype=jnp.float32), 1.0)
+    scores = (max_distance_f - jnp.minimum(distance_cache.astype(jnp.float32), max_distance_f)) / max_distance_f
+    target_weights = jnp.asarray(
+        [general_weight, city_weight, frontier_weight],
+        dtype=jnp.float32,
+    ).reshape((3, 1, 1))
+    assigned_scores = jnp.max(scores * target_weights, axis=0)
+
+    eligible = state.ownership[player] & state.passable & (state.armies >= min_army)
+    army_weights = jnp.where(eligible, jnp.log1p(state.armies.astype(jnp.float32)), 0.0)
+    total_weight = jnp.sum(army_weights)
+    potential = jnp.sum(assigned_scores * army_weights) / jnp.maximum(total_weight, 1.0)
+    return jnp.where(total_weight > 0.0, potential, 0.0)
+
+
+@jax.jit
+def path_assignment_reward_fn(
+    prior_state: GameState,
+    state: GameState,
+    player: int,
+    scale: float = 0.0,
+    max_distance: int = 64,
+    min_army: int = 2,
+    general_weight: float = 1.0,
+    city_weight: float = 0.8,
+    frontier_weight: float = 0.25,
+) -> jnp.ndarray:
+    """Reward assigned transport progress along passable shortest paths."""
+    prior_potential = path_assignment_potential(
+        prior_state,
+        player,
+        max_distance,
+        min_army,
+        general_weight,
+        city_weight,
+        frontier_weight,
+    )
+    current_potential = path_assignment_potential(
+        state,
+        player,
+        max_distance,
+        min_army,
+        general_weight,
+        city_weight,
+        frontier_weight,
+    )
+    active = (prior_state.winner < 0) & (state.winner < 0)
+    return jnp.where(active, scale * (current_potential - prior_potential), 0.0)
+
+
+@jax.jit
 def calculate_army_size(castles: jnp.ndarray, ownership: jnp.ndarray) -> jnp.ndarray:
     """Calculate total army size in castles (cities/generals) owned by the player."""
     return jnp.sum(castles * ownership).astype(jnp.float32)

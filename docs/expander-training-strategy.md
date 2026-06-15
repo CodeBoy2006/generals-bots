@@ -708,12 +708,133 @@ player 1, seed 26521:
 
 结论：general-target shaping 让 player 0 的 draw rate 从 prior best 的 `9.08%` 降到 `7.32%`，平均终局时间从 `289.8` 降到 `285.9`，说明策略更偏进攻；但总胜率没有超过 v5，也没有超过 prior best。它可以作为攻击性调节旋钮继续研究，但不能替代当前最佳胜率候选。
 
+新增 path-assignment shaping 后，`train.py` 可以在 reward 计算内部缓存 shortest-path 距离场，而不修改 `GameState` 结构：
+
+- enemy general distance map：所有 passable cell 到敌方 general 的最短路距离。
+- non-owned city distance map：所有 passable cell 到中立/敌方城市的最短路距离。
+- frontier distance map：所有 passable cell 到最近非己方 passable cell 的最短路距离。
+
+每个满足 `--path-assignment-min-army` 的己方强兵格都会在这三类目标中选择加权势能最高的一类，作为该兵团当前的分配目标：
+
+```text
+path_assignment_reward = scale * (assigned_potential_after - assigned_potential_before)
+```
+
+这比 Manhattan general-target 更适合绕山运兵：如果最短路需要先远离敌方 general 才能绕到缺口，path-assignment 会给正奖励；原 Manhattan 势能会给负奖励。默认 scale 为 `0.0`，不改变旧训练。
+
+从 v5 开始训练 full target-assignment 候选：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 500 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --truncation 500 \
+  --policy-input augmented-full-state \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 2.0 \
+  --path-assignment-reward-scale 0.2 \
+  --path-assignment-min-army 2 \
+  --path-assignment-general-weight 1.0 \
+  --path-assignment-city-weight 0.8 \
+  --path-assignment-frontier-weight 0.25 \
+  --model-path /tmp/generals-ppo-8x8-path-assignment-p0-v1.eqx \
+  --seed 26610
+```
+
+该 full 版本降低 draw rate，但 player 0 强度下降，说明 frontier 目标会把运兵奖励拉向局部扩张：
+
+```text
+/tmp/generals-ppo-8x8-path-assignment-p0-v1.eqx, player 0, seed 26620:
+  candidate wins/losses/draws = 464/484/76
+  same-seed v5 baseline       = 491/437/96
+
+player 1, seed 26621:
+  candidate wins/losses/draws = 451/488/85
+  same-seed v5 baseline       = 439/464/121
+```
+
+随后训练更保守的 general+city 版本，关闭 frontier 目标并降低 scale：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 500 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --truncation 500 \
+  --policy-input augmented-full-state \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 2.0 \
+  --path-assignment-reward-scale 0.12 \
+  --path-assignment-min-army 2 \
+  --path-assignment-general-weight 1.0 \
+  --path-assignment-city-weight 0.8 \
+  --path-assignment-frontier-weight 0.0 \
+  --model-path /tmp/generals-ppo-8x8-path-assignment-p0-v2.eqx \
+  --seed 26630
+```
+
+同 seed 评估结果：
+
+```text
+/tmp/generals-ppo-8x8-path-assignment-p0-v2.eqx, player 0, seed 26620:
+  candidate wins/losses/draws = 458/465/101
+  same-seed v5 baseline       = 491/437/96
+
+player 1, seed 26621:
+  candidate wins/losses/draws = 462/473/89
+  same-seed v5 baseline       = 439/464/121
+```
+
+最后用同一 general+city 配置训练 learner-player 1：
+
+```text
+/tmp/generals-ppo-8x8-path-assignment-p1-v1.eqx, player 1, seed 26621:
+  candidate wins/losses/draws = 432/490/102
+  same-seed v5 baseline       = 439/464/121
+
+player 0, seed 26620:
+  candidate wins/losses/draws = 437/481/106
+  same-seed v5 baseline       = 491/437/96
+```
+
+结论：path-assignment shaping 能表达“沿真实最短路运兵”和“为不同兵团选择 general/city/frontier 目标”，也能降低部分 draw rate；但直接作为 PPO reward 时仍会引入错误局部目标，尤其是 frontier 权重。本轮最佳可观察信号是 p0-v2 作为 player 1 的总胜率从同 seed v5 baseline 的 `42.87%` 到 `45.12%`，但它没有在 player 0 或 decisive win rate 上形成稳定优势，不能作为新 best checkpoint。
+
 因此，当前 PPO best-response 结论是：
 
 - 18 通道输入能被 PPO 训练链路正常使用。
 - 从 v5 warm start 后，普通终局奖励只产生 2-5 个百分点级别的 seat-dependent 波动。
 - 更强 terminal reward 会加速策略崩坏，而不是学出 best response。
 - general-target shaping 会降低 draw rate/终局时间，但本次没有提升总胜率。
+- path-assignment shaping 能减少路径盲区，但目标权重必须谨慎；frontier 目标容易把奖励拉向局部扩张。
 - expanded-64 容量没有改善 PPO 吸收 hidden-state 信息的能力。
 
 #### 高 margin search 蒸馏中止记录
