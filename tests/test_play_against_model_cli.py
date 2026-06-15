@@ -119,6 +119,22 @@ def test_parse_args_accepts_model_1_alias_for_opponent(monkeypatch):
     assert args.opponent_model_path == "p1.eqx"
 
 
+def test_parse_args_defaults_machine_policy_inputs_to_auto(monkeypatch):
+    args = parse_raw_args(
+        monkeypatch,
+        "--machine-vs-machine",
+        "--model-0-path",
+        "generals-ppo-8x8-path-assignment-p0-v2.eqx",
+        "--model-1-path",
+        "generals-ppo-8x8-expander-gpu-v5.eqx",
+    )
+
+    assert args.model_0_policy_input == "auto"
+    assert args.model_1_policy_input == "auto"
+    assert args.model_0_input_channels is None
+    assert args.model_1_input_channels is None
+
+
 def test_parse_args_accepts_separate_machine_policy_inputs(monkeypatch):
     args = parse_raw_args(
         monkeypatch,

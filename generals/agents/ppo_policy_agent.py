@@ -20,9 +20,11 @@ from .agent import Agent
 
 PolicyMode = Literal["greedy", "sample"]
 PolicyInput = Literal["observation", "full-state", "augmented-full-state"]
+PolicyInputOption = PolicyInput | Literal["auto"]
 PolicyChannels = tuple[int, int, int, int]
 DEFAULT_POLICY_CHANNELS: PolicyChannels = (32, 32, 32, 16)
 POLICY_INPUT_NAMES: tuple[PolicyInput, ...] = ("observation", "full-state", "augmented-full-state")
+POLICY_INPUT_CHOICES: tuple[PolicyInputOption, ...] = ("auto",) + POLICY_INPUT_NAMES
 POLICY_INPUT_NAME_TO_ID = {name: idx for idx, name in enumerate(POLICY_INPUT_NAMES)}
 
 _DIRECTION_TARGETS = {
@@ -401,6 +403,37 @@ def load_policy_network(
         ) from exc
 
 
+def load_policy_network_auto(
+    model_path: str | Path,
+    grid_size: int,
+    key: jnp.ndarray | None = None,
+    channels: str | PolicyChannels | list[int] | None = None,
+) -> tuple[PolicyValueNetwork, PolicyInput, int]:
+    """Load a checkpoint by trying supported input-channel layouts."""
+    path = Path(model_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Model file not found: {path}")
+    if grid_size < 4:
+        raise ValueError("grid_size must be at least 4")
+
+    parsed_channels = parse_policy_channels(channels)
+    failures: list[Exception] = []
+    for policy_input, input_channels in (("observation", 9), ("augmented-full-state", 18)):
+        try:
+            network = load_policy_network(
+                path,
+                grid_size,
+                key=key,
+                channels=parsed_channels,
+                input_channels=input_channels,
+            )
+            return network, policy_input, input_channels
+        except ValueError as exc:
+            failures.append(exc)
+
+    raise ValueError(f"Failed to auto-detect PPO checkpoint input layout: {model_path}") from failures[0]
+
+
 class PPOPolicyAgent(Agent):
     """Agent wrapper for trained PPO .eqx checkpoints."""
 
@@ -411,7 +444,7 @@ class PPOPolicyAgent(Agent):
         policy_mode: PolicyMode = "greedy",
         agent_id: str = "PPO",
         channels: str | PolicyChannels | list[int] | None = None,
-        policy_input: PolicyInput = "observation",
+        policy_input: PolicyInputOption = "auto",
         input_channels: int | None = None,
         **kwargs: str,
     ):
@@ -426,29 +459,52 @@ class PPOPolicyAgent(Agent):
         super().__init__(agent_id)
         if policy_mode not in ("greedy", "sample"):
             raise ValueError("policy_mode must be 'greedy' or 'sample'")
-        if policy_input not in POLICY_INPUT_NAMES:
-            raise ValueError(f"policy_input must be one of {POLICY_INPUT_NAMES}")
-        expected_input_channels = policy_input_default_channels(policy_input)
-        if input_channels is None:
-            input_channels = expected_input_channels
-        if input_channels <= 0:
-            raise ValueError("input_channels must be positive")
-        if input_channels != expected_input_channels:
-            raise ValueError(
-                f"policy_input={policy_input!r} produces {expected_input_channels} input channels, "
-                f"got input_channels={input_channels}"
-            )
         self.grid_size = grid_size
         self.policy_mode: PolicyMode = policy_mode
-        self.policy_input: PolicyInput = policy_input
-        self.input_channels = input_channels
         self.channels = parse_policy_channels(channels)
-        self.network = load_policy_network(
-            model_path,
-            grid_size,
-            channels=self.channels,
-            input_channels=self.input_channels,
-        )
+        if policy_input == "auto":
+            if input_channels is None:
+                self.network, self.policy_input, self.input_channels = load_policy_network_auto(
+                    model_path,
+                    grid_size,
+                    channels=self.channels,
+                )
+            else:
+                if input_channels == 9:
+                    policy_input = "observation"
+                elif input_channels == 18:
+                    policy_input = "augmented-full-state"
+                else:
+                    raise ValueError("policy_input='auto' only supports 9 or 18 input channels")
+                self.policy_input = policy_input
+                self.input_channels = input_channels
+                self.network = load_policy_network(
+                    model_path,
+                    grid_size,
+                    channels=self.channels,
+                    input_channels=self.input_channels,
+                )
+        else:
+            if policy_input not in POLICY_INPUT_NAMES:
+                raise ValueError(f"policy_input must be one of {POLICY_INPUT_CHOICES}")
+            expected_input_channels = policy_input_default_channels(policy_input)
+            if input_channels is None:
+                input_channels = expected_input_channels
+            if input_channels <= 0:
+                raise ValueError("input_channels must be positive")
+            if input_channels != expected_input_channels:
+                raise ValueError(
+                    f"policy_input={policy_input!r} produces {expected_input_channels} input channels, "
+                    f"got input_channels={input_channels}"
+                )
+            self.policy_input: PolicyInput = policy_input
+            self.input_channels = input_channels
+            self.network = load_policy_network(
+                model_path,
+                grid_size,
+                channels=self.channels,
+                input_channels=self.input_channels,
+            )
 
     def _validate_grid_shape(self, shape: tuple[int, ...]) -> None:
         if shape != (self.grid_size, self.grid_size):

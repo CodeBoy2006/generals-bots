@@ -5,25 +5,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
 
 model_path="${MODEL_PATH:-generals-ppo-8x8-expander-gpu-v5.eqx}"
-
-infer_policy_input() {
-  local model_path="$1"
-  local model_name
-  model_name="$(basename -- "$model_path")"
-  case "$model_name" in
-    *augmented*)
-      printf '%s\n' "augmented-full-state"
-      ;;
-    *full-state*)
-      printf '%s\n' "full-state"
-      ;;
-    *)
-      printf '%s\n' "observation"
-      ;;
-  esac
-}
-
-policy_input="${POLICY_INPUT:-$(infer_policy_input "$model_path")}"
+policy_input="${POLICY_INPUT:-auto}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required to start the Generals PPO match." >&2

@@ -6,26 +6,8 @@ cd "$script_dir"
 
 model_0_path="${MODEL_0_PATH:-${MODEL_PATH:-generals-ppo-8x8-expander-gpu-v5.eqx}}"
 model_1_path="${MODEL_1_PATH:-${OPPONENT_MODEL_PATH:-$model_0_path}}"
-
-infer_policy_input() {
-  local model_path="$1"
-  local model_name
-  model_name="$(basename -- "$model_path")"
-  case "$model_name" in
-    *augmented*)
-      printf '%s\n' "augmented-full-state"
-      ;;
-    *full-state*)
-      printf '%s\n' "full-state"
-      ;;
-    *)
-      printf '%s\n' "observation"
-      ;;
-  esac
-}
-
-model_0_policy_input="${MODEL_0_POLICY_INPUT:-${POLICY_INPUT:-$(infer_policy_input "$model_0_path")}}"
-model_1_policy_input="${MODEL_1_POLICY_INPUT:-${OPPONENT_POLICY_INPUT:-$(infer_policy_input "$model_1_path")}}"
+model_0_policy_input="${MODEL_0_POLICY_INPUT:-${POLICY_INPUT:-auto}}"
+model_1_policy_input="${MODEL_1_POLICY_INPUT:-${OPPONENT_POLICY_INPUT:-auto}}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required to start the Generals PPO watch match." >&2

@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from generals.agents import PPOPolicyAgent
-from generals.agents.ppo_policy_agent import POLICY_INPUT_NAMES, PolicyPreview, policy_input_default_channels
+from generals.agents.ppo_policy_agent import POLICY_INPUT_CHOICES, PolicyPreview, policy_input_default_channels
 from generals.core import game
 from generals.core.action import compute_valid_move_mask, create_action
 from generals.core.game import create_initial_state
@@ -61,6 +61,15 @@ def resolve_alias(parser: argparse.ArgumentParser, primary_name: str, primary, a
     return default
 
 
+def resolve_input_channels(policy_input: str, input_channels: int | None) -> int | None:
+    """Resolve explicit input channels, leaving auto-detected inputs unset."""
+    if input_channels is not None:
+        return input_channels
+    if policy_input == "auto":
+        return None
+    return policy_input_default_channels(policy_input)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play a local Generals game against a trained PPO checkpoint.")
     parser.add_argument("model_path", nargs="?", help="Primary saved Equinox .eqx PPO checkpoint.")
@@ -71,19 +80,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="sample")
     parser.add_argument(
         "--policy-input",
-        choices=POLICY_INPUT_NAMES,
+        choices=POLICY_INPUT_CHOICES,
         default=None,
         help="Input encoding for the primary PPO checkpoint.",
     )
     parser.add_argument(
         "--model-0-policy-input",
-        choices=POLICY_INPUT_NAMES,
+        choices=POLICY_INPUT_CHOICES,
         default=None,
         help="Input encoding for player 0 in machine-vs-machine mode.",
     )
     parser.add_argument(
         "--model-1-policy-input",
-        choices=POLICY_INPUT_NAMES,
+        choices=POLICY_INPUT_CHOICES,
         default=None,
         help="Input encoding for player 1 in machine-vs-machine mode.",
     )
@@ -99,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opponent-policy-mode", choices=("greedy", "sample"), default=None)
     parser.add_argument(
         "--opponent-policy-input",
-        choices=POLICY_INPUT_NAMES,
+        choices=POLICY_INPUT_CHOICES,
         default=None,
         help="Input encoding for the second PPO checkpoint.",
     )
@@ -181,7 +190,7 @@ def parse_args() -> argparse.Namespace:
         args.model_0_policy_input,
         "--policy-input",
         args.policy_input,
-        "observation",
+        "auto",
     )
     explicit_model_1_policy_input = resolve_alias(
         parser,
@@ -193,7 +202,7 @@ def parse_args() -> argparse.Namespace:
     )
     args.model_1_policy_input = explicit_model_1_policy_input
     if args.model_1_policy_input is None:
-        args.model_1_policy_input = "observation" if args.opponent_model_path is not None else args.model_0_policy_input
+        args.model_1_policy_input = "auto" if args.opponent_model_path is not None else args.model_0_policy_input
 
     args.model_0_input_channels = resolve_alias(
         parser,
@@ -203,8 +212,7 @@ def parse_args() -> argparse.Namespace:
         args.input_channels,
         None,
     )
-    if args.model_0_input_channels is None:
-        args.model_0_input_channels = policy_input_default_channels(args.model_0_policy_input)
+    args.model_0_input_channels = resolve_input_channels(args.model_0_policy_input, args.model_0_input_channels)
 
     explicit_model_1_input_channels = resolve_alias(
         parser,
@@ -216,11 +224,10 @@ def parse_args() -> argparse.Namespace:
     )
     args.model_1_input_channels = explicit_model_1_input_channels
     if args.model_1_input_channels is None:
-        args.model_1_input_channels = (
-            args.model_0_input_channels
-            if args.opponent_model_path is None and explicit_model_1_policy_input is None
-            else policy_input_default_channels(args.model_1_policy_input)
-        )
+        if args.opponent_model_path is None and explicit_model_1_policy_input is None:
+            args.model_1_input_channels = args.model_0_input_channels
+        else:
+            args.model_1_input_channels = resolve_input_channels(args.model_1_policy_input, None)
 
     args.effective_min_generals_distance = args.min_generals_distance
     if args.effective_min_generals_distance is None:

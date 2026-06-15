@@ -66,6 +66,26 @@ def test_ppo_policy_agent_loads_augmented_full_state_checkpoint_and_returns_acti
     assert preview.policy_mode == "sample"
 
 
+def test_ppo_policy_agent_auto_detects_augmented_full_state_checkpoint(tmp_path):
+    agent = PPOPolicyAgent(make_checkpoint(tmp_path, input_channels=18), grid_size=4, policy_mode="sample")
+
+    action = agent.act_for_state(make_state(), player=0, key=jrandom.PRNGKey(1))
+
+    assert agent.policy_input == "augmented-full-state"
+    assert agent.input_channels == 18
+    assert action.shape == (5,)
+
+
+def test_ppo_policy_agent_auto_detects_observation_checkpoint(tmp_path):
+    agent = PPOPolicyAgent(make_checkpoint(tmp_path), grid_size=4, policy_mode="greedy")
+
+    action = agent.act(make_observation(), jrandom.PRNGKey(1))
+
+    assert agent.policy_input == "observation"
+    assert agent.input_channels == 9
+    assert action.shape == (5,)
+
+
 def test_ppo_policy_agent_rejects_observation_size_mismatch(tmp_path):
     agent = PPOPolicyAgent(make_checkpoint(tmp_path), grid_size=4, policy_mode="greedy")
     grid = jnp.zeros((5, 5), dtype=jnp.int32)
