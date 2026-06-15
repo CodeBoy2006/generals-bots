@@ -56,7 +56,7 @@ def score_observation(
 
 
 @eqx.filter_jit
-def rollout_search_action(
+def rollout_search_candidates(
     network,
     state,
     key,
@@ -69,7 +69,7 @@ def rollout_search_action(
     land_weight,
     prior_weight,
 ):
-    """Choose one action by scoring top-k policy-prior actions with short rollouts."""
+    """Return top-k policy-prior candidates and their rollout-search scores."""
     obs = game.get_observation(state, player)
     obs_arr = obs_to_array(obs)
     mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
@@ -120,6 +120,37 @@ def rollout_search_action(
 
     candidate_keys = jrandom.split(key, top_k)
     scores = jax.vmap(candidate_score)(candidate_actions, prior_scores, candidate_keys)
+    return candidate_actions, candidate_indices, prior_scores, scores
+
+
+@eqx.filter_jit
+def rollout_search_action(
+    network,
+    state,
+    key,
+    player,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    policy_mode,
+    army_weight,
+    land_weight,
+    prior_weight,
+):
+    """Choose one action by scoring top-k policy-prior actions with short rollouts."""
+    candidate_actions, _, _, scores = rollout_search_candidates(
+        network,
+        state,
+        key,
+        player,
+        top_k,
+        rollout_steps,
+        rollouts_per_action,
+        policy_mode,
+        army_weight,
+        land_weight,
+        prior_weight,
+    )
     return candidate_actions[jnp.argmax(scores)]
 
 

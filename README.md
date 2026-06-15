@@ -255,6 +255,24 @@ uv run python examples/_experimental/ppo/search_policy.py /tmp/generals-ppo-8x8-
 
 该脚本不训练新 checkpoint；它把 checkpoint 作为 policy prior，并对 top-k 候选动作做短 rollout 评分，可作为强评估策略或后续蒸馏 teacher。
 
+保守 rollout-search 蒸馏：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
+  --base-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --num-steps 64 \
+  --num-iterations 80 \
+  --min-margin 1 \
+  --margin-scale 4 \
+  --improve-weight 0.02 \
+  --kl-weight 1.0 \
+  --lr 0.000001 \
+  --model-path /tmp/generals-ppo-8x8-conservative-search.eqx
+```
+
+该脚本用固定 base checkpoint 做 rollout-search teacher，并用 KL 约束学生贴近 base。只有当 search 最优动作明显优于 base 的 top-prior 动作时，才加入小权重动作监督。它适合继续研究 search distillation，不应把训练 loss 当成棋力指标；仍需用 `evaluate_policy.py --opponent-policy-path` 独立评估。
+
 行为克隆 warm start：
 
 ```bash

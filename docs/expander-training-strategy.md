@@ -346,6 +346,60 @@ rollout-search as player 1 vs v5 sample, seed 19193:
 
 结论：rollout-search 已经让“v5 + 强辅助推理”稳定超过当前 v5 checkpoint 的 80% 总胜率，但目前还没有成功把该行为压缩回现有 42k 参数 checkpoint。继续训练纯 checkpoint 时，应把 search policy 作为 teacher，同时考虑更大网络、更多输入通道、DAgger 数据混合或训练时保留 search distillation 的 KL/temperature 控制。
 
+### 保守 rollout-search 蒸馏
+
+`examples/_experimental/ppo/conservative_search_distill.py` 是当前推荐的 search-teacher 训练入口。它与直接交叉熵蒸馏不同：
+
+- 固定 `--base-model-path` 作为 rollout-search teacher 和 KL anchor。
+- 学生从 `--init-model-path` warm start；省略时默认从 base checkpoint 开始。
+- 每个学生状态只对 base policy top-k 候选动作做短 rollout 评分。
+- 只有当 search 最优动作不是 base 的 top-prior 动作，且分数差超过 `--min-margin` 时，才加入动作监督。
+- 总 loss 为 `kl_weight * KL(base || student) + improve_weight * weighted CE(search_action)`。
+
+基础命令：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
+  --base-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --num-steps 64 \
+  --num-iterations 80 \
+  --minibatch-size 8192 \
+  --min-margin 1 \
+  --margin-scale 4 \
+  --improve-weight 0.02 \
+  --kl-weight 1.0 \
+  --lr 0.000001 \
+  --model-path /tmp/generals-ppo-8x8-conservative-search.eqx \
+  --seed 23020
+```
+
+本轮实测结论：
+
+```text
+/tmp/generals-ppo-8x8-conservative-search-v2.eqx, player 0, seed 23120:
+  candidate wins/losses/draws = 444/472/108
+  same-seed v5 baseline       = 445/484/95
+
+/tmp/generals-ppo-8x8-conservative-search-v2.eqx, player 1, seed 23121:
+  candidate wins/losses/draws = 436/491/97
+  same-seed v5 baseline       = 422/499/103
+```
+
+expanded-64 学生加更强 KL 也没有产生显著提升：
+
+```text
+/tmp/generals-ppo-8x8-expanded64-conservative-search-v1.eqx, player 0, seed 23130:
+  candidate wins/losses/draws = 442/485/97
+  same-seed v5 baseline       = 439/490/95
+
+player 1, seed 23131:
+  candidate wins/losses/draws = 459/471/94
+  same-seed v5 baseline       = 468/462/94
+```
+
+因此，保守蒸馏能力已经可复用，但当前结果仍只是“接近保持 v5”，没有把 rollout-search 的 80%+ 胜率压缩进纯 `.eqx` checkpoint。下一步更有希望的方向是训练显式 Q/value-improvement head、在网络输入中加入 rollout/search 特征，或把 search 保留为评测/实战时的规划模块，而不是继续只做动作分类蒸馏。
+
 ### 容量扩展实验
 
 训练和评估入口现在支持非默认网络容量：

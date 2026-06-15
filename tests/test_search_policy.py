@@ -1,6 +1,9 @@
 import jax.numpy as jnp
+import jax.random as jrandom
 
-from examples._experimental.ppo.search_policy import score_observation
+from examples._experimental.ppo.search_policy import rollout_search_action, rollout_search_candidates, score_observation
+from generals.agents.ppo_policy_agent import PolicyValueNetwork
+from generals.core import game
 from generals.core.game import GameInfo
 from generals.core.observation import Observation
 
@@ -45,3 +48,43 @@ def test_score_observation_prefers_wins_and_material_advantage():
     assert material > neutral
     assert win > material
     assert loss < neutral
+
+
+def test_rollout_search_candidates_return_scored_policy_prior_actions():
+    network = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=4)
+    grid = jnp.zeros((4, 4), dtype=jnp.int32).at[0, 0].set(1).at[3, 3].set(2)
+    state = game.create_initial_state(grid)
+    state = state._replace(armies=state.armies.at[0, 0].set(6))
+
+    actions, indices, prior_scores, search_scores = rollout_search_candidates(
+        network,
+        state,
+        jrandom.PRNGKey(1),
+        0,
+        2,
+        1,
+        1,
+        1,
+        12.0,
+        8.0,
+        0.01,
+    )
+    chosen = rollout_search_action(
+        network,
+        state,
+        jrandom.PRNGKey(1),
+        0,
+        2,
+        1,
+        1,
+        1,
+        12.0,
+        8.0,
+        0.01,
+    )
+
+    assert actions.shape == (2, 5)
+    assert indices.shape == (2,)
+    assert prior_scores.shape == (2,)
+    assert search_scores.shape == (2,)
+    assert jnp.array_equal(chosen, actions[jnp.argmax(search_scores)])
