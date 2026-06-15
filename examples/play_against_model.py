@@ -51,7 +51,9 @@ def make_grid(args: argparse.Namespace, key: jnp.ndarray) -> jnp.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play a local Generals game against a trained PPO checkpoint.")
-    parser.add_argument("model_path", help="Path to a saved Equinox .eqx PPO checkpoint.")
+    parser.add_argument("model_path", nargs="?", help="Primary saved Equinox .eqx PPO checkpoint.")
+    parser.add_argument("--model-0-path", default=None, help="PPO checkpoint for player 0.")
+    parser.add_argument("--model-1-path", default=None, help="PPO checkpoint for player 1 in machine-vs-machine mode.")
     parser.add_argument("--grid-size", type=int, default=8, help="Square map size used by the saved model.")
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="sample")
@@ -111,6 +113,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--min-generals-distance must be >= 1")
     if args.max_generals_distance is not None and args.max_generals_distance < 1:
         parser.error("--max-generals-distance must be >= 1")
+    if args.model_path is None and args.model_0_path is None:
+        parser.error("model_path or --model-0-path is required")
+    if args.model_path is not None and args.model_0_path is not None and args.model_path != args.model_0_path:
+        parser.error("pass either positional model_path or --model-0-path for player 0, not both")
+    if (
+        args.opponent_model_path is not None
+        and args.model_1_path is not None
+        and args.opponent_model_path != args.model_1_path
+    ):
+        parser.error("pass either --opponent-model-path or --model-1-path for player 1, not both")
+
+    args.model_path = args.model_0_path or args.model_path
+    args.opponent_model_path = args.model_1_path or args.opponent_model_path
 
     args.effective_min_generals_distance = args.min_generals_distance
     if args.effective_min_generals_distance is None:

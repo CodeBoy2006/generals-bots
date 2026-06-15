@@ -128,12 +128,21 @@ macOS 下也可以在 Finder 中双击该脚本启动。若 checkpoint 不在仓
 可设置 `MODEL_PATH=/path/to/model.eqx ./play-v5.command`。
 
 `watch-v5.command` 使用同一个 checkpoint 控制 PPO 0 和 PPO 1，默认 sample
-策略、自动 tick、每秒 4 回合。也可以手动指定两个 checkpoint：
+策略、自动 tick、每秒 4 回合。可通过环境变量分别选择两个模型：
 
 ```bash
-uv run python examples/play_against_model.py /tmp/generals-ppo-a.eqx \
+MODEL_0_PATH=generals-ppo-8x8-expander-gpu-v4.eqx \
+MODEL_1_PATH=generals-ppo-8x8-expander-gpu-v5.eqx \
+./watch-v5.command
+```
+
+也可以手动指定两个 checkpoint：
+
+```bash
+uv run python examples/play_against_model.py \
   --machine-vs-machine \
-  --opponent-model-path /tmp/generals-ppo-b.eqx \
+  --model-0-path /tmp/generals-ppo-a.eqx \
+  --model-1-path /tmp/generals-ppo-b.eqx \
   --grid-size 8 \
   --map-generator generated \
   --policy-mode sample \
@@ -166,7 +175,8 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 - 默认会在棋盘和右侧面板展示 PPO 模型下一步 Top-K 候选动作、概率和 value。
 - `--preview-top-k` 可设置展示 1-5 个候选，`--no-ai-preview` 可关闭预览。
 - `--policy-mode sample` 时预览显示的是采样分布，实际动作仍按概率抽样。
-- `--machine-vs-machine` 会关闭人类输入流程，让两个 PPO agent 按自动 tick 对战；`--opponent-model-path` 可指定第二个 checkpoint。
+- `--machine-vs-machine` 会关闭人类输入流程，让两个 PPO agent 按自动 tick 对战；`--model-0-path` 和 `--model-1-path` 可分别指定两个 checkpoint。
+- `--opponent-model-path` 仍可作为 `--model-1-path` 的兼容别名。
 
 加载 checkpoint 时，`--grid-size` 必须与保存该 `.eqx` 模型时使用的网络尺寸一致。`.eqx` 属于实验产物，建议放在 `/tmp` 或其他实验目录，不要提交进 Git。
 

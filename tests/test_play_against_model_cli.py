@@ -18,6 +18,11 @@ def parse_with_args(monkeypatch, *args):
     return parse_args()
 
 
+def parse_raw_args(monkeypatch, *args):
+    monkeypatch.setattr("sys.argv", ["play_against_model.py", *args])
+    return parse_args()
+
+
 def test_parse_args_rejects_nonpositive_min_generals_distance(monkeypatch):
     with pytest.raises(SystemExit):
         parse_with_args(monkeypatch, "--min-generals-distance", "0")
@@ -91,6 +96,32 @@ def test_parse_args_accepts_machine_vs_machine_options(monkeypatch):
     assert args.machine_vs_machine is True
     assert args.opponent_model_path == "opponent.eqx"
     assert args.opponent_policy_mode == "greedy"
+
+
+def test_parse_args_accepts_explicit_machine_model_paths_without_positional(monkeypatch):
+    args = parse_raw_args(
+        monkeypatch,
+        "--machine-vs-machine",
+        "--model-0-path",
+        "p0.eqx",
+        "--model-1-path",
+        "p1.eqx",
+    )
+
+    assert args.model_path == "p0.eqx"
+    assert args.opponent_model_path == "p1.eqx"
+
+
+def test_parse_args_accepts_model_1_alias_for_opponent(monkeypatch):
+    args = parse_with_args(monkeypatch, "--machine-vs-machine", "--model-1-path", "p1.eqx")
+
+    assert args.model_path == "policy.eqx"
+    assert args.opponent_model_path == "p1.eqx"
+
+
+def test_parse_args_rejects_missing_primary_model(monkeypatch):
+    with pytest.raises(SystemExit):
+        parse_raw_args(monkeypatch, "--machine-vs-machine")
 
 
 def test_parse_args_rejects_nonpositive_tick_rate(monkeypatch):

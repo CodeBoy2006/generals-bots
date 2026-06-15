@@ -556,9 +556,10 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 也可以直接观看 PPO 机器对战：
 
 ```bash
-uv run python examples/play_against_model.py /tmp/generals-ppo-a.eqx \
+uv run python examples/play_against_model.py \
   --machine-vs-machine \
-  --opponent-model-path /tmp/generals-ppo-b.eqx \
+  --model-0-path /tmp/generals-ppo-a.eqx \
+  --model-1-path /tmp/generals-ppo-b.eqx \
   --grid-size 8 \
   --map-generator generated \
   --policy-mode sample \
@@ -579,7 +580,8 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-a.eqx \
 - 默认会展示 PPO 模型的下一步 Top-K 候选动作：棋盘上标出候选源格/目标格/箭头，右侧面板列出概率和 value。
 - `--preview-top-k` 可设置展示 1-5 个候选，`--no-ai-preview` 可关闭预览。
 - `--policy-mode sample` 时预览显示的是动作概率分布，实际动作仍按概率抽样；`greedy` 模式通常执行概率最高的候选。
-- `--machine-vs-machine` 会让两个 PPO agent 自动对战；`--opponent-model-path` 和 `--opponent-policy-mode` 可设置第二个 agent。
+- `--machine-vs-machine` 会让两个 PPO agent 自动对战；`--model-0-path` 和 `--model-1-path` 可分别指定两个 checkpoint，`--opponent-policy-mode` 可设置第二个 agent 的策略模式。
+- `--opponent-model-path` 仍可作为 `--model-1-path` 的兼容别名。
 
 该入口只支持当前 PPO `PolicyValueNetwork` 保存出的 Equinox `.eqx` checkpoint。`--grid-size` 必须和训练/保存模型时的网络尺寸一致，否则会加载失败或在推理时因输入尺寸不匹配报错。checkpoint 通常较大且属于实验产物，建议放在 `/tmp` 或专门的实验目录，不要提交进 Git。
 

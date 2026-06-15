@@ -27,6 +27,8 @@ def test_v5_watch_script_is_executable_and_starts_machine_match():
     assert "generals-ppo-8x8-expander-gpu-v5.eqx" in text
     assert "uv run --python 3.12 python examples/play_against_model.py" in text
     assert "--machine-vs-machine" in text
+    assert "--model-0-path" in text
+    assert "--model-1-path" in text
     assert "--policy-mode sample" in text
     assert "--opponent-policy-mode sample" in text
     assert "--auto-tick" in text

@@ -4,7 +4,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
 
-model_path="${MODEL_PATH:-generals-ppo-8x8-expander-gpu-v5.eqx}"
+model_0_path="${MODEL_0_PATH:-${MODEL_PATH:-generals-ppo-8x8-expander-gpu-v5.eqx}}"
+model_1_path="${MODEL_1_PATH:-${OPPONENT_MODEL_PATH:-$model_0_path}}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required to start the Generals PPO watch match." >&2
@@ -12,14 +13,22 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -f "$model_path" ]]; then
-  echo "Missing PPO checkpoint: $model_path" >&2
-  echo "Place generals-ppo-8x8-expander-gpu-v5.eqx in the repository root or set MODEL_PATH." >&2
+if [[ ! -f "$model_0_path" ]]; then
+  echo "Missing PPO checkpoint for player 0: $model_0_path" >&2
+  echo "Place the checkpoint in the repository root or set MODEL_0_PATH." >&2
   exit 1
 fi
 
-exec uv run --python 3.12 python examples/play_against_model.py "$model_path" \
+if [[ ! -f "$model_1_path" ]]; then
+  echo "Missing PPO checkpoint for player 1: $model_1_path" >&2
+  echo "Place the checkpoint in the repository root or set MODEL_1_PATH." >&2
+  exit 1
+fi
+
+exec uv run --python 3.12 python examples/play_against_model.py \
   --machine-vs-machine \
+  --model-0-path "$model_0_path" \
+  --model-1-path "$model_1_path" \
   --grid-size 8 \
   --map-generator generated \
   --policy-mode sample \
