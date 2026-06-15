@@ -202,7 +202,33 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --model-path /tmp/generals-ppo-selfplay-next.eqx
 ```
 
-`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
+当前策略自博弈训练：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 256 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 8192 \
+  --num-steps 64 \
+  --num-iterations 160 \
+  --num-epochs 2 \
+  --minibatch-size 4096 \
+  --lr 0.000002 \
+  --init-model-path /tmp/generals-ppo-current.eqx \
+  --self-play-opponent \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 1.0 \
+  --model-path /tmp/generals-ppo-current-selfplay.eqx
+```
+
+`--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 同时使用。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
 
 胜者轨迹辅助克隆：
 
@@ -272,7 +298,7 @@ uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
   --model-path /tmp/generals-ppo-8x8-conservative-search.eqx
 ```
 
-该脚本用固定 base checkpoint 做 rollout-search teacher，并用 KL 约束学生贴近 base。`--target-mode hard` 只在 search 最优动作明显优于 base top-prior 动作时加入小权重动作监督；`--target-mode soft` 会把 top-k rollout 分数转成软目标，避免把近似并列候选强行压成单标签。`--policy-input full-state` 可让学生接收 privileged 完整状态编码，评估时也要给 `evaluate_policy.py` 传同名参数。它适合继续研究 search distillation，不应把训练 loss 当成棋力指标；仍需用 `evaluate_policy.py --opponent-policy-path` 独立评估。
+该脚本用固定 base checkpoint 做 rollout-search teacher，并用 KL 约束学生贴近 base。`--target-mode hard` 只在 search 最优动作明显优于 base top-prior 动作时加入小权重动作监督；`--target-mode soft` 会把 top-k rollout 分数转成软目标，避免把近似并列候选强行压成单标签。`--policy-input full-state` 会用 privileged 完整状态替换标准 observation；`--policy-input augmented-full-state` 会保留原 9 个 observation 通道，并追加 9 个 full-state 通道。augmented 模式默认使用 18 输入通道，并支持从 9 通道 checkpoint 自动扩展 conv1 权重。评估时也要给 `evaluate_policy.py` 传同名 `--policy-input`，必要时传 `--input-channels` 和 `--opponent-input-channels`。它适合继续研究 search distillation，不应把训练 loss 当成棋力指标；仍需用 `evaluate_policy.py --opponent-policy-path` 独立评估。
 
 行为克隆 warm start：
 
@@ -304,7 +330,7 @@ uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-8x
 使用 `--policy-player 1` 可做镜像座位评估，避免只测 player 0 带来的出生点偏差。
 
 评估两个 checkpoint 之间的对局时，给 `evaluate_policy.py` 传入 `--opponent-policy-path` 和 `--opponent-policy-mode`。
-评估非默认容量 checkpoint 时，给候选传入 `--channels`；如果对手 checkpoint 容量不同，再传入 `--opponent-channels`。
+评估非默认容量 checkpoint 时，给候选传入 `--channels`；如果对手 checkpoint 容量不同，再传入 `--opponent-channels`。评估非默认输入通道或 privileged 输入时，使用 `--policy-input`、`--input-channels` 和 `--opponent-input-channels` 保持网络结构与 checkpoint 一致。
 
 ## 验证
 

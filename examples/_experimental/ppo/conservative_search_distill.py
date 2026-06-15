@@ -36,6 +36,7 @@ from common import (
     POLICY_MODE_NAMES,
     make_grids,
     policy_input_array_and_mask,
+    policy_input_default_channels,
     policy_network_action,
     policy_state_action,
 )
@@ -664,6 +665,15 @@ def parse_args():
     parser.add_argument("--channels", default=None, help="Student channels, for example 64,64,64,32.")
     parser.add_argument("--base-channels", default=None, help="Base/search checkpoint channels.")
     parser.add_argument("--opponent-channels", default=None, help="Opponent checkpoint channels. Defaults to base channels.")
+    parser.add_argument("--input-channels", type=int, default=None, help="Student network input channels.")
+    parser.add_argument(
+        "--init-input-channels",
+        type=int,
+        default=None,
+        help="Input channels of the warm-start checkpoint before optional expansion.",
+    )
+    parser.add_argument("--base-input-channels", type=int, default=9)
+    parser.add_argument("--opponent-input-channels", type=int, default=9)
     parser.add_argument("--num-steps", type=int, default=16)
     parser.add_argument("--num-iterations", type=int, default=100)
     parser.add_argument("--num-epochs", type=int, default=1)
@@ -707,6 +717,12 @@ def parse_args():
         parser.error("--minibatch-size must be positive")
     if args.lr <= 0.0:
         parser.error("--lr must be positive")
+    if args.input_channels is not None and args.input_channels <= 0:
+        parser.error("--input-channels must be positive")
+    if args.init_input_channels is not None and args.init_input_channels <= 0:
+        parser.error("--init-input-channels must be positive")
+    if args.base_input_channels <= 0 or args.opponent_input_channels <= 0:
+        parser.error("--base-input-channels and --opponent-input-channels must be positive")
     if args.kl_weight < 0.0 or args.improve_weight < 0.0:
         parser.error("--kl-weight and --improve-weight must be non-negative")
     if args.temperature <= 0.0:
@@ -749,12 +765,22 @@ def main():
     policy_mode = POLICY_MODE_NAME_TO_ID[args.policy_mode]
     opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
     policy_input = POLICY_INPUT_NAME_TO_ID[args.policy_input]
+    input_channels = args.input_channels or policy_input_default_channels(args.policy_input)
+    init_input_channels = args.init_input_channels
+    if init_input_channels is None and init_model_path == args.base_model_path and input_channels != args.base_input_channels:
+        init_input_channels = args.base_input_channels
 
     print("Conservative rollout-search distillation")
     print(f"Device:        {jax.devices()[0]}")
-    print(f"Student:       {init_model_path} channels={args.channels} input={args.policy_input}")
-    print(f"Base/Search:   {args.base_model_path} channels={args.base_channels}")
-    print(f"Opponent:      {opponent_policy_path} channels={args.opponent_channels} ({args.opponent_policy_mode})")
+    print(
+        f"Student:       {init_model_path} channels={args.channels} "
+        f"input={args.policy_input} input_channels={input_channels}"
+    )
+    print(f"Base/Search:   {args.base_model_path} channels={args.base_channels} input_channels={args.base_input_channels}")
+    print(
+        f"Opponent:      {opponent_policy_path} channels={args.opponent_channels} "
+        f"input_channels={args.opponent_input_channels} ({args.opponent_policy_mode})"
+    )
     print(f"Grid:          {args.grid_size}x{args.grid_size} ({args.map_generator})")
     print(f"Rollout:       {args.num_iterations} x {args.num_steps} steps, envs={args.num_envs}")
     print(
@@ -776,18 +802,22 @@ def main():
         args.grid_size,
         init_model_path=init_model_path,
         channels=args.channels,
+        input_channels=input_channels,
+        init_input_channels=init_input_channels,
     )
     base_network = load_or_create_network(
         base_key,
         args.grid_size,
         init_model_path=args.base_model_path,
         channels=args.base_channels,
+        input_channels=args.base_input_channels,
     )
     opponent_network = load_or_create_network(
         opponent_key,
         args.grid_size,
         init_model_path=opponent_policy_path,
         channels=args.opponent_channels,
+        input_channels=args.opponent_input_channels,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(student_network, eqx.is_inexact_array))

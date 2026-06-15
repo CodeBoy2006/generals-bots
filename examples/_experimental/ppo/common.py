@@ -24,8 +24,13 @@ OPPONENT_NAMES = ("random",) + HEURISTIC_NAMES
 OPPONENT_NAME_TO_ID = {name: idx for idx, name in enumerate(OPPONENT_NAMES)}
 POLICY_MODE_NAMES = ("greedy", "sample")
 POLICY_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(POLICY_MODE_NAMES)}
-POLICY_INPUT_NAMES = ("observation", "full-state")
+POLICY_INPUT_NAMES = ("observation", "full-state", "augmented-full-state")
 POLICY_INPUT_NAME_TO_ID = {name: idx for idx, name in enumerate(POLICY_INPUT_NAMES)}
+
+
+def policy_input_default_channels(policy_input_name: str) -> int:
+    """Return the default network input channels for a policy input mode."""
+    return 18 if policy_input_name == "augmented-full-state" else 9
 
 
 def make_simple_general_grid(key, grid_size):
@@ -128,18 +133,23 @@ def full_state_to_array(state, player):
     ).astype(jnp.float32)
 
 
+def augmented_full_state_to_array(state, obs, player):
+    """Append privileged full-state channels after the standard observation channels."""
+    return jnp.concatenate([obs_to_array(obs), full_state_to_array(state, player)], axis=0)
+
+
 def policy_input_array_and_mask(state, obs, player, policy_input):
     """Return the network input array and valid-action mask for one policy input mode."""
-
-    def observation_input(_):
+    if policy_input == 0:
         mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
         return obs_to_array(obs), mask
 
-    def full_state_input(_):
+    if policy_input == 1:
         mask = compute_valid_move_mask(state.armies, state.ownership[player], state.mountains)
         return full_state_to_array(state, player), mask
 
-    return jax.lax.cond(policy_input == 0, observation_input, full_state_input, None)
+    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
+    return augmented_full_state_to_array(state, obs, player), mask
 
 
 def opponent_action(opponent_id, key, obs, random_action_fn):

@@ -3,7 +3,9 @@ import jax.random as jrandom
 
 from examples._experimental.ppo.common import (
     POLICY_INPUT_NAME_TO_ID,
+    augmented_full_state_to_array,
     full_state_to_array,
+    obs_to_array,
     policy_state_action,
 )
 from generals.agents.ppo_policy_agent import PolicyValueNetwork
@@ -42,3 +44,15 @@ def test_policy_state_action_supports_full_state_input():
     assert action.shape == (5,)
     assert action.dtype == jnp.int32
     assert int(action[0]) in (0, 1)
+
+
+def test_augmented_full_state_keeps_observation_channels_first():
+    grid = jnp.zeros((4, 4), dtype=jnp.int32).at[0, 0].set(1).at[3, 3].set(2)
+    state = game.create_initial_state(grid)
+    obs = game.get_observation(state, 0)
+
+    augmented = augmented_full_state_to_array(state, obs, 0)
+
+    assert augmented.shape == (18, 4, 4)
+    assert jnp.array_equal(augmented[:9], obs_to_array(obs))
+    assert bool(augmented[9 + 6, 3, 3])

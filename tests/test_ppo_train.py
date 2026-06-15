@@ -5,7 +5,12 @@ import jax.random as jrandom
 
 from examples._experimental.ppo.common import policy_network_action
 from examples._experimental.ppo.evaluate_policy import evaluate_policy_opponent_batch, summarize_policy_results
-from examples._experimental.ppo.train import apply_terminal_reward, load_or_create_network, stack_learner_actions
+from examples._experimental.ppo.train import (
+    apply_terminal_reward,
+    load_or_create_network,
+    resolve_opponent_source,
+    stack_learner_actions,
+)
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, greedy_policy_action
 from generals.core import game
 from generals.core.game import GameInfo
@@ -49,6 +54,31 @@ def test_load_or_create_network_restores_custom_channel_checkpoint(tmp_path):
     assert jnp.allclose(loaded_value, saved_value)
 
 
+def test_load_or_create_network_expands_input_channels_without_changing_zero_extra_outputs(tmp_path):
+    checkpoint_path = tmp_path / "policy.eqx"
+    saved = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=4)
+    eqx.tree_serialise_leaves(checkpoint_path, saved)
+
+    loaded = load_or_create_network(
+        jrandom.PRNGKey(1),
+        grid_size=4,
+        init_model_path=checkpoint_path,
+        input_channels=18,
+        init_input_channels=9,
+    )
+
+    obs = jnp.zeros((9, 4, 4), dtype=jnp.float32).at[0, 0, 0].set(3.0)
+    augmented_obs = jnp.concatenate([obs, jnp.zeros_like(obs)], axis=0)
+    mask = jnp.ones((4, 4, 4), dtype=bool)
+    saved_logits, saved_value = saved.logits_value(obs, mask)
+    loaded_logits, loaded_value = loaded.logits_value(augmented_obs, mask)
+
+    assert loaded.conv1.weight.shape[1] == 18
+    assert jnp.allclose(loaded.conv1.weight[:, 9:], 0.0)
+    assert jnp.allclose(loaded_logits, saved_logits)
+    assert jnp.allclose(loaded_value, saved_value)
+
+
 def test_load_or_create_network_rejects_missing_checkpoint(tmp_path):
     missing_path = tmp_path / "missing.eqx"
 
@@ -58,6 +88,22 @@ def test_load_or_create_network_rejects_missing_checkpoint(tmp_path):
         assert str(missing_path) in str(exc)
     else:
         raise AssertionError("Expected FileNotFoundError for missing warm-start checkpoint")
+
+
+def test_resolve_opponent_source_selects_current_policy_self_play():
+    assert resolve_opponent_source(opponent_policy_path=None, self_play_opponent=True) == "current"
+    assert resolve_opponent_source(opponent_policy_path="/tmp/frozen.eqx", self_play_opponent=False) == "checkpoint"
+    assert resolve_opponent_source(opponent_policy_path=None, self_play_opponent=False) == "heuristic"
+
+
+def test_resolve_opponent_source_rejects_checkpoint_with_current_self_play():
+    try:
+        resolve_opponent_source(opponent_policy_path="/tmp/frozen.eqx", self_play_opponent=True)
+    except ValueError as exc:
+        assert "--self-play-opponent" in str(exc)
+        assert "--opponent-policy-path" in str(exc)
+    else:
+        raise AssertionError("Expected self-play opponent conflict to raise ValueError")
 
 
 def test_summarize_policy_results_counts_wins_for_selected_player():

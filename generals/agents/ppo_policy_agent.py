@@ -32,10 +32,16 @@ class PolicyValueNetwork(eqx.Module):
     value_linear1: eqx.nn.Linear
     value_linear2: eqx.nn.Linear
 
-    def __init__(self, key: jnp.ndarray, grid_size: int = 4, channels: PolicyChannels = DEFAULT_POLICY_CHANNELS):
+    def __init__(
+        self,
+        key: jnp.ndarray,
+        grid_size: int = 4,
+        channels: PolicyChannels = DEFAULT_POLICY_CHANNELS,
+        input_channels: int = 9,
+    ):
         keys = jrandom.split(key, 8)
 
-        self.conv1 = eqx.nn.Conv2d(9, channels[0], kernel_size=3, padding=1, key=keys[0])
+        self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
         self.conv3 = eqx.nn.Conv2d(channels[1], channels[2], kernel_size=3, padding=1, key=keys[2])
         self.conv4 = eqx.nn.Conv2d(channels[2], channels[3], kernel_size=3, padding=1, key=keys[3])
@@ -177,6 +183,7 @@ def load_policy_network(
     grid_size: int,
     key: jnp.ndarray | None = None,
     channels: str | PolicyChannels | list[int] | None = None,
+    input_channels: int = 9,
 ) -> PolicyValueNetwork:
     """Load a PPO PolicyValueNetwork checkpoint from an Equinox .eqx file."""
     path = Path(model_path)
@@ -187,7 +194,7 @@ def load_policy_network(
 
     init_key = jrandom.PRNGKey(0) if key is None else key
     parsed_channels = parse_policy_channels(channels)
-    network = PolicyValueNetwork(init_key, grid_size=grid_size, channels=parsed_channels)
+    network = PolicyValueNetwork(init_key, grid_size=grid_size, channels=parsed_channels, input_channels=input_channels)
     try:
         return eqx.tree_deserialise_leaves(path, network)
     except Exception as exc:

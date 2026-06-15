@@ -421,9 +421,11 @@ uv run python examples/_experimental/ppo/behavior_clone.py 128 \
 
 输出模型默认建议放在 `/tmp` 或其他实验目录，不要直接提交 `.eqx` checkpoint。
 
-### 7.6 冻结 checkpoint 自博弈
+### 7.6 checkpoint 与 current-policy 自博弈
 
-`train.py` 支持用另一个 PPO checkpoint 作为冻结 opponent。训练中的 learner 仍然是 player 0，player 1 由 `--opponent-policy-path` 指定的模型出动作：
+`train.py` 支持两类自博弈。冻结 checkpoint 自博弈会用 `--opponent-policy-path` 指定非 learner 玩家；current-policy 自博弈会用 `--self-play-opponent` 让非 learner 玩家在每轮 rollout 中使用当前正在更新的同一个 policy。
+
+冻结 checkpoint 自博弈：
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -444,10 +446,38 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --init-model-path /tmp/generals-ppo-current.eqx \
   --opponent-policy-path /tmp/generals-ppo-best-frozen.eqx \
   --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 1.0 \
   --model-path /tmp/generals-ppo-selfplay-next.eqx
 ```
 
-这是 frozen self-play，不是 current-vs-current 同步更新。冻结 opponent 更稳定，适合作为后续 checkpoint league 的基础。
+current-policy 自博弈：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 256 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 8192 \
+  --num-steps 64 \
+  --num-iterations 160 \
+  --num-epochs 2 \
+  --minibatch-size 4096 \
+  --lr 0.000002 \
+  --init-model-path /tmp/generals-ppo-current.eqx \
+  --self-play-opponent \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 1.0 \
+  --model-path /tmp/generals-ppo-current-selfplay.eqx
+```
+
+`--self-play-opponent` 不能和 `--opponent-policy-path` 同时使用。`--learner-player 0|1` 控制被更新的 learner 座位；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入胜负奖励。冻结 opponent 更稳定，适合作为后续 checkpoint league 的基础；current-policy opponent 适合快速检验同步自博弈方向。
 
 ### 7.7 批量评估 checkpoint
 

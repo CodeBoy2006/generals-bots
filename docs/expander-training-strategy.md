@@ -165,9 +165,14 @@ uv run python examples/_experimental/ppo/train.py 512 \
 
 如果 rollout 胜率长期停在 85-89%，继续堆同一 PPO 配方收益会降低，应考虑调整奖励、对手课程或引入更强 teacher。
 
-## 阶段四：冻结 checkpoint 自博弈
+## 阶段四：checkpoint 与 current-policy 自博弈
 
-当前训练入口支持 frozen self-play：learner 从 `--init-model-path` 加载并继续更新，非 learner 玩家由 `--opponent-policy-path` 指定的冻结 checkpoint 控制。
+当前训练入口支持两种 self-play：
+
+- frozen checkpoint self-play：learner 从 `--init-model-path` 加载并继续更新，非 learner 玩家由 `--opponent-policy-path` 指定的冻结 checkpoint 控制。
+- current-policy self-play：传 `--self-play-opponent` 后，非 learner 玩家在每轮 rollout 中使用当前正在更新的同一个 policy。
+
+frozen opponent 更适合作为稳定 best-response 训练入口；current-policy opponent 更接近同步自博弈，但 PPO 更新仍只使用 `--learner-player` 指定座位的数据。
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -195,17 +200,46 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --seed 9201
 ```
 
+current-policy self-play 命令：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 256 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 8192 \
+  --num-steps 64 \
+  --num-iterations 160 \
+  --num-epochs 2 \
+  --minibatch-size 4096 \
+  --lr 0.000002 \
+  --truncation 500 \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --self-play-opponent \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 1.0 \
+  --model-path /tmp/generals-ppo-8x8-current-selfplay.eqx \
+  --seed 26010
+```
+
 新增参数：
 
+- `--self-play-opponent`：让非 learner 玩家使用当前 learner policy；不能和 `--opponent-policy-path` 同时使用。
 - `--learner-player 0|1`：选择 learner 控制环境中的哪个玩家槽位。用它可以分别训练先手/后手视角，避免只优化 player 0。
 - `--terminal-reward-scale N`：在 decisive terminal transition 上给 learner 胜局 `+N`、败局 `-N`。默认 `0.0`，保持旧 composite reward 行为。
 
 使用建议：
 
-- 不要一开始做 current-vs-current 同步更新；先固定一个 frozen opponent，确认 learner 视角、终局奖励和评估基线都稳定。
+- 先固定一个 frozen opponent，确认 learner 视角、终局奖励和评估基线都稳定，再尝试 current-policy opponent。
 - 每次 self-play 后都要重新测 Expander、其它 heuristic、历史 best checkpoint 和镜像座位。
 - 如果新模型打赢历史模型但对 Expander 或 mixed heuristic 退化，不应替换 best checkpoint。
-- 后续可以把多个历史 checkpoint 做成 league opponent，但第一步应先保持单个 frozen opponent，确认训练稳定。
+- 后续可以把多个历史 checkpoint 做成 league opponent，避免只针对一个 frozen/current opponent 过拟合。
 
 ### 当前 v5 自博弈结果
 
@@ -238,6 +272,20 @@ as player 1 vs v5 sample:
 ```
 
 提高终局奖励、增大学习率、长 rollout 或切换 v5 greedy 对手，均未出现接近 80% 的趋势。当前结论：在现有 42k 参数网络和 PPO objective 下，直接 frozen self-play 更适合做小幅 fine-tune，不足以快速学出压倒性 best response。
+
+新增 current-policy self-play 能力后，用 v5 warm start 做 160 iterations 短试验也没有产生提升：
+
+```text
+/tmp/generals-ppo-8x8-current-selfplay-v1.eqx, player 0, seed 26020:
+  candidate wins/losses/draws = 435/495/94
+  same-seed v5 baseline       = 448/477/99
+
+player 1, seed 26021:
+  candidate wins/losses/draws = 438/486/100
+  same-seed v5 baseline       = 449/477/98
+```
+
+结论：current-policy self-play 已经是可用训练模式，但这组参数没有学出对 v5 的 best response。若继续 self-play 路线，应优先尝试 checkpoint league、历史池采样、对手建模或更强 value target，而不是只把同一个 PPO policy 同步对打更久。
 
 ## 阶段五：胜者轨迹辅助克隆
 
@@ -357,6 +405,7 @@ rollout-search as player 1 vs v5 sample, seed 19193:
 - `--target-mode hard` 的总 loss 为 `kl_weight * KL(base || student) + improve_weight * weighted CE(search_action)`。
 - `--target-mode soft` 会把 top-k search 分数转为候选动作上的软目标，避免把大量小 margin 候选强制压成单标签。
 - `--policy-input full-state` 会让学生使用 privileged 完整状态编码；此模式不等同于标准 fogged observation policy，评估时也必须传 `evaluate_policy.py --policy-input full-state`。
+- `--policy-input augmented-full-state` 会保留原 9 个 fogged observation 通道，并追加 9 个 privileged full-state 通道；默认输入通道数为 18。
 
 基础命令：
 
@@ -450,6 +499,55 @@ player 1, seed 24431:
 ```
 
 当前结论：不能简单把原 9 个 observation 通道替换成 full-state 语义。下一步如果继续 privileged checkpoint 路线，应扩展输入通道，并把 v5 原始 9 通道 conv1 权重原样复制，额外 full-state/search 特征通道从 0 初始化，这样才能保留 v5 基线行为再学习隐藏信息增益。
+
+#### augmented-full-state 输入
+
+当前实现加入了 18 通道 augmented 输入：
+
+```text
+channels 0-8:   标准 fogged observation，与 v5 完全一致
+channels 9-17:  privileged full-state 编码
+```
+
+从 9 通道 v5 checkpoint warm start 到 18 通道学生时，`load_or_create_network(..., input_channels=18, init_input_channels=9)` 会复制原始 conv1 的前 9 个输入通道权重，并把新增通道权重置 0。这样在额外通道全 0 时，logits/value 与原 checkpoint 保持一致。
+
+soft target augmented 蒸馏基本保持 v5，但没有明显提升：
+
+```text
+/tmp/generals-ppo-8x8-augmented-soft-search-v1.eqx, player 0, seed 25110:
+  candidate wins/losses/draws = 444/467/113
+  same-seed v5 baseline       = 445/468/111
+
+player 1, seed 25111:
+  candidate wins/losses/draws = 455/480/89
+  same-seed v5 baseline       = 460/468/96
+```
+
+hard high-margin augmented 蒸馏出现小幅波动性改善，但仍远离 80%：
+
+```text
+/tmp/generals-ppo-8x8-augmented-hard-search-v1.eqx, player 0, seed 25220:
+  candidate wins/losses/draws = 443/484/97
+  same-seed v5 baseline       = 436/468/120
+
+player 1, seed 25221:
+  candidate wins/losses/draws = 472/475/77
+  same-seed v5 baseline       = 454/495/75
+```
+
+继续加大 improve 权重并降低 KL 的 v2 退化明显：
+
+```text
+/tmp/generals-ppo-8x8-augmented-hard-search-v2.eqx, player 0, seed 25320:
+  candidate wins/losses/draws = 398/531/95
+  same-seed v5 baseline       = 484/440/100
+
+player 1, seed 25321:
+  candidate wins/losses/draws = 381/548/95
+  same-seed v5 baseline       = 409/519/96
+```
+
+结论：18 通道 augmented 输入解决了“替换通道语义破坏 v5”的问题，是后续 privileged/search-feature 学习的正确接口；但当前 search-action 蒸馏目标仍不足以把 80%+ rollout-search 行为压缩进纯 checkpoint。
 
 ### 容量扩展实验
 

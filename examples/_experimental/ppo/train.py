@@ -104,15 +104,69 @@ def make_initial_states(pool, num_envs):
     return states._replace(pool_idx=pool_idx)
 
 
-def load_or_create_network(key, grid_size, init_model_path=None, channels=None):
+def resolve_opponent_source(opponent_policy_path, self_play_opponent):
+    """Select which opponent source the PPO rollout loop should use."""
+    if self_play_opponent and opponent_policy_path is not None:
+        raise ValueError("--self-play-opponent cannot be combined with --opponent-policy-path")
+    if self_play_opponent:
+        return "current"
+    if opponent_policy_path is not None:
+        return "checkpoint"
+    return "heuristic"
+
+
+def load_or_create_network(key, grid_size, init_model_path=None, channels=None, input_channels=9, init_input_channels=None):
     """Create a policy network and optionally restore its leaves from a checkpoint."""
-    network = PolicyValueNetwork(key, grid_size=grid_size, channels=parse_policy_channels(channels))
+    parsed_channels = parse_policy_channels(channels)
+    network = PolicyValueNetwork(
+        key,
+        grid_size=grid_size,
+        channels=parsed_channels,
+        input_channels=input_channels,
+    )
     if init_model_path is None:
         return network
 
     path = Path(init_model_path)
     if not path.exists():
         raise FileNotFoundError(f"Warm-start checkpoint not found: {path}")
+    if init_input_channels is not None and init_input_channels != input_channels:
+        if init_input_channels > input_channels:
+            raise ValueError("init_input_channels cannot exceed input_channels")
+        source_network = PolicyValueNetwork(
+            key,
+            grid_size=grid_size,
+            channels=parsed_channels,
+            input_channels=init_input_channels,
+        )
+        source_network = eqx.tree_deserialise_leaves(path, source_network)
+        conv1_weight = jnp.zeros_like(network.conv1.weight)
+        conv1_weight = conv1_weight.at[:, :init_input_channels, :, :].set(source_network.conv1.weight)
+        network = eqx.tree_at(lambda net: net.conv1.weight, network, conv1_weight)
+        network = eqx.tree_at(
+            lambda net: (
+                net.conv1.bias,
+                net.conv2,
+                net.conv3,
+                net.conv4,
+                net.policy_conv,
+                net.value_conv,
+                net.value_linear1,
+                net.value_linear2,
+            ),
+            network,
+            (
+                source_network.conv1.bias,
+                source_network.conv2,
+                source_network.conv3,
+                source_network.conv4,
+                source_network.policy_conv,
+                source_network.value_conv,
+                source_network.value_linear1,
+                source_network.value_linear2,
+            ),
+        )
+        return network
     return eqx.tree_deserialise_leaves(path, network)
 
 
@@ -438,6 +492,11 @@ def main():
         help="Optional frozen PPO checkpoint to use as the player-1 opponent instead of --opponent.",
     )
     parser.add_argument(
+        "--self-play-opponent",
+        action="store_true",
+        help="Use the current learner policy as the non-learner opponent on each rollout.",
+    )
+    parser.add_argument(
         "--opponent-policy-mode",
         choices=POLICY_MODE_NAMES,
         default="sample",
@@ -509,6 +568,10 @@ def main():
     if args.terminal_reward_scale < 0.0:
         parser.error("--terminal-reward-scale must be non-negative")
     try:
+        opponent_source = resolve_opponent_source(args.opponent_policy_path, args.self_play_opponent)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
         channels = parse_policy_channels(args.channels)
         opponent_channels = parse_policy_channels(args.opponent_channels if args.opponent_channels is not None else args.channels)
     except ValueError as exc:
@@ -518,12 +581,14 @@ def main():
     print(f"Environments:  {num_envs}")
     print(f"Device:        {jax.devices()[0]}")
     print(f"Learner:       player {args.learner_player}")
-    if args.opponent_policy_path is None:
+    if opponent_source == "heuristic":
         print(f"Opponent:      {args.opponent}")
-    else:
+    elif opponent_source == "checkpoint":
         print(f"Opponent:      policy checkpoint ({args.opponent_policy_mode})")
         print(f"Opponent path: {args.opponent_policy_path}")
         print(f"Opponent ch:   {opponent_channels}")
+    else:
+        print(f"Opponent:      current policy self-play ({args.opponent_policy_mode})")
     print(f"Grid:          {grid_size}x{grid_size} ({args.map_generator}, truncation={args.truncation})")
     print(f"Channels:      {channels}")
     if args.map_generator == "generated":
@@ -548,7 +613,7 @@ def main():
         channels=channels,
     )
     opponent_network = None
-    if args.opponent_policy_path is not None:
+    if opponent_source == "checkpoint":
         opponent_network = load_or_create_network(
             opponent_net_key,
             grid_size=grid_size,
@@ -580,7 +645,7 @@ def main():
     
     print("\nWarming up...")
     for _ in range(3):
-        if opponent_network is None:
+        if opponent_source == "heuristic":
             states, _, key = rollout_step(
                 states,
                 pool,
@@ -592,11 +657,12 @@ def main():
                 args.terminal_reward_scale,
             )
         else:
+            active_opponent_network = network if opponent_source == "current" else opponent_network
             states, _, key = rollout_step_policy_opponent(
                 states,
                 pool,
                 network,
-                opponent_network,
+                active_opponent_network,
                 key,
                 args.truncation,
                 opponent_policy_mode,
@@ -613,7 +679,7 @@ def main():
         # Collect rollout
         rollout_data = []
         for _ in range(num_steps):
-            if opponent_network is None:
+            if opponent_source == "heuristic":
                 states, data, key = rollout_step(
                     states,
                     pool,
@@ -625,11 +691,12 @@ def main():
                     args.terminal_reward_scale,
                 )
             else:
+                active_opponent_network = network if opponent_source == "current" else opponent_network
                 states, data, key = rollout_step_policy_opponent(
                     states,
                     pool,
                     network,
-                    opponent_network,
+                    active_opponent_network,
                     key,
                     args.truncation,
                     opponent_policy_mode,
