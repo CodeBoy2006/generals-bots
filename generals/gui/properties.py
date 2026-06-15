@@ -24,6 +24,7 @@ class Properties:
     selected_cell: tuple[int, int] | None = None
     split_enabled: bool = False
     last_game_message: str = "Ready"
+    policy_preview: Any | None = None
     __clock: Clock = Clock()
     __font_size = 18
     __show_tile_types: bool = False

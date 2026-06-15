@@ -1,4 +1,5 @@
-from typing import TypeAlias
+import math
+from typing import Any, TypeAlias
 
 import numpy as np
 import pygame
@@ -15,6 +16,50 @@ BLACK: Color = (0, 0, 0)
 WHITE: Color = (230, 230, 230)
 SELECTED_CELL: Color = (255, 214, 64)
 VALID_TARGET: Color = (46, 204, 113)
+AI_PREVIEW_PRIMARY: Color = (21, 101, 216)
+AI_PREVIEW_SECONDARY: Color = (90, 150, 255)
+AI_PREVIEW_TEXT: Color = (32, 36, 42)
+AI_PREVIEW_MUTED: Color = (112, 118, 128)
+
+
+def get_policy_candidate_arrow(candidate: Any) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Return source/target cells for a non-pass policy candidate."""
+    if getattr(candidate, "is_pass", False):
+        return None
+    source = getattr(candidate, "source", None)
+    target = getattr(candidate, "target", None)
+    if source is None or target is None:
+        return None
+    return source, target
+
+
+def format_policy_preview_lines(preview: Any, max_candidates: int = 5) -> list[str]:
+    """Format a compact policy preview for the right panel."""
+    if preview is None:
+        return ["AI Preview", "No policy preview"]
+
+    lines = ["AI Preview"]
+    candidates = list(getattr(preview, "candidates", ()))[:max_candidates]
+    if not candidates:
+        lines.append("No candidates")
+    for rank, candidate in enumerate(candidates, start=1):
+        probability = getattr(candidate, "probability", 0.0)
+        if getattr(candidate, "is_pass", False):
+            lines.append(f"{rank}. Pass {probability:.0%}")
+            continue
+
+        source = getattr(candidate, "source", None)
+        target = getattr(candidate, "target", None)
+        direction = getattr(candidate, "direction_label", "Move")
+        split = " split" if getattr(candidate, "is_split", False) else ""
+        lines.append(f"{rank}. {source}->{target} {direction}{split} {probability:.0%}")
+
+    value = getattr(preview, "value", None)
+    if value is not None:
+        lines.append(f"Value: {value:+.2f}")
+    if getattr(preview, "policy_mode", "greedy") == "sample":
+        lines.append("Sample mode: action is sampled")
+    return lines
 
 
 def get_valid_target_cells(selected_cell: tuple[int, int] | None, mountains: np.ndarray) -> list[tuple[int, int]]:
@@ -95,6 +140,16 @@ class Renderer:
 
         self._font = pygame.font.Font(Path.FONT_PATH, self.properties.font_size)
         self._debug_font = pygame.font.Font(Path.FONT_PATH, 10)  # Smaller font for debug
+        self._panel_font = self._load_panel_font(14)
+        self._preview_font = self._load_panel_font(12)
+
+    def _load_panel_font(self, size: int) -> pygame.font.Font:
+        """Prefer fonts that can render Chinese UI text, then fall back to bundled font."""
+        for font_name in ("PingFang SC", "Heiti SC", "Noto Sans CJK SC", "Microsoft YaHei", "Arial Unicode MS"):
+            font_path = pygame.font.match_font(font_name)
+            if font_path:
+                return pygame.font.Font(font_path, size)
+        return pygame.font.Font(Path.FONT_PATH, size)
 
     def render(self, fps=None):
         self.render_grid()
@@ -130,6 +185,7 @@ class Renderer:
         """
         Draw player stats and additional info on the right panel
         """
+        self.right_panel.fill(WHITE)
         names = self.game.agents
         player_stats = self.game.get_infos()
         gui_cell_height = Dimension.GUI_CELL_HEIGHT.value
@@ -189,6 +245,7 @@ class Renderer:
 
         if self.mode == GuiMode.GAME:
             self.render_game_status(gui_cell_height)
+            self.render_policy_preview_panel(5 * gui_cell_height)
         # Render right_panel on the screen
         self.screen.blit(self.right_panel, (self.display_grid_width, 0))
 
@@ -209,6 +266,42 @@ class Renderer:
         rect_dim = (0, 0, self.game_status_panel.get_width(), self.game_status_panel.get_height())
         pygame.draw.rect(self.game_status_panel, BLACK, rect_dim, 1)
         self.right_panel.blit(self.game_status_panel, (0, 4 * gui_cell_height))
+
+    def render_policy_preview_panel(self, top: int):
+        """Draw the compact Top-K policy preview panel."""
+        panel_height = self.right_panel.get_height() - top
+        if panel_height <= 0:
+            return
+
+        rect = pygame.Rect(0, top, self.right_panel_width, panel_height)
+        pygame.draw.rect(self.right_panel, WHITE, rect)
+        pygame.draw.rect(self.right_panel, BLACK, rect, 1)
+
+        lines = format_policy_preview_lines(self.properties.policy_preview, max_candidates=5)
+        padding = 8
+        y = rect.top + padding
+        for i, line in enumerate(lines):
+            font = self._panel_font if i == 0 else self._preview_font
+            color = AI_PREVIEW_TEXT if i == 0 else AI_PREVIEW_MUTED
+            if i > 0 and line[:2].strip(".").isdigit():
+                color = AI_PREVIEW_TEXT
+
+            text = self._truncate_text(line, font, rect.width - 2 * padding)
+            text_surface = font.render(text, True, color)
+            if y + text_surface.get_height() > rect.bottom - padding:
+                break
+            self.right_panel.blit(text_surface, (rect.left + padding, y))
+            y += text_surface.get_height() + 4
+
+    def _truncate_text(self, text: str, font: pygame.font.Font, max_width: int) -> str:
+        """Trim text to fit one panel line."""
+        text_surface = font.render(text, True, BLACK)
+        if text_surface.get_width() <= max_width:
+            return text
+        suffix = "..."
+        while text and font.render(text + suffix, True, BLACK).get_width() > max_width:
+            text = text[:-1]
+        return text + suffix if text else suffix
 
     def render_grid(self):
         """
@@ -286,6 +379,7 @@ class Renderer:
         square_size = Dimension.SQUARE_SIZE.value
         for i, j in np.ndindex(self.grid_height, self.grid_width):
             self.game_area.blit(self.tiles[i][j], (j * square_size, i * square_size))
+        self.draw_policy_preview_overlay()
         self.screen.blit(self.game_area, (0, 0))
 
     def channel_to_indices(self, channel: np.ndarray) -> np.ndarray:
@@ -334,6 +428,69 @@ class Renderer:
         for target_row, target_col in get_valid_target_cells(selected_cell, self.game.channels.mountains):
             rect = (3, 3, square_size - 6, square_size - 6)
             pygame.draw.rect(self.tiles[target_row][target_col], VALID_TARGET, rect, 3)
+
+    def draw_policy_preview_overlay(self):
+        """Draw Top-K policy candidates on the game board."""
+        preview = self.properties.policy_preview
+        if preview is None:
+            return
+
+        square_size = Dimension.SQUARE_SIZE.value
+        candidates = list(getattr(preview, "candidates", ()))[:5]
+        for rank, candidate in enumerate(candidates):
+            arrow = get_policy_candidate_arrow(candidate)
+            if arrow is None:
+                continue
+
+            source, target = arrow
+            source_row, source_col = source
+            target_row, target_col = target
+            if not (
+                0 <= source_row < self.grid_height
+                and 0 <= source_col < self.grid_width
+                and 0 <= target_row < self.grid_height
+                and 0 <= target_col < self.grid_width
+            ):
+                continue
+
+            color = AI_PREVIEW_PRIMARY if rank == 0 else AI_PREVIEW_SECONDARY
+            width = 5 if rank == 0 else 3
+            source_rect = pygame.Rect(
+                source_col * square_size + 3,
+                source_row * square_size + 3,
+                square_size - 6,
+                square_size - 6,
+            )
+            target_rect = pygame.Rect(
+                target_col * square_size + 6,
+                target_row * square_size + 6,
+                square_size - 12,
+                square_size - 12,
+            )
+            pygame.draw.rect(self.game_area, color, source_rect, width)
+            pygame.draw.rect(self.game_area, color, target_rect, max(2, width - 1))
+            self._draw_arrow(source, target, color, width)
+
+    def _draw_arrow(self, source: tuple[int, int], target: tuple[int, int], color: Color, width: int) -> None:
+        square_size = Dimension.SQUARE_SIZE.value
+        source_row, source_col = source
+        target_row, target_col = target
+        start = (source_col * square_size + square_size // 2, source_row * square_size + square_size // 2)
+        end = (target_col * square_size + square_size // 2, target_row * square_size + square_size // 2)
+        pygame.draw.line(self.game_area, color, start, end, width)
+
+        angle = math.atan2(end[1] - start[1], end[0] - start[0])
+        head_length = 12
+        head_angle = math.pi / 6
+        left = (
+            end[0] - head_length * math.cos(angle - head_angle),
+            end[1] - head_length * math.sin(angle - head_angle),
+        )
+        right = (
+            end[0] - head_length * math.cos(angle + head_angle),
+            end[1] - head_length * math.sin(angle + head_angle),
+        )
+        pygame.draw.polygon(self.game_area, color, [end, left, right])
 
     def draw_tile_types(self):
         """

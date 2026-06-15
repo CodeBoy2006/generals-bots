@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -9,6 +10,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jrandom
+import numpy as np
 
 from generals.core.action import compute_valid_move_mask
 from generals.core.observation import Observation
@@ -16,6 +18,36 @@ from generals.core.observation import Observation
 from .agent import Agent
 
 PolicyMode = Literal["greedy", "sample"]
+
+_DIRECTION_TARGETS = {
+    0: (-1, 0, "Up"),
+    1: (1, 0, "Down"),
+    2: (0, -1, "Left"),
+    3: (0, 1, "Right"),
+}
+
+
+@dataclass(frozen=True)
+class PolicyActionCandidate:
+    """One semantic PPO action candidate for policy explanation."""
+
+    action: tuple[int, int, int, int, int]
+    probability: float
+    source: tuple[int, int] | None
+    target: tuple[int, int] | None
+    direction: int | None
+    direction_label: str
+    is_split: bool
+    is_pass: bool
+
+
+@dataclass(frozen=True)
+class PolicyPreview:
+    """Top policy candidates plus the value estimate for one observation."""
+
+    candidates: tuple[PolicyActionCandidate, ...]
+    value: float
+    policy_mode: PolicyMode
 
 
 class PolicyValueNetwork(eqx.Module):
@@ -139,6 +171,79 @@ def index_to_action(index: jnp.ndarray, grid_size: int) -> jnp.ndarray:
     return normalize_action(jnp.array([is_pass, row, col, actual_dir, is_half], dtype=jnp.int32))
 
 
+def action_tuple_to_candidate(action: tuple[int, int, int, int, int], probability: float) -> PolicyActionCandidate:
+    """Build a display-friendly candidate from the public action tuple."""
+    is_pass, row, col, direction, is_split = action
+    if is_pass:
+        return PolicyActionCandidate(
+            action=action,
+            probability=probability,
+            source=None,
+            target=None,
+            direction=None,
+            direction_label="Pass",
+            is_split=False,
+            is_pass=True,
+        )
+
+    row_delta, col_delta, label = _DIRECTION_TARGETS[direction]
+    return PolicyActionCandidate(
+        action=action,
+        probability=probability,
+        source=(row, col),
+        target=(row + row_delta, col + col_delta),
+        direction=direction,
+        direction_label=label,
+        is_split=bool(is_split),
+        is_pass=False,
+    )
+
+
+def top_policy_preview(
+    network: PolicyValueNetwork,
+    obs: Observation,
+    top_k: int,
+    policy_mode: PolicyMode,
+) -> PolicyPreview:
+    """Return top semantic policy candidates with pass actions merged."""
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+
+    obs_arr = obs_to_array(obs)
+    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
+    logits, value = network.logits_value(obs_arr, mask)
+
+    grid_size = obs.armies.shape[-1]
+    grid_cells = grid_size * grid_size
+    probabilities = np.asarray(jax.nn.softmax(logits))
+    semantic_probs: dict[tuple[int, int, int, int, int], float] = {}
+
+    for index, probability in enumerate(probabilities.tolist()):
+        if probability <= 0.0:
+            continue
+        direction = index // grid_cells
+        position = index % grid_cells
+        row = position // grid_size
+        col = position % grid_size
+        is_pass = int(direction == 8)
+        is_split = int(4 <= direction < 8)
+        actual_dir = 0 if is_pass else int(direction - 4 if is_split else direction)
+        action = (is_pass, int(row), int(col), actual_dir, is_split)
+        if is_pass:
+            action = (1, 0, 0, 0, 0)
+        semantic_probs[action] = semantic_probs.get(action, 0.0) + float(probability)
+
+    candidates = [
+        action_tuple_to_candidate(action, probability)
+        for action, probability in sorted(semantic_probs.items(), key=lambda item: item[1], reverse=True)[:top_k]
+    ]
+    return PolicyPreview(
+        candidates=tuple(candidates),
+        value=float(np.asarray(value)),
+        policy_mode=policy_mode,
+    )
+
+
 def greedy_policy_action(network: PolicyValueNetwork, obs: Observation) -> jnp.ndarray:
     """Select the maximum-logit valid action from a policy network."""
     obs_arr = obs_to_array(obs)
@@ -206,3 +311,12 @@ class PPOPolicyAgent(Agent):
         if self.policy_mode == "greedy":
             return greedy_policy_action(self.network, observation)
         return sampled_policy_action(self.network, observation, key)
+
+    def explain(self, observation: Observation, top_k: int = 3) -> PolicyPreview:
+        """Explain the current policy by returning the top semantic action candidates."""
+        if observation.armies.shape != (self.grid_size, self.grid_size):
+            raise ValueError(
+                f"PPO checkpoint expects {self.grid_size}x{self.grid_size} observations, "
+                f"got {observation.armies.shape}"
+            )
+        return top_policy_preview(self.network, observation, top_k=top_k, policy_mode=self.policy_mode)

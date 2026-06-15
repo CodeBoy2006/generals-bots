@@ -47,5 +47,13 @@ class GUI:
         self.__renderer.render(fps)
         return command
 
+    def set_policy_preview(self, preview: Any) -> None:
+        """Set the policy preview rendered by the game HUD."""
+        self.properties.policy_preview = preview
+
+    def clear_policy_preview(self) -> None:
+        """Clear the policy preview rendered by the game HUD."""
+        self.properties.policy_preview = None
+
     def close(self):
         pygame.quit()

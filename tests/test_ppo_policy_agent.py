@@ -48,6 +48,54 @@ def test_ppo_policy_agent_rejects_observation_size_mismatch(tmp_path):
         raise AssertionError("Expected ValueError for mismatched observation shape")
 
 
+def test_ppo_policy_agent_explain_returns_ordered_candidates(tmp_path):
+    agent = PPOPolicyAgent(make_checkpoint(tmp_path), grid_size=4, policy_mode="sample")
+
+    preview = agent.explain(make_observation(), top_k=5)
+
+    assert preview.policy_mode == "sample"
+    assert isinstance(preview.value, float)
+    assert 0 < len(preview.candidates) <= 5
+    probabilities = [candidate.probability for candidate in preview.candidates]
+    assert probabilities == sorted(probabilities, reverse=True)
+    for candidate in preview.candidates:
+        assert len(candidate.action) == 5
+        assert 0.0 <= candidate.probability <= 1.0
+        assert candidate.action[0] in (0, 1)
+        assert candidate.action[3] in (0, 1, 2, 3)
+        assert candidate.action[4] in (0, 1)
+        if candidate.is_pass:
+            assert candidate.source is None
+            assert candidate.target is None
+        else:
+            assert candidate.source is not None
+            assert candidate.target is not None
+
+
+def test_ppo_policy_agent_explain_merges_pass_actions(tmp_path):
+    agent = PPOPolicyAgent(make_checkpoint(tmp_path), grid_size=4)
+
+    preview = agent.explain(make_observation(), top_k=20)
+
+    pass_candidates = [candidate for candidate in preview.candidates if candidate.is_pass]
+    assert len(pass_candidates) <= 1
+
+
+def test_ppo_policy_agent_explain_rejects_observation_size_mismatch(tmp_path):
+    agent = PPOPolicyAgent(make_checkpoint(tmp_path), grid_size=4)
+    grid = jnp.zeros((5, 5), dtype=jnp.int32)
+    grid = grid.at[0, 0].set(1)
+    grid = grid.at[4, 4].set(2)
+    obs = game.get_observation(game.create_initial_state(grid), 0)
+
+    try:
+        agent.explain(obs)
+    except ValueError as exc:
+        assert "expects 4x4" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for mismatched observation shape")
+
+
 def test_ppo_policy_agent_accepts_agent_id_keyword(tmp_path):
     agent = PPOPolicyAgent(make_checkpoint(tmp_path), grid_size=4, agent_id="Model")
 

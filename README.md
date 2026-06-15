@@ -114,7 +114,8 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
   --map-generator generated \
   --policy-mode greedy \
   --human-player 0 \
-  --fps 30
+  --fps 30 \
+  --preview-top-k 3
 ```
 
 控制方式：
@@ -124,6 +125,9 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 - 右键或 `Esc` 取消选中，终局后按 `R` 重开，`Q` 退出。
 - 选中的源格会显示黄色边框，可移动目标格会显示绿色边框。
 - 右侧面板会显示当前选择、split 状态和最近一次点击结果。
+- 默认会在棋盘和右侧面板展示 PPO 模型下一步 Top-K 候选动作、概率和 value。
+- `--preview-top-k` 可设置展示 1-5 个候选，`--no-ai-preview` 可关闭预览。
+- `--policy-mode sample` 时预览显示的是采样分布，实际动作仍按概率抽样。
 
 加载 checkpoint 时，`--grid-size` 必须与保存该 `.eqx` 模型时使用的网络尺寸一致。`.eqx` 属于实验产物，建议放在 `/tmp` 或其他实验目录，不要提交进 Git。
 

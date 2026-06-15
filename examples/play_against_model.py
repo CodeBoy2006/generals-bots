@@ -53,6 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--show-tile-types", action="store_true")
+    parser.add_argument("--preview-top-k", type=int, default=3, help="Number of PPO action candidates to preview.")
+    parser.add_argument("--no-ai-preview", dest="ai_preview", action="store_false", help="Disable PPO action preview.")
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
     parser.add_argument("--num-cities-min", type=int, default=4)
@@ -69,6 +71,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--fps must be positive")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    if not (1 <= args.preview_top_k <= 5):
+        parser.error("--preview-top-k must be between 1 and 5")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
         parser.error("mountain density must satisfy 0 <= min <= max <= 1")
     if not (2 <= args.num_cities_min <= args.num_cities_max):
@@ -136,18 +140,26 @@ def main() -> None:
 
     print("Controls: left-click source, left-click adjacent target, S split, P pass, Esc/right-click cancel, R restart.")
     print(f"Playing as player {args.human_player} on {args.grid_size}x{args.grid_size}.")
+    if args.ai_preview:
+        print(f"AI preview: showing top {args.preview_top_k} PPO candidate actions in the right panel.")
 
     step_count = 0
     terminal_reported = False
 
     try:
         while True:
+            reached_limit = step_count >= args.max_steps and int(info.winner) < 0
+            game_done = bool(info.is_done) or reached_limit
+            if args.ai_preview and not game_done:
+                model_obs = game.get_observation(state, model_player)
+                gui.set_policy_preview(policy_agent.explain(model_obs, top_k=args.preview_top_k))
+            else:
+                gui.clear_policy_preview()
+
             command = gui.tick(fps=args.fps)
             if command.quit:
                 break
 
-            reached_limit = step_count >= args.max_steps and int(info.winner) < 0
-            game_done = bool(info.is_done) or reached_limit
             if isinstance(command, GameCommand) and command.restart and game_done:
                 state, info = new_game()
                 game_adapter.update_from_state(state, info)
