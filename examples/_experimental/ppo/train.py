@@ -31,6 +31,7 @@ from common import (
     policy_network_action,
 )
 from network import PolicyValueNetwork, obs_to_array
+from generals.agents.ppo_policy_agent import parse_policy_channels
 
 
 def random_action(key, obs):
@@ -103,9 +104,9 @@ def make_initial_states(pool, num_envs):
     return states._replace(pool_idx=pool_idx)
 
 
-def load_or_create_network(key, grid_size, init_model_path=None):
+def load_or_create_network(key, grid_size, init_model_path=None, channels=None):
     """Create a policy network and optionally restore its leaves from a checkpoint."""
-    network = PolicyValueNetwork(key, grid_size=grid_size)
+    network = PolicyValueNetwork(key, grid_size=grid_size, channels=parse_policy_channels(channels))
     if init_model_path is None:
         return network
 
@@ -467,6 +468,16 @@ def main():
     )
     parser.add_argument("--city-army-min", type=int, default=40, help="Generated city minimum starting army.")
     parser.add_argument("--city-army-max", type=int, default=51, help="Generated city maximum starting army.")
+    parser.add_argument(
+        "--channels",
+        default=None,
+        help="Policy network channels as four comma-separated integers, for example 64,64,64,32.",
+    )
+    parser.add_argument(
+        "--opponent-channels",
+        default=None,
+        help="Frozen checkpoint opponent channels. Defaults to --channels when omitted.",
+    )
     parser.add_argument("--init-model-path", default=None, help="Optional checkpoint to warm-start PPO from.")
     parser.add_argument("--model-path", default="jax_ppo_model.eqx", help="Path where the trained model is saved.")
     parser.add_argument("--seed", type=int, default=42, help="Training PRNG seed.")
@@ -497,6 +508,11 @@ def main():
         parser.error("--minibatch-size must be positive when provided")
     if args.terminal_reward_scale < 0.0:
         parser.error("--terminal-reward-scale must be non-negative")
+    try:
+        channels = parse_policy_channels(args.channels)
+        opponent_channels = parse_policy_channels(args.opponent_channels if args.opponent_channels is not None else args.channels)
+    except ValueError as exc:
+        parser.error(str(exc))
     
     print("JAX PPO (Raw Game API - Max Performance)")
     print(f"Environments:  {num_envs}")
@@ -507,7 +523,9 @@ def main():
     else:
         print(f"Opponent:      policy checkpoint ({args.opponent_policy_mode})")
         print(f"Opponent path: {args.opponent_policy_path}")
+        print(f"Opponent ch:   {opponent_channels}")
     print(f"Grid:          {grid_size}x{grid_size} ({args.map_generator}, truncation={args.truncation})")
+    print(f"Channels:      {channels}")
     if args.map_generator == "generated":
         print(f"Mountains:     {args.mountain_density_min:.2f}-{args.mountain_density_max:.2f}")
         print(f"Cities:        {args.num_cities_min}-{args.num_cities_max}")
@@ -523,13 +541,19 @@ def main():
     # Initialize
     key = jrandom.PRNGKey(args.seed)
     key, net_key, opponent_net_key = jrandom.split(key, 3)
-    network = load_or_create_network(net_key, grid_size=grid_size, init_model_path=args.init_model_path)
+    network = load_or_create_network(
+        net_key,
+        grid_size=grid_size,
+        init_model_path=args.init_model_path,
+        channels=channels,
+    )
     opponent_network = None
     if args.opponent_policy_path is not None:
         opponent_network = load_or_create_network(
             opponent_net_key,
             grid_size=grid_size,
             init_model_path=args.opponent_policy_path,
+            channels=opponent_channels,
         )
     optimizer = optax.adam(lr)
     params = eqx.filter(network, eqx.is_inexact_array)

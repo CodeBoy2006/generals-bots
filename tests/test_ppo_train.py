@@ -26,6 +26,28 @@ def test_load_or_create_network_restores_checkpoint(tmp_path):
     assert jnp.allclose(loaded_value, saved_value)
 
 
+def test_load_or_create_network_restores_custom_channel_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / "wide-policy.eqx"
+    channels = (16, 16, 16, 8)
+    saved = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=4, channels=channels)
+    eqx.tree_serialise_leaves(checkpoint_path, saved)
+
+    loaded = load_or_create_network(
+        jrandom.PRNGKey(1),
+        grid_size=4,
+        init_model_path=checkpoint_path,
+        channels=channels,
+    )
+
+    obs = jnp.zeros((9, 4, 4), dtype=jnp.float32)
+    mask = jnp.ones((4, 4, 4), dtype=bool)
+    saved_logits, saved_value = saved.logits_value(obs, mask)
+    loaded_logits, loaded_value = loaded.logits_value(obs, mask)
+
+    assert jnp.allclose(loaded_logits, saved_logits)
+    assert jnp.allclose(loaded_value, saved_value)
+
+
 def test_load_or_create_network_rejects_missing_checkpoint(tmp_path):
     missing_path = tmp_path / "missing.eqx"
 

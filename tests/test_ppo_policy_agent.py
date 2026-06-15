@@ -2,7 +2,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jrandom
 
-from generals.agents.ppo_policy_agent import PPOPolicyAgent, PolicyValueNetwork
+from generals.agents.ppo_policy_agent import PPOPolicyAgent, PolicyValueNetwork, load_policy_network, parse_policy_channels
 from generals.core import game
 
 
@@ -11,6 +11,13 @@ def make_checkpoint(tmp_path, grid_size=4):
     network = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=grid_size)
     eqx.tree_serialise_leaves(model_path, network)
     return model_path
+
+
+def make_checkpoint_with_channels(tmp_path, grid_size=4, channels=(16, 16, 16, 8)):
+    model_path = tmp_path / "wide-policy.eqx"
+    network = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=grid_size, channels=channels)
+    eqx.tree_serialise_leaves(model_path, network)
+    return model_path, network
 
 
 def make_observation():
@@ -68,3 +75,22 @@ def test_ppo_policy_agent_rejects_conflicting_identifier_keywords(tmp_path):
         assert "id" in str(exc)
     else:
         raise AssertionError("Expected TypeError for conflicting identifier keywords")
+
+
+def test_parse_policy_channels_accepts_four_positive_integers():
+    assert parse_policy_channels("64,64,64,32") == (64, 64, 64, 32)
+    assert parse_policy_channels((16, 16, 16, 8)) == (16, 16, 16, 8)
+
+
+def test_load_policy_network_accepts_custom_channels(tmp_path):
+    model_path, saved = make_checkpoint_with_channels(tmp_path)
+
+    loaded = load_policy_network(model_path, grid_size=4, channels=(16, 16, 16, 8))
+
+    obs = jnp.zeros((9, 4, 4), dtype=jnp.float32)
+    mask = jnp.ones((4, 4, 4), dtype=bool)
+    saved_logits, saved_value = saved.logits_value(obs, mask)
+    loaded_logits, loaded_value = loaded.logits_value(obs, mask)
+
+    assert jnp.allclose(loaded_logits, saved_logits)
+    assert jnp.allclose(loaded_value, saved_value)

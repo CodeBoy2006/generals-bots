@@ -346,6 +346,37 @@ rollout-search as player 1 vs v5 sample, seed 19193:
 
 结论：rollout-search 已经让“v5 + 强辅助推理”稳定超过当前 v5 checkpoint 的 80% 总胜率，但目前还没有成功把该行为压缩回现有 42k 参数 checkpoint。继续训练纯 checkpoint 时，应把 search policy 作为 teacher，同时考虑更大网络、更多输入通道、DAgger 数据混合或训练时保留 search distillation 的 KL/temperature 控制。
 
+### 容量扩展实验
+
+训练和评估入口现在支持非默认网络容量：
+
+```bash
+--channels 64,64,64,32
+--opponent-channels 32,32,32,16
+```
+
+`--channels` 描述候选 checkpoint 的四层卷积通道；`--opponent-channels` 描述冻结对手 checkpoint。默认 v5 使用 `(32, 32, 32, 16)`。
+
+一次临时实验将 v5 权重嵌入到 `(64, 64, 64, 32)` 的更宽网络中，初始评估仍接近 v5-vs-v5 基线：
+
+```text
+/tmp/generals-ppo-8x8-v5-expanded-64.eqx as player 0 vs v5 sample:
+  wins/losses/draws = 468/450/106
+  win rate = 45.70%
+  decisive win rate = 50.98%
+```
+
+随后用该 expanded-64 checkpoint 做 DAgger 式 rollout-search 蒸馏，学生状态由学生自身产生、标签来自固定 v5 rollout-search teacher；结果退化：
+
+```text
+/tmp/generals-ppo-8x8-expanded64-dagger-search-v1.eqx as player 0 vs v5 sample:
+  wins/losses/draws = 371/1512/165
+  win rate = 18.12%
+  decisive win rate = 19.70%
+```
+
+这说明“简单扩宽 + search-label 交叉熵”仍不足以压缩 search teacher。后续若继续走纯 checkpoint 路线，应优先尝试混合目标：保持 v5 行为的 KL/BC 权重更强、只在高置信 search 改进样本上更新、或使用价值/优势回归而不是强制动作分类。
+
 ## 评估命令
 
 评估 player 0：

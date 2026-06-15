@@ -30,6 +30,7 @@ from common import (
 )
 from network import PolicyValueNetwork
 from train import random_action
+from generals.agents.ppo_policy_agent import parse_policy_channels
 
 
 @eqx.filter_jit
@@ -150,6 +151,16 @@ def parse_args():
     parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="greedy")
     parser.add_argument("--opponent-policy-path", default=None)
     parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument(
+        "--channels",
+        default=None,
+        help="Policy model channels as four comma-separated integers, for example 64,64,64,32.",
+    )
+    parser.add_argument(
+        "--opponent-channels",
+        default=None,
+        help="Opponent policy checkpoint channels. Defaults to --channels when omitted.",
+    )
     parser.add_argument("--policy-player", type=int, choices=(0, 1), default=0)
     parser.add_argument("--max-steps", type=int, default=250)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
@@ -169,6 +180,13 @@ def parse_args():
         parser.error("--num-games must be positive")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    try:
+        args.channels = parse_policy_channels(args.channels)
+        args.opponent_channels = parse_policy_channels(
+            args.opponent_channels if args.opponent_channels is not None else args.channels
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -180,11 +198,11 @@ def main():
 
     key = jrandom.PRNGKey(args.seed)
     key, net_key, map_key, eval_key = jrandom.split(key, 4)
-    network = PolicyValueNetwork(net_key, grid_size=args.grid_size)
+    network = PolicyValueNetwork(net_key, grid_size=args.grid_size, channels=args.channels)
     network = eqx.tree_deserialise_leaves(args.model_path, network)
     opponent_network = None
     if args.opponent_policy_path is not None:
-        opponent_network = PolicyValueNetwork(net_key, grid_size=args.grid_size)
+        opponent_network = PolicyValueNetwork(net_key, grid_size=args.grid_size, channels=args.opponent_channels)
         opponent_network = eqx.tree_deserialise_leaves(args.opponent_policy_path, opponent_network)
 
     grids = make_grids(
@@ -226,12 +244,14 @@ def main():
     print(f"Model:              {args.model_path}")
     print(f"Device:             {jax.devices()[0]}")
     print(f"Grid:               {args.grid_size}x{args.grid_size} ({args.map_generator})")
+    print(f"Channels:           {args.channels}")
     if args.opponent_policy_path is None:
         print(f"Opponent:           {args.opponent}")
     else:
         print(f"Opponent:           policy checkpoint")
         print(f"Opponent model:     {args.opponent_policy_path}")
         print(f"Opponent mode:      {args.opponent_policy_mode}")
+        print(f"Opponent channels:  {args.opponent_channels}")
     print(f"Policy mode:        {args.policy_mode}")
     print(f"Policy player:      {args.policy_player}")
     print(f"Games:              {args.num_games}")

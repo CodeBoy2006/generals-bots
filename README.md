@@ -202,7 +202,7 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --model-path /tmp/generals-ppo-selfplay-next.eqx
 ```
 
-`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。
+`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
 
 胜者轨迹辅助克隆：
 
@@ -285,6 +285,7 @@ uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-8x
 使用 `--policy-player 1` 可做镜像座位评估，避免只测 player 0 带来的出生点偏差。
 
 评估两个 checkpoint 之间的对局时，给 `evaluate_policy.py` 传入 `--opponent-policy-path` 和 `--opponent-policy-mode`。
+评估非默认容量 checkpoint 时，给候选传入 `--channels`；如果对手 checkpoint 容量不同，再传入 `--opponent-channels`。
 
 ## 验证
 

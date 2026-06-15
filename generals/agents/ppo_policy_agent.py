@@ -16,6 +16,8 @@ from generals.core.observation import Observation
 from .agent import Agent
 
 PolicyMode = Literal["greedy", "sample"]
+PolicyChannels = tuple[int, int, int, int]
+DEFAULT_POLICY_CHANNELS: PolicyChannels = (32, 32, 32, 16)
 
 
 class PolicyValueNetwork(eqx.Module):
@@ -30,7 +32,7 @@ class PolicyValueNetwork(eqx.Module):
     value_linear1: eqx.nn.Linear
     value_linear2: eqx.nn.Linear
 
-    def __init__(self, key: jnp.ndarray, grid_size: int = 4, channels: tuple[int, int, int, int] = (32, 32, 32, 16)):
+    def __init__(self, key: jnp.ndarray, grid_size: int = 4, channels: PolicyChannels = DEFAULT_POLICY_CHANNELS):
         keys = jrandom.split(key, 8)
 
         self.conv1 = eqx.nn.Conv2d(9, channels[0], kernel_size=3, padding=1, key=keys[0])
@@ -155,7 +157,27 @@ def sampled_policy_action(network: PolicyValueNetwork, obs: Observation, key: jn
     return normalize_action(action)
 
 
-def load_policy_network(model_path: str | Path, grid_size: int, key: jnp.ndarray | None = None) -> PolicyValueNetwork:
+def parse_policy_channels(channels: str | tuple[int, int, int, int] | list[int] | None) -> PolicyChannels:
+    """Parse the four convolution channel sizes used by PolicyValueNetwork."""
+    if channels is None:
+        return DEFAULT_POLICY_CHANNELS
+    if isinstance(channels, str):
+        parts = tuple(int(part.strip()) for part in channels.split(",") if part.strip())
+    else:
+        parts = tuple(int(part) for part in channels)
+    if len(parts) != 4:
+        raise ValueError("policy channels must contain exactly four integers")
+    if any(part <= 0 for part in parts):
+        raise ValueError("policy channels must be positive")
+    return parts
+
+
+def load_policy_network(
+    model_path: str | Path,
+    grid_size: int,
+    key: jnp.ndarray | None = None,
+    channels: str | PolicyChannels | list[int] | None = None,
+) -> PolicyValueNetwork:
     """Load a PPO PolicyValueNetwork checkpoint from an Equinox .eqx file."""
     path = Path(model_path)
     if not path.exists():
@@ -164,11 +186,14 @@ def load_policy_network(model_path: str | Path, grid_size: int, key: jnp.ndarray
         raise ValueError("grid_size must be at least 4")
 
     init_key = jrandom.PRNGKey(0) if key is None else key
-    network = PolicyValueNetwork(init_key, grid_size=grid_size)
+    parsed_channels = parse_policy_channels(channels)
+    network = PolicyValueNetwork(init_key, grid_size=grid_size, channels=parsed_channels)
     try:
         return eqx.tree_deserialise_leaves(path, network)
     except Exception as exc:
-        raise ValueError(f"Failed to load PPO checkpoint for grid_size={grid_size}: {path}") from exc
+        raise ValueError(
+            f"Failed to load PPO checkpoint for grid_size={grid_size}, channels={parsed_channels}: {path}"
+        ) from exc
 
 
 class PPOPolicyAgent(Agent):
@@ -180,6 +205,7 @@ class PPOPolicyAgent(Agent):
         grid_size: int,
         policy_mode: PolicyMode = "greedy",
         agent_id: str = "PPO",
+        channels: str | PolicyChannels | list[int] | None = None,
         **kwargs: str,
     ):
         if "id" in kwargs:
@@ -195,7 +221,8 @@ class PPOPolicyAgent(Agent):
             raise ValueError("policy_mode must be 'greedy' or 'sample'")
         self.grid_size = grid_size
         self.policy_mode: PolicyMode = policy_mode
-        self.network = load_policy_network(model_path, grid_size)
+        self.channels = parse_policy_channels(channels)
+        self.network = load_policy_network(model_path, grid_size, channels=self.channels)
 
     def act(self, observation: Observation, key: jnp.ndarray) -> jnp.ndarray:
         if observation.armies.shape != (self.grid_size, self.grid_size):
