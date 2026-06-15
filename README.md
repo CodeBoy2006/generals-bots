@@ -228,7 +228,7 @@ uv run python examples/_experimental/ppo/train.py 256 \
   --model-path /tmp/generals-ppo-current-selfplay.eqx
 ```
 
-`--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 同时使用。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
+`--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 同时使用。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。`--policy-input augmented-full-state` 可让 PPO learner 使用 18 通道输入，通常与 `--init-input-channels 9` 一起从 v5 这类 9 通道 checkpoint 扩展。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
 
 胜者轨迹辅助克隆：
 

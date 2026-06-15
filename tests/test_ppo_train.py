@@ -3,12 +3,13 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
-from examples._experimental.ppo.common import policy_network_action
+from examples._experimental.ppo.common import POLICY_INPUT_NAME_TO_ID, policy_network_action
 from examples._experimental.ppo.evaluate_policy import evaluate_policy_opponent_batch, summarize_policy_results
 from examples._experimental.ppo.train import (
     apply_terminal_reward,
     load_or_create_network,
     resolve_opponent_source,
+    rollout_step_policy_opponent,
     stack_learner_actions,
 )
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, greedy_policy_action
@@ -195,3 +196,31 @@ def test_evaluate_policy_opponent_batch_supports_full_state_policy_input():
     )
 
     assert info.winner.shape == (2,)
+
+
+def test_rollout_step_policy_opponent_supports_augmented_learner_input():
+    learner = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=4, input_channels=18)
+    opponent = PolicyValueNetwork(jrandom.PRNGKey(1), grid_size=4)
+    grid = jnp.zeros((4, 4), dtype=jnp.int32).at[0, 0].set(1).at[3, 3].set(2)
+    state = game.create_initial_state(grid)
+    pool = jax.tree.map(lambda x: jnp.stack([x, x, x, x]), state)
+    states = pool._replace(pool_idx=jnp.array([2, 3, 0, 1], dtype=jnp.int32))
+
+    _, batch, _ = rollout_step_policy_opponent(
+        states,
+        pool,
+        learner,
+        opponent,
+        jrandom.PRNGKey(2),
+        truncation=20,
+        opponent_policy_mode=1,
+        learner_player=0,
+        terminal_reward_scale=0.0,
+        policy_input=POLICY_INPUT_NAME_TO_ID["augmented-full-state"],
+        opponent_policy_input=POLICY_INPUT_NAME_TO_ID["observation"],
+    )
+
+    obs_arr, masks = batch[:2]
+
+    assert obs_arr.shape == (4, 18, 4, 4)
+    assert masks.shape == (4, 4, 4, 4)

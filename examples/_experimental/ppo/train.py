@@ -25,12 +25,16 @@ from generals.core.rewards import composite_reward_fn
 from common import (
     OPPONENT_NAME_TO_ID,
     OPPONENT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    POLICY_INPUT_NAMES,
     POLICY_MODE_NAME_TO_ID,
     POLICY_MODE_NAMES,
     opponent_action,
-    policy_network_action,
+    policy_input_array_and_mask,
+    policy_input_default_channels,
+    policy_state_action,
 )
-from network import PolicyValueNetwork, obs_to_array
+from network import PolicyValueNetwork
 from generals.agents.ppo_policy_agent import parse_policy_channels
 
 
@@ -203,7 +207,17 @@ def apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale)
 
 
 @eqx.filter_jit
-def rollout_step(states, pool, network, key, truncation, opponent_id, learner_player, terminal_reward_scale):
+def rollout_step(
+    states,
+    pool,
+    network,
+    key,
+    truncation,
+    opponent_id,
+    learner_player,
+    terminal_reward_scale,
+    policy_input=0,
+):
     """Vectorized rollout step for all environments."""
     num_envs = states.armies.shape[0]
     
@@ -214,8 +228,9 @@ def rollout_step(states, pool, network, key, truncation, opponent_id, learner_pl
     opponent_obs_prior = select_opponent_obs(obs_p0_prior, obs_p1_prior, learner_player)
     
     # Actions from network
-    obs_arr = jax.vmap(obs_to_array)(learner_obs_prior)
-    masks = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(learner_obs_prior)
+    obs_arr, masks = jax.vmap(
+        lambda state, obs: policy_input_array_and_mask(state, obs, learner_player, policy_input)
+    )(states, learner_obs_prior)
     
     key, *keys = jrandom.split(key, num_envs + 1)
     learner_actions, values, logprobs, entropies = jax.vmap(network, in_axes=(0, 0, 0, None))(
@@ -278,17 +293,21 @@ def rollout_step_policy_opponent(
     opponent_policy_mode,
     learner_player,
     terminal_reward_scale,
+    policy_input=0,
+    opponent_policy_input=0,
 ):
     """Vectorized rollout step against a frozen policy checkpoint opponent."""
     num_envs = states.armies.shape[0]
+    opponent_player = 1 - learner_player
 
     obs_p0_prior = jax.vmap(lambda s: game.get_observation(s, 0))(states)
     obs_p1_prior = jax.vmap(lambda s: game.get_observation(s, 1))(states)
     learner_obs_prior = select_learner_obs(obs_p0_prior, obs_p1_prior, learner_player)
     opponent_obs_prior = select_opponent_obs(obs_p0_prior, obs_p1_prior, learner_player)
 
-    obs_arr = jax.vmap(obs_to_array)(learner_obs_prior)
-    masks = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(learner_obs_prior)
+    obs_arr, masks = jax.vmap(
+        lambda state, obs: policy_input_array_and_mask(state, obs, learner_player, policy_input)
+    )(states, learner_obs_prior)
 
     key, *keys = jrandom.split(key, num_envs + 1)
     learner_actions, values, logprobs, entropies = jax.vmap(network, in_axes=(0, 0, 0, None))(
@@ -296,8 +315,20 @@ def rollout_step_policy_opponent(
     )
 
     key, *keys = jrandom.split(key, num_envs + 1)
-    opponent_actions = jax.vmap(lambda k, o: policy_network_action(opponent_network, k, o, opponent_policy_mode))(
-        jnp.stack(keys), opponent_obs_prior
+    opponent_actions = jax.vmap(
+        lambda state, k, obs: policy_state_action(
+            opponent_network,
+            k,
+            state,
+            obs,
+            opponent_player,
+            opponent_policy_mode,
+            opponent_policy_input,
+        )
+    )(
+        states,
+        jnp.stack(keys),
+        opponent_obs_prior,
     )
 
     actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
@@ -487,6 +518,19 @@ def main():
         help="Optional win/loss reward added on decisive terminal transitions.",
     )
     parser.add_argument(
+        "--policy-input",
+        choices=POLICY_INPUT_NAMES,
+        default="observation",
+        help="Input encoding used by the learner policy.",
+    )
+    parser.add_argument("--input-channels", type=int, default=None, help="Learner network input channels.")
+    parser.add_argument(
+        "--init-input-channels",
+        type=int,
+        default=None,
+        help="Warm-start checkpoint input channels before optional learner input expansion.",
+    )
+    parser.add_argument(
         "--opponent-policy-path",
         default=None,
         help="Optional frozen PPO checkpoint to use as the player-1 opponent instead of --opponent.",
@@ -502,6 +546,13 @@ def main():
         default="sample",
         help="Execution mode for --opponent-policy-path.",
     )
+    parser.add_argument(
+        "--opponent-policy-input",
+        choices=POLICY_INPUT_NAMES,
+        default=None,
+        help="Input encoding used by a policy opponent. Defaults to observation for frozen checkpoints and learner input for current self-play.",
+    )
+    parser.add_argument("--opponent-input-channels", type=int, default=None, help="Frozen opponent network input channels.")
     parser.add_argument("--pool-size", type=int, default=2048, help="Number of pre-generated reset states.")
     parser.add_argument(
         "--map-generator",
@@ -567,10 +618,33 @@ def main():
         parser.error("--minibatch-size must be positive when provided")
     if args.terminal_reward_scale < 0.0:
         parser.error("--terminal-reward-scale must be non-negative")
+    if args.input_channels is not None and args.input_channels <= 0:
+        parser.error("--input-channels must be positive")
+    if args.init_input_channels is not None and args.init_input_channels <= 0:
+        parser.error("--init-input-channels must be positive")
+    if args.opponent_input_channels is not None and args.opponent_input_channels <= 0:
+        parser.error("--opponent-input-channels must be positive")
     try:
         opponent_source = resolve_opponent_source(args.opponent_policy_path, args.self_play_opponent)
     except ValueError as exc:
         parser.error(str(exc))
+    input_channels = args.input_channels or policy_input_default_channels(args.policy_input)
+    init_input_channels = args.init_input_channels
+    if init_input_channels is None and args.init_model_path is not None and input_channels != 9:
+        init_input_channels = 9
+    opponent_policy_input_name = args.opponent_policy_input
+    if opponent_source == "current":
+        if opponent_policy_input_name is not None and opponent_policy_input_name != args.policy_input:
+            parser.error("--opponent-policy-input must match --policy-input when using --self-play-opponent")
+        if args.opponent_input_channels is not None and args.opponent_input_channels != input_channels:
+            parser.error("--opponent-input-channels must match --input-channels when using --self-play-opponent")
+        opponent_policy_input_name = args.policy_input
+        opponent_input_channels = input_channels
+    else:
+        opponent_policy_input_name = opponent_policy_input_name or "observation"
+        opponent_input_channels = args.opponent_input_channels or policy_input_default_channels(opponent_policy_input_name)
+    policy_input = POLICY_INPUT_NAME_TO_ID[args.policy_input]
+    opponent_policy_input = POLICY_INPUT_NAME_TO_ID[opponent_policy_input_name]
     try:
         channels = parse_policy_channels(args.channels)
         opponent_channels = parse_policy_channels(args.opponent_channels if args.opponent_channels is not None else args.channels)
@@ -581,12 +655,14 @@ def main():
     print(f"Environments:  {num_envs}")
     print(f"Device:        {jax.devices()[0]}")
     print(f"Learner:       player {args.learner_player}")
+    print(f"Policy input:  {args.policy_input} ({input_channels} channels)")
     if opponent_source == "heuristic":
         print(f"Opponent:      {args.opponent}")
     elif opponent_source == "checkpoint":
         print(f"Opponent:      policy checkpoint ({args.opponent_policy_mode})")
         print(f"Opponent path: {args.opponent_policy_path}")
         print(f"Opponent ch:   {opponent_channels}")
+        print(f"Opponent in:   {opponent_policy_input_name} ({opponent_input_channels} channels)")
     else:
         print(f"Opponent:      current policy self-play ({args.opponent_policy_mode})")
     print(f"Grid:          {grid_size}x{grid_size} ({args.map_generator}, truncation={args.truncation})")
@@ -611,6 +687,8 @@ def main():
         grid_size=grid_size,
         init_model_path=args.init_model_path,
         channels=channels,
+        input_channels=input_channels,
+        init_input_channels=init_input_channels,
     )
     opponent_network = None
     if opponent_source == "checkpoint":
@@ -619,6 +697,7 @@ def main():
             grid_size=grid_size,
             init_model_path=args.opponent_policy_path,
             channels=opponent_channels,
+            input_channels=opponent_input_channels,
         )
     optimizer = optax.adam(lr)
     params = eqx.filter(network, eqx.is_inexact_array)
@@ -655,6 +734,7 @@ def main():
                 opponent_id,
                 args.learner_player,
                 args.terminal_reward_scale,
+                policy_input,
             )
         else:
             active_opponent_network = network if opponent_source == "current" else opponent_network
@@ -668,6 +748,8 @@ def main():
                 opponent_policy_mode,
                 args.learner_player,
                 args.terminal_reward_scale,
+                policy_input,
+                opponent_policy_input,
             )
     jax.block_until_ready(states)
     
@@ -689,6 +771,7 @@ def main():
                     opponent_id,
                     args.learner_player,
                     args.terminal_reward_scale,
+                    policy_input,
                 )
             else:
                 active_opponent_network = network if opponent_source == "current" else opponent_network
@@ -702,6 +785,8 @@ def main():
                     opponent_policy_mode,
                     args.learner_player,
                     args.terminal_reward_scale,
+                    policy_input,
+                    opponent_policy_input,
                 )
             rollout_data.append(data)
         jax.block_until_ready(states)

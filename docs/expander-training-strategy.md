@@ -549,6 +549,150 @@ player 1, seed 25321:
 
 结论：18 通道 augmented 输入解决了“替换通道语义破坏 v5”的问题，是后续 privileged/search-feature 学习的正确接口；但当前 search-action 蒸馏目标仍不足以把 80%+ rollout-search 行为压缩进纯 checkpoint。
 
+#### augmented PPO best-response 训练
+
+`train.py` 现在也支持 `--policy-input`、`--input-channels`、`--init-input-channels`、`--opponent-policy-input` 和 `--opponent-input-channels`。这让 PPO rollout 本身可以使用 18 通道 augmented 输入，而不是只在蒸馏脚本中使用 privileged 特征。
+
+从 v5 直接扩展到 18 通道并对 frozen v5 sample 训练 player 0：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 500 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --truncation 500 \
+  --policy-input augmented-full-state \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 2.0 \
+  --model-path /tmp/generals-ppo-8x8-augmented-ppo-br-p0-v1.eqx \
+  --seed 26110
+```
+
+结果有小幅 player 0 提升，但远离 80%，且 player 1 没有改善：
+
+```text
+/tmp/generals-ppo-8x8-augmented-ppo-br-p0-v1.eqx, player 0, seed 26120:
+  candidate wins/losses/draws = 489/441/94
+  same-seed v5 baseline       = 455/453/116
+
+player 1, seed 26121:
+  candidate wins/losses/draws = 471/453/100
+  same-seed v5 baseline       = 476/456/92
+```
+
+从 p0 候选继续训练 player 1 时必须显式传 `--init-input-channels 18`，否则 18 通道 checkpoint 会被误按 9 通道 warm start 读取：
+
+```bash
+uv run python examples/_experimental/ppo/train.py 512 \
+  --policy-input augmented-full-state \
+  --input-channels 18 \
+  --init-input-channels 18 \
+  --init-model-path /tmp/generals-ppo-8x8-augmented-ppo-br-p0-v1.eqx \
+  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-mode sample \
+  --learner-player 1 \
+  --terminal-reward-scale 2.0 \
+  --model-path /tmp/generals-ppo-8x8-augmented-ppo-br-alt-v1.eqx
+```
+
+交替 seat 训练保住了 player 0 的小幅提升，但 player 1 变差：
+
+```text
+/tmp/generals-ppo-8x8-augmented-ppo-br-alt-v1.eqx, player 0, seed 26140:
+  candidate wins/losses/draws = 479/462/83
+  same-seed v5 baseline       = 432/471/121
+
+player 1, seed 26141:
+  candidate wins/losses/draws = 467/476/81
+  same-seed v5 baseline       = 493/451/80
+```
+
+从 v5 直接训练 player 1 也没有成功：
+
+```text
+/tmp/generals-ppo-8x8-augmented-ppo-br-p1-v1.eqx, player 1, seed 26160:
+  candidate wins/losses/draws = 446/492/86
+  same-seed v5 baseline       = 468/470/86
+
+player 0, seed 26161:
+  candidate wins/losses/draws = 465/465/94
+  same-seed v5 baseline       = 449/491/84
+```
+
+把 18 通道 augmented PPO 与 expanded-64 容量结合也退化：
+
+```text
+/tmp/generals-ppo-8x8-expanded64-augmented-ppo-br-p0-v1.eqx, player 0, seed 26220:
+  candidate wins/losses/draws = 466/467/91
+  same-seed v5 baseline       = 493/442/89
+
+player 1, seed 26221:
+  candidate wins/losses/draws = 463/472/89
+  same-seed v5 baseline       = 495/433/96
+```
+
+把 terminal reward 从 `2.0` 提高到 `20.0` 会直接破坏策略：
+
+```text
+/tmp/generals-ppo-8x8-augmented-ppo-terminal20-p0-v1.eqx, player 0, seed 26320, 512 games:
+  candidate wins/losses/draws = 111/374/27
+  win rate = 21.68%
+```
+
+因此，当前 PPO best-response 结论是：
+
+- 18 通道输入能被 PPO 训练链路正常使用。
+- 从 v5 warm start 后，普通终局奖励只产生 2-5 个百分点级别的 seat-dependent 波动。
+- 更强 terminal reward 会加速策略崩坏，而不是学出 best response。
+- expanded-64 容量没有改善 PPO 吸收 hidden-state 信息的能力。
+
+#### 高 margin search 蒸馏中止记录
+
+最后一次尝试改用高 margin search 标签，目标是只学习 search 评分明显优于 base top-prior 的样本，减少低 margin 噪声：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
+  --base-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --policy-input augmented-full-state \
+  --target-mode hard \
+  --num-steps 64 \
+  --num-iterations 500 \
+  --minibatch-size 8192 \
+  --min-margin 25 \
+  --margin-scale 100 \
+  --max-improve-weight 1.0 \
+  --improve-weight 0.2 \
+  --kl-weight 1.0 \
+  --lr 0.000005 \
+  --model-path /tmp/generals-ppo-8x8-augmented-hard-search-highmargin-v1.eqx \
+  --seed 26410
+```
+
+该运行按用户指令在 iter 470 附近终止，脚本没有正常保存 checkpoint，因此没有可评估模型。训练日志显示：
+
+```text
+selected samples: usually 3.0%-5.3% of 8192
+mean selected margin: roughly 310-360
+KL near interrupt: about 0.03
+```
+
+这说明高 margin 样本确实存在，且不会立即把学生推离 v5；但本次中止前没有产生 checkpoint。若恢复该方向，应先给 `conservative_search_distill.py` 增加定期 checkpoint 保存，避免长实验被中断时丢失中间模型。
+
 ### 容量扩展实验
 
 训练和评估入口现在支持非默认网络容量：
