@@ -489,3 +489,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the 256-env v3-outcome GPU triage from the 71.29% search-distill checkpoint and compare final/retained checkpoints with 256 games/row before any promotion.
 - **Context:** Verification passed with focused adaptive tests (`36 passed`), compileall, `git diff --check`, full CPU pytest (`179 passed`), and a CUDA smoke that trained `/tmp/generals-adaptive-ppo-v3-outcome-smoke.eqx` then loaded it with `evaluate_adaptive_policy.py --outcome-head`. The smoke evaluation used only 16 games/row at 300 steps and is not a strength result.
+
+## [2026-06-16 22:21] Adaptive Outcome Auxiliary GPU Triage
+- **Changes:** Documented outcome auxiliary GPU probes in `docs/expander-training-strategy.md`, including weight `0.05`, lower weight `0.005`, same-seed scalar base control, and a 512 games/row promotion check.
+- **Status:** Completed
+- **Next Steps:** Stop sweeping this exact rollout-local outcome auxiliary loss; next implementation should change representation or teacher signal, such as memory/global context channels, scoreboard history, or search-to-Q/intent distillation.
+- **Context:** `outcome_aux_weight=0.05` damaged size-seat stability with best 256-row min `67.58%`. `0.005` reached `71.88%` at iter 10 over 256 games/row but failed 512-row promotion at `68.95%`, below the existing 71.29%/512-row search-distill candidate.

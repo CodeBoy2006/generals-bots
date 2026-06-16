@@ -1997,6 +1997,44 @@ train log:
 
 The smoke only verifies that scalar checkpoints can warm-start into an outcome-head model, the CUDA trainer can update/save it, and `evaluate_adaptive_policy.py --outcome-head` can load it. Its 16-row evaluation is intentionally too small and truncated at 300 steps, so it is not a strength result.
 
+Outcome auxiliary GPU triage:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-outcome.eqx
+config: outcome_aux_weight=0.05, 256 envs, num_steps=256, num_iterations=40
+train log:
+  iter 1:  loss=16.0880, episodes=87,  wins=68, draws=0,  SPS=9391
+  iter 10: loss=10.0618, episodes=161, wins=98, draws=23, SPS=79565
+  iter 20: loss=6.3880,  episodes=132, wins=47, draws=38, SPS=78496
+  iter 30: loss=5.0360,  episodes=143, wins=33, draws=41, SPS=77142
+  iter 40: loss=4.2419,  episodes=145, wins=33, draws=39, SPS=78720
+256 games/row eval, seed 68030:
+  iter10 min = 66.41%
+  iter20 min = 64.84%
+  iter30 min = 67.58%
+  iter40/final min = 65.62%
+```
+
+`0.05` is too strong and damages 16x16 seat stability. A lower-weight probe looked better at 256-row but failed promotion:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-outcome-x005.eqx
+config: outcome_aux_weight=0.005, 256 envs, num_steps=256, num_iterations=20
+train log:
+  iter 1:  loss=13.4302, episodes=99,  wins=71,  draws=0,  SPS=9376
+  iter 10: loss=8.1656,  episodes=147, wins=100, draws=19, SPS=77645
+  iter 20: loss=5.6662,  episodes=149, wins=67,  draws=29, SPS=78331
+256 games/row eval, seed 68130:
+  same-seed scalar base min = 70.31%
+  iter10 min = 71.88%
+  iter20/final min = 68.75%
+512 games/row promotion eval for iter10, seed 68140:
+  8p0 73.63%, 8p1 69.14%, 12p0 78.91%, 12p1 80.66%, 16p0 72.85%, 16p1 68.95%
+  min_win_rate = 68.95%
+```
+
+结论更新：outcome auxiliary infrastructure is useful for future representation work, but the simple rollout-local loss is not enough by itself. Weight `0.05` overpowers PPO and hurts 16x16; weight `0.005` produced a 256-row blip but failed 512-row validation. Do not continue sweeping this exact auxiliary loss. The next aligned step is to change what the network can observe or what the teacher provides: memory/global context channels, scoreboard-history tokens, or search-to-Q/intent distillation.
+
 ## 评估命令
 
 评估 player 0：
