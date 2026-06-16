@@ -411,3 +411,9 @@
 - **Status:** Completed
 - **Next Steps:** Write the implementation plan, then implement the adaptive search-distillation script with TDD.
 - **Context:** This is a design-only step. The current best remains `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` at 70.31% minimum win rate over 512 games/row; the 90% target remains open.
+
+## [2026-06-16 16:36] Adaptive Search Distillation Plan
+- **Changes:** Added `docs/superpowers/plans/2026-06-16-adaptive-search-distillation.md` with a TDD implementation plan for adaptive rollout-search distillation, CLI smoke coverage, checkpoint retention, verification, and the first experiment gate.
+- **Status:** Completed
+- **Next Steps:** Execute the plan task-by-task, starting with adaptive loss tests and the new `adaptive_search_distill.py` scaffold.
+- **Context:** The plan intentionally scopes the first implementation to scalar learner seat selection and a frozen adaptive base opponent before adding alternating seats or Expander-in-the-loop collection.
