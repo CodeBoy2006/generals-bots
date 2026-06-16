@@ -453,3 +453,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a mixed objective probe from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` using `--soft-weight-mode active --soft-improvement-extra-weight`.
 - **Context:** Verified with `tests/test_adaptive_ppo.py` (`22 passed`), compileall, `git diff --check`, and full pytest (`165 passed`). No win-rate experiment has been run for the mixed objective yet.
+
+## [2026-06-16 17:31] Adaptive Mixed Objective Probes
+- **Changes:** Ran and documented two mixed-objective p1 probes in `docs/expander-training-strategy.md`: active soft plus improvement extra CE at weights `0.02` and `0.005`.
+- **Status:** Completed
+- **Next Steps:** Stop tuning the current search-CE family; next direction should be outcome/finish/draw auxiliary learning or an adaptive rollout-search evaluator to estimate teacher upper bound across 8/12/16.
+- **Context:** Mixed v1 reached 71.88% min over 256 games/row at iter 10 but fell to 68.95% over 512 games/row. Mixed v2 reached only 71.09% over 256 games/row. The best candidate remains `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx` at 71.29% over 512 games/row.

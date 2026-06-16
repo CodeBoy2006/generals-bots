@@ -1635,6 +1635,24 @@ improvement mode, min_margin=0.2, margin_scale=1:
 
 结论更新：纯 improvement-only weighting 选择样本太少，且会放大不稳定 seat/size 迁移；它不是 active-soft 目标的直接替代。下一轮可用 `--soft-weight-mode active --soft-improvement-extra-weight N` 跑混合目标，保留 all-active soft/KL 稳定项，同时给 high-margin improvement 样本增加额外 loss；如果这仍不行，再转向 finish/draw/Q-value 辅助目标。
 
+混合目标 probe 结果同样没有超过 p1 r8 iter40：
+
+```text
+active soft + improvement extra, extra_weight=0.02, min_margin=0.2:
+  /tmp/generals-adaptive-search-distill-p1-mixed-v1-ckpts/...-iter-000010.eqx: 256-row min = 71.88%
+    promoted to 512-row: min = 68.95% (8p0 73.83, 8p1 69.53, 12p0 81.45, 12p1 83.98, 16p0 71.88, 16p1 68.95)
+  /tmp/generals-adaptive-search-distill-p1-mixed-v1-ckpts/...-iter-000020.eqx: 256-row min = 65.62%
+  /tmp/generals-adaptive-search-distill-p1-mixed-v1-ckpts/...-iter-000030.eqx: 256-row min = 63.67%
+  /tmp/generals-adaptive-search-distill-p1-mixed-v1-ckpts/...-iter-000040.eqx: 256-row min = 70.70%
+
+active soft + improvement extra, extra_weight=0.005, min_margin=0.2:
+  /tmp/generals-adaptive-search-distill-p1-mixed-v2-x005-ckpts/...-iter-000010.eqx: 256-row min = 68.75%
+  /tmp/generals-adaptive-search-distill-p1-mixed-v2-x005-ckpts/...-iter-000020.eqx: 256-row min = 71.09%
+  /tmp/generals-adaptive-search-distill-p1-mixed-v2-x005-ckpts/...-iter-000030.eqx: 256-row min = 67.58%
+```
+
+结论更新：额外 improvement CE 没有解决 16x16 draw/finish bottleneck，还会使 8p1 或 16p1 在更大样本下掉队。继续在同一 search-CE family 内调权重的价值很低；下一步应改成 outcome/finish 辅助信号，或直接让 adaptive rollout-search evaluator 证明 search teacher 在 8/12/16 上是否有足够上限。
+
 ## 评估命令
 
 评估 player 0：
