@@ -117,6 +117,7 @@ def load_or_create_adaptive_network(
     pad_size: int,
     init_model_path: str | Path | None = None,
     channels: str | PolicyChannels | list[int] | None = None,
+    init_channels: str | PolicyChannels | list[int] | None = None,
     input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ) -> AdaptivePolicyValueNetwork:
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
@@ -132,4 +133,104 @@ def load_or_create_adaptive_network(
     path = Path(init_model_path)
     if not path.exists():
         raise FileNotFoundError(f"Warm-start checkpoint not found: {path}")
+    if init_channels is not None:
+        parsed_init_channels = parse_policy_channels(init_channels)
+        if parsed_init_channels != parsed_channels:
+            source_network = AdaptivePolicyValueNetwork(
+                key,
+                pad_size=pad_size,
+                channels=parsed_init_channels,
+                input_channels=input_channels,
+            )
+            source_network = eqx.tree_deserialise_leaves(path, source_network)
+            return expand_adaptive_network_channels(network, source_network)
     return eqx.tree_deserialise_leaves(path, network)
+
+
+def _copy_conv_prefix(target: eqx.nn.Conv2d, source: eqx.nn.Conv2d) -> eqx.nn.Conv2d:
+    """Copy a smaller conv into a larger conv prefix and zero unused channels."""
+    out_channels = min(target.weight.shape[0], source.weight.shape[0])
+    in_channels = min(target.weight.shape[1], source.weight.shape[1])
+    weight = jnp.zeros_like(target.weight)
+    weight = weight.at[:out_channels, :in_channels].set(source.weight[:out_channels, :in_channels])
+    bias = None
+    if target.bias is not None and source.bias is not None:
+        bias = jnp.zeros_like(target.bias)
+        bias = bias.at[:out_channels].set(source.bias[:out_channels])
+    return eqx.tree_at(lambda layer: (layer.weight, layer.bias), target, (weight, bias))
+
+
+def _copy_linear_prefix(target: eqx.nn.Linear, source: eqx.nn.Linear) -> eqx.nn.Linear:
+    """Copy a smaller linear layer into a larger layer prefix and zero unused inputs."""
+    out_features = min(target.weight.shape[0], source.weight.shape[0])
+    in_features = min(target.weight.shape[1], source.weight.shape[1])
+    weight = jnp.zeros_like(target.weight)
+    weight = weight.at[:out_features, :in_features].set(source.weight[:out_features, :in_features])
+    bias = None
+    if target.bias is not None and source.bias is not None:
+        bias = jnp.zeros_like(target.bias)
+        bias = bias.at[:out_features].set(source.bias[:out_features])
+    return eqx.tree_at(lambda layer: (layer.weight, layer.bias), target, (weight, bias))
+
+
+def _copy_pooled_linear_prefix(
+    target: eqx.nn.Linear,
+    source: eqx.nn.Linear,
+    target_channels: int,
+    source_channels: int,
+) -> eqx.nn.Linear:
+    """Copy pooled [mean, max] weights while preserving the max-channel offset."""
+    out_features = min(target.weight.shape[0], source.weight.shape[0])
+    copied_channels = min(target_channels, source_channels)
+    weight = jnp.zeros_like(target.weight)
+    weight = weight.at[:out_features, :copied_channels].set(source.weight[:out_features, :copied_channels])
+    weight = weight.at[:out_features, target_channels : target_channels + copied_channels].set(
+        source.weight[:out_features, source_channels : source_channels + copied_channels]
+    )
+    bias = None
+    if target.bias is not None and source.bias is not None:
+        bias = jnp.zeros_like(target.bias)
+        bias = bias.at[:out_features].set(source.bias[:out_features])
+    return eqx.tree_at(lambda layer: (layer.weight, layer.bias), target, (weight, bias))
+
+
+def expand_adaptive_network_channels(
+    target: AdaptivePolicyValueNetwork,
+    source: AdaptivePolicyValueNetwork,
+) -> AdaptivePolicyValueNetwork:
+    """Initialize a wider adaptive network so it initially matches a narrower source."""
+    target = eqx.tree_at(lambda net: net.conv1, target, _copy_conv_prefix(target.conv1, source.conv1))
+    target = eqx.tree_at(lambda net: net.conv2, target, _copy_conv_prefix(target.conv2, source.conv2))
+    target = eqx.tree_at(lambda net: net.conv3, target, _copy_conv_prefix(target.conv3, source.conv3))
+    target = eqx.tree_at(lambda net: net.conv4, target, _copy_conv_prefix(target.conv4, source.conv4))
+    target = eqx.tree_at(
+        lambda net: net.policy_conv,
+        target,
+        _copy_conv_prefix(target.policy_conv, source.policy_conv),
+    )
+    target = eqx.tree_at(
+        lambda net: net.pass_linear,
+        target,
+        _copy_pooled_linear_prefix(
+            target.pass_linear,
+            source.pass_linear,
+            target.conv4.weight.shape[0],
+            source.conv4.weight.shape[0],
+        ),
+    )
+    target = eqx.tree_at(
+        lambda net: net.value_linear1,
+        target,
+        _copy_pooled_linear_prefix(
+            target.value_linear1,
+            source.value_linear1,
+            target.conv4.weight.shape[0],
+            source.conv4.weight.shape[0],
+        ),
+    )
+    target = eqx.tree_at(
+        lambda net: net.value_linear2,
+        target,
+        _copy_linear_prefix(target.value_linear2, source.value_linear2),
+    )
+    return target

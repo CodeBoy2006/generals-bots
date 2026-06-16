@@ -270,6 +270,7 @@ def parse_args():
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
+    parser.add_argument("--init-channels", default=None)
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="/tmp/generals-adaptive-ppo.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -342,6 +343,8 @@ def main():
         print(f"Timeout reward: -{args.truncation_reward_scale:g}")
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
+        if args.init_channels is not None:
+            print(f"Warm channels: {args.init_channels}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -353,6 +356,7 @@ def main():
         pad_size=args.pad_to,
         init_model_path=args.init_model_path,
         channels=args.channels,
+        init_channels=args.init_channels,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))

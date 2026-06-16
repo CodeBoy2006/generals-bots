@@ -1483,6 +1483,55 @@ trainer-v2 首轮结果没有超过当前 best：
 
 结论：weighted pool + alternating seat 可以把部分 12x12 行拉高，但会牺牲 8x8 或 16x16；`truncation_reward_scale=0.5` 不是当前瓶颈的直接解。下一步应尝试更大 adaptive 网络容量，例如 `--channels 64,64,64,32`，先用 adaptive BC warm start，再用 PPO 细调和 size-seat matrix 评估。
 
+### Adaptive capacity probes
+
+直接从大容量 BC 重新起步没有超过当前 best：
+
+```text
+/tmp/generals-adaptive-bc-wide-v1.eqx
+  config: channels=64,64,64,32, weights 8:1,12:1,16:2
+  128 games/row min_win_rate = 16.41%
+  8x8 rows around 42-44%, 12x12 rows around 41-42%, 16x16 rows around 16-18% with >60% draw
+
+/tmp/generals-adaptive-ppo-wide-v1-smallbatch.eqx
+  config: 128 env, 16 steps, learner_player=alternate
+  128 games/row min_win_rate = 18.75%
+
+/tmp/generals-adaptive-ppo-wide-p0-v1.eqx
+  config: 128 env, 32 steps, learner_player=0
+  128 games/row min_win_rate = 31.25%
+```
+
+结论：wide-from-scratch/BC 会丢掉当前 best 的 70% 策略质量；真正有意义的容量路线应该从当前 best 小模型扩容，而不是从弱 BC 重新学。`load_or_create_adaptive_network(..., init_channels=...)` 现在支持把小 adaptive checkpoint 按通道前缀复制到更宽网络，额外通道置零，保证初始 logits/value 与源 checkpoint 一致。
+
+下一条建议从当前 best 做零填充扩容：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 128 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 4096 \
+  --num-steps 32 \
+  --num-iterations 400 \
+  --num-epochs 4 \
+  --minibatch-size 2048 \
+  --lr 0.000005 \
+  --channels 64,64,64,32 \
+  --init-channels 32,32,32,16 \
+  --opponent expander \
+  --learner-player alternate \
+  --terminal-reward-scale 1.0 \
+  --init-model-path /tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-expanded-v1-checkpoints \
+  --checkpoint-every 50 \
+  --keep-checkpoints 8 \
+  --model-path /tmp/generals-adaptive-ppo-expanded-v1.eqx \
+  --seed 63300
+```
+
 ## 评估命令
 
 评估 player 0：

@@ -393,3 +393,9 @@
 - **Status:** Completed
 - **Next Steps:** Train a `64,64,64,32` adaptive BC warm start, continue PPO against Expander, and evaluate all retained checkpoints across 8x8/12x12/16x16 and both seats.
 - **Context:** Trainer-v2 controls alone did not beat the current best 70.31% minimum row: v2 reached 67.97% over 256 games/row, iter-100 reached 67.19% over 512 games/row, and the no-truncation control reached 68.36% over 256 games/row.
+
+## [2026-06-16 15:59] Adaptive Channel Expansion
+- **Changes:** Added zero-preserving adaptive channel expansion warm starts via `init_channels`, exposed `--init-channels` in `train_adaptive.py`, added regression coverage that expanded logits/value match the source checkpoint, and documented wide-from-BC negative results.
+- **Status:** Completed
+- **Next Steps:** Expand `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` from `32,32,32,16` to `64,64,64,32`, run PPO continuation, and evaluate retained checkpoints.
+- **Context:** Wide-from-BC did not preserve current strength: `/tmp/generals-adaptive-bc-wide-v1.eqx` reached 16.41% min over 128 games/row, wide small-batch PPO reached 18.75%, and wide p0 PPO reached 31.25%. The new expansion path preserves the current best policy before fine-tuning.
