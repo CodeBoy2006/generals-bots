@@ -351,3 +351,9 @@
 - **Status:** Completed
 - **Next Steps:** Avoid spending more CPU time on short hard-teacher BC; use CUDA for full BC or design dual-seat adaptive PPO before longer PPO runs.
 - **Context:** The hard-teacher checkpoint also had `min_win_rate = 0.00%` over 32 games/row at 300 steps, with 8x8 player 1, 12x12 player 1, and both 16x16 seats at 0% wins.
+
+## [2026-06-16 14:17] Adaptive Player-1 PPO Baseline
+- **Changes:** Documented a short `learner_player=1` adaptive PPO baseline in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Design dual-seat or alternating-seat adaptive PPO before spending longer PPO runs on a single learner seat.
+- **Context:** Player-1 short PPO from the same soft BC checkpoint improved a few rows locally but still had `min_win_rate = 0.00%`, with 12x12 player 1 and both 16x16 seats at 0% wins.
