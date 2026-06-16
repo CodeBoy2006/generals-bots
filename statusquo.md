@@ -519,3 +519,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote history checkpoints; next fast follow-up should reduce PPO drift, for example lower LR/shorter history continuation or distillation/replay for the new history/global branch.
 - **Context:** 256 envs OOMed even with minibatch 512. The 128-env run completed, and best retained checkpoint was iter 40/final at `70.31%` min over 256 games/row on seed 70040, improving same-seed source `68.75%` but below the existing 512-row `71.29%` candidate.
+
+## [2026-06-16 23:02] Adaptive History Lower-LR Follow-up
+- **Changes:** Ran and documented a lower-LR (`1e-6`) scoreboard-history CUDA follow-up at 128 envs for 20 iterations.
+- **Status:** Completed
+- **Next Steps:** Stop plain PPO continuation sweeps for history inputs; implement a distillation/replay path that trains the new global/history representation while anchoring the old policy.
+- **Context:** Lower LR improved same-seed source min from `66.02%` to `68.75%` over 256 games/row, mainly repairing 16p0/16p1, but remained below the 71.29%/512 best and does not merit promotion.

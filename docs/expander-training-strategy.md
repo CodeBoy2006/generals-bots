@@ -2239,6 +2239,24 @@ history iter40/final:
 
 结论更新：scoreboard history has useful signal on this seed, improving source min from 68.75% to 70.31%, but it still does not beat the existing 512-row 71.29% candidate. It also shifts weakness between 16p0/16p1 and does not fix PPO drift. Do not promote to 512-row validation. The next fast follow-up should reduce policy drift: either lower LR/shorter continuation for the history model, or train the new history/global branch with distillation/replay instead of full PPO updates.
 
+Lower-LR history follow-up, `lr=1e-6`, 128 envs, 20 iterations, seed 70130 train / 70140 eval:
+
+```text
+source:
+  rows = 8p0 73.44%, 8p1 71.48%, 12p0 81.25%, 12p1 84.77%, 16p0 66.02%, 16p1 68.75%
+  min = 66.02%
+
+history lr1e-6 iter10:
+  rows = 8p0 75.39%, 8p1 70.31%, 12p0 83.20%, 12p1 83.20%, 16p0 66.41%, 16p1 68.36%
+  min = 66.41%
+
+history lr1e-6 iter20/final:
+  rows = 8p0 75.78%, 8p1 71.48%, 12p0 84.38%, 12p1 83.59%, 16p0 68.75%, 16p1 70.31%
+  min = 68.75%
+```
+
+结论更新：lower LR reduces the visible training-collapse pattern and improves the same-seed weak 16p0 row, but it still does not approach the current promotion bar. Plain PPO continuation, even with history inputs, remains too unstable and too low-signal. The next implementation target should be a distillation/replay path that can train the added global/history representation while anchoring the old policy, instead of applying full PPO pressure to every shared parameter.
+
 ## 评估命令
 
 评估 player 0：
