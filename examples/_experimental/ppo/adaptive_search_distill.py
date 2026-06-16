@@ -861,3 +861,275 @@ def collect_adaptive_soft_batch(
 
     (states, key), batch = jax.lax.scan(body, (states, key), None, length=num_steps)
     return states, batch, key
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Adaptively distill rollout-search improvements into one multisize checkpoint."
+    )
+    parser.add_argument("num_envs", nargs="?", type=int, default=128)
+    parser.add_argument("--grid-sizes", default="8,12,16")
+    parser.add_argument("--grid-size-weights", default=None)
+    parser.add_argument("--pad-to", type=int, default=16)
+    parser.add_argument("--pool-size", type=int, default=4096)
+    parser.add_argument("--base-model-path", required=True)
+    parser.add_argument("--init-model-path", default=None)
+    parser.add_argument("--model-path", default="/tmp/generals-adaptive-search-distill.eqx")
+    parser.add_argument("--channels", default=None)
+    parser.add_argument("--base-channels", default=None)
+    parser.add_argument("--init-channels", default=None)
+    parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
+    parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--learner-player", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--num-steps", type=int, default=16)
+    parser.add_argument("--num-iterations", type=int, default=100)
+    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument("--minibatch-size", type=int, default=2048)
+    parser.add_argument("--lr", type=float, default=1e-6)
+    parser.add_argument("--kl-weight", type=float, default=1.0)
+    parser.add_argument("--improve-weight", type=float, default=0.05)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--score-temperature", type=float, default=1.0)
+    parser.add_argument("--min-margin", type=float, default=25.0)
+    parser.add_argument("--margin-scale", type=float, default=100.0)
+    parser.add_argument("--max-improve-weight", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=4)
+    parser.add_argument("--rollout-steps", type=int, default=16)
+    parser.add_argument("--rollouts-per-action", type=int, default=2)
+    parser.add_argument("--army-weight", type=float, default=12.0)
+    parser.add_argument("--land-weight", type=float, default=8.0)
+    parser.add_argument("--prior-weight", type=float, default=0.01)
+    parser.add_argument("--terminal-score", type=float, default=1000.0)
+    parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
+    parser.add_argument("--mountain-density-min", type=float, default=0.12)
+    parser.add_argument("--mountain-density-max", type=float, default=0.22)
+    parser.add_argument("--num-cities-min", type=int, default=4)
+    parser.add_argument("--num-cities-max", type=int, default=8)
+    parser.add_argument("--max-generals-distance", type=int, default=None)
+    parser.add_argument("--city-army-min", type=int, default=40)
+    parser.add_argument("--city-army-max", type=int, default=51)
+    parser.add_argument("--checkpoint-dir", default=None)
+    parser.add_argument("--checkpoint-every", type=int, default=0)
+    parser.add_argument("--keep-checkpoints", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    try:
+        args.grid_sizes = parse_grid_sizes(args.grid_sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.grid_size_weights = parse_grid_size_weights(args.grid_size_weights, args.grid_sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.pad_to < max(args.grid_sizes):
+        parser.error("--pad-to must be at least the maximum grid size")
+    if args.num_envs <= 0:
+        parser.error("num_envs must be positive")
+    if args.pool_size < args.num_envs:
+        parser.error("--pool-size must be at least num_envs")
+    if args.num_steps <= 0 or args.num_iterations <= 0 or args.num_epochs <= 0:
+        parser.error("--num-steps, --num-iterations, and --num-epochs must be positive")
+    if args.minibatch_size <= 0:
+        parser.error("--minibatch-size must be positive")
+    if args.lr <= 0.0:
+        parser.error("--lr must be positive")
+    if args.kl_weight < 0.0 or args.improve_weight < 0.0:
+        parser.error("--kl-weight and --improve-weight must be non-negative")
+    if args.temperature <= 0.0 or args.score_temperature <= 0.0:
+        parser.error("--temperature and --score-temperature must be positive")
+    if args.margin_scale <= 0.0 or args.max_improve_weight <= 0.0:
+        parser.error("--margin-scale and --max-improve-weight must be positive")
+    if args.top_k <= 0 or args.rollout_steps <= 0 or args.rollouts_per_action <= 0:
+        parser.error("--top-k, --rollout-steps, and --rollouts-per-action must be positive")
+    if args.terminal_score <= 0.0:
+        parser.error("--terminal-score must be positive")
+    if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
+        parser.error("mountain density must satisfy 0 <= min <= max <= 1")
+    if not (2 <= args.num_cities_min <= args.num_cities_max):
+        parser.error("city count must satisfy 2 <= min <= max")
+    if args.city_army_min >= args.city_army_max:
+        parser.error("city army range must satisfy min < max")
+    if args.checkpoint_every < 0 or args.keep_checkpoints < 0:
+        parser.error("--checkpoint-every and --keep-checkpoints cannot be negative")
+    try:
+        args.channels = parse_policy_channels(args.channels)
+        args.base_channels = parse_policy_channels(args.base_channels or args.channels)
+        args.init_channels = parse_policy_channels(args.init_channels) if args.init_channels is not None else None
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
+
+
+def main():
+    args = parse_args()
+    init_model_path = args.init_model_path or args.base_model_path
+    policy_mode = POLICY_MODE_NAME_TO_ID[args.policy_mode]
+    opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
+
+    print("Adaptive conservative rollout-search distillation")
+    print(f"Device:        {jax.devices()[0]}")
+    print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
+    if args.grid_size_weights is not None:
+        weights_label = ",".join(
+            f"{size}:{weight:g}" for size, weight in zip(args.grid_sizes, args.grid_size_weights, strict=True)
+        )
+        print(f"Size weights:  {weights_label}")
+    print(f"Student:       {init_model_path} channels={args.channels}")
+    print(f"Base/Search:   {args.base_model_path} channels={args.base_channels}")
+    print(f"Learner:       player {args.learner_player}")
+    print(f"Rollout:       {args.num_iterations} x {args.num_steps} steps, envs={args.num_envs}")
+    print(
+        "Search:        "
+        f"top_k={args.top_k}, rollout_steps={args.rollout_steps}, rollouts/action={args.rollouts_per_action}"
+    )
+    print(
+        "Objective:     "
+        f"kl={args.kl_weight:g}, improve={args.improve_weight:g}, "
+        f"mode={args.target_mode}, score_temp={args.score_temperature:g}"
+    )
+    if args.checkpoint_dir is not None and args.checkpoint_every > 0:
+        print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
+    print()
+
+    key = jrandom.PRNGKey(args.seed)
+    key, student_key, base_key = jrandom.split(key, 3)
+    student_network = load_or_create_adaptive_network(
+        student_key,
+        pad_size=args.pad_to,
+        init_model_path=init_model_path,
+        channels=args.channels,
+        init_channels=args.init_channels,
+    )
+    base_network = load_or_create_adaptive_network(
+        base_key,
+        pad_size=args.pad_to,
+        init_model_path=args.base_model_path,
+        channels=args.base_channels,
+    )
+    opponent_network = base_network
+    optimizer = optax.adam(args.lr)
+    opt_state = optimizer.init(eqx.filter(student_network, eqx.is_inexact_array))
+
+    checkpoint_paths = []
+    model_stem = Path(args.model_path).stem
+    for iteration in range(1, args.num_iterations + 1):
+        t0 = time.time()
+        key, rollout_key, update_key, pool_key = jrandom.split(key, 4)
+        pool = make_adaptive_state_pool(
+            pool_key,
+            args.pool_size,
+            args.grid_sizes,
+            args.pad_to,
+            args.map_generator,
+            (args.mountain_density_min, args.mountain_density_max),
+            (args.num_cities_min, args.num_cities_max),
+            args.max_generals_distance,
+            (args.city_army_min, args.city_army_max),
+            args.grid_size_weights,
+        )
+        states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
+
+        if args.target_mode == "hard":
+            _, batch, rollout_key = collect_adaptive_conservative_batch(
+                student_network,
+                base_network,
+                opponent_network,
+                states,
+                effective_sizes,
+                rollout_key,
+                args.num_steps,
+                policy_mode,
+                opponent_policy_mode,
+                args.learner_player,
+                args.top_k,
+                args.rollout_steps,
+                args.rollouts_per_action,
+                args.army_weight,
+                args.land_weight,
+                args.prior_weight,
+                args.terminal_score,
+                args.min_margin,
+                args.margin_scale,
+                args.max_improve_weight,
+                args.pad_to,
+            )
+            flat_batch = flatten_adaptive_conservative_batch(*batch)
+            student_network, opt_state, loss, metrics, update_key = train_adaptive_conservative_epoch(
+                student_network,
+                base_network,
+                opt_state,
+                flat_batch,
+                optimizer,
+                update_key,
+                args.num_epochs,
+                args.minibatch_size,
+                args.kl_weight,
+                args.improve_weight,
+                args.temperature,
+            )
+        else:
+            _, batch, rollout_key = collect_adaptive_soft_batch(
+                student_network,
+                base_network,
+                opponent_network,
+                states,
+                effective_sizes,
+                rollout_key,
+                args.num_steps,
+                policy_mode,
+                opponent_policy_mode,
+                args.learner_player,
+                args.top_k,
+                args.rollout_steps,
+                args.rollouts_per_action,
+                args.army_weight,
+                args.land_weight,
+                args.prior_weight,
+                args.terminal_score,
+                args.score_temperature,
+                args.pad_to,
+            )
+            flat_batch = flatten_adaptive_soft_batch(*batch)
+            student_network, opt_state, loss, metrics, update_key = train_adaptive_soft_epoch(
+                student_network,
+                base_network,
+                opt_state,
+                flat_batch,
+                optimizer,
+                update_key,
+                args.num_epochs,
+                args.minibatch_size,
+                args.kl_weight,
+                args.improve_weight,
+                args.temperature,
+            )
+        jax.block_until_ready(student_network)
+
+        if args.checkpoint_dir is not None and args.checkpoint_every > 0 and iteration % args.checkpoint_every == 0:
+            checkpoint_path = checkpoint_path_for_iteration(args.checkpoint_dir, model_stem, iteration)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            eqx.tree_serialise_leaves(checkpoint_path, student_network)
+            checkpoint_paths.append(checkpoint_path)
+            prune_old_checkpoints(checkpoint_paths, args.keep_checkpoints)
+
+        if iteration % 5 == 0 or iteration == 1 or iteration == args.num_iterations:
+            elapsed = time.time() - t0
+            samples = args.num_envs * args.num_steps
+            print(
+                f"Iter {iteration:4d} | Loss: {float(loss):.5f} | "
+                f"KL: {float(metrics['kl_loss']):.5f} | "
+                f"Improve: {float(metrics['improve_loss']):.4f} | "
+                f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
+                f"({float(metrics['selected_fraction']) * 100:4.1f}%) | "
+                f"Margin: {float(metrics['mean_selected_margin']):6.1f} | "
+                f"SPS: {samples / elapsed:7.0f} | Time: {elapsed:.2f}s"
+            )
+
+    eqx.tree_serialise_leaves(args.model_path, student_network)
+    print(f"\nModel saved to: {args.model_path}")
+
+
+if __name__ == "__main__":
+    main()

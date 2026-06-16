@@ -499,6 +499,86 @@ def test_train_adaptive_cli_smoke(tmp_path):
     assert (checkpoint_dir / "adaptive-ppo-iter-000001.eqx").exists()
 
 
+def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    base_model_path = tmp_path / "adaptive-base.eqx"
+    model_path = tmp_path / "adaptive-search-distill.eqx"
+    checkpoint_dir = tmp_path / "search-ckpts"
+    eqx.tree_serialise_leaves(
+        base_model_path,
+        AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8)),
+    )
+
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/adaptive_search_distill.py",
+        "2",
+        "--grid-sizes",
+        "4,6",
+        "--grid-size-weights",
+        "4:1,6:2",
+        "--pad-to",
+        "6",
+        "--map-generator",
+        "simple",
+        "--pool-size",
+        "4",
+        "--base-model-path",
+        str(base_model_path),
+        "--model-path",
+        str(model_path),
+        "--target-mode",
+        "soft",
+        "--learner-player",
+        "1",
+        "--num-steps",
+        "1",
+        "--num-iterations",
+        "3",
+        "--num-epochs",
+        "1",
+        "--minibatch-size",
+        "2",
+        "--top-k",
+        "2",
+        "--rollout-steps",
+        "1",
+        "--rollouts-per-action",
+        "1",
+        "--channels",
+        "16,16,16,8",
+        "--base-channels",
+        "16,16,16,8",
+        "--init-channels",
+        "16,16,16,8",
+        "--checkpoint-dir",
+        str(checkpoint_dir),
+        "--checkpoint-every",
+        "1",
+        "--keep-checkpoints",
+        "2",
+        "--seed",
+        "44000",
+    ]
+
+    subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+
+    assert model_path.exists()
+    assert sorted(path.name for path in checkpoint_dir.glob("*.eqx")) == [
+        "adaptive-search-distill-iter-000002.eqx",
+        "adaptive-search-distill-iter-000003.eqx",
+    ]
+
+
 def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
     import json
     import os
