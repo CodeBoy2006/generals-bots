@@ -486,17 +486,18 @@ rollout-search as player 1 vs v5 sample, seed 30511:
   decisive win rate = 91.35%
 ```
 
-同日新增 `evaluate_league.py --search-policy` 后，用 128 局/row 对所有 heuristic 两席做 search-assisted league 评估：
+同日新增 `evaluate_league.py --search-policy` 后，先用 128 局/row 快速确认所有 heuristic 两席都超过 80%，随后扩大到 512 局/row 做强证据评估：
 
 ```text
-v5 + rollout-search vs heuristic league, seed 30520:
-  expander:           p0 126/1/1,   p1 125/2/1
-  city-rush:          p0 128/0/0,   p1 128/0/0
-  general-hunter:     p0 127/1/0,   p1 127/0/1
-  defensive-expander: p0 127/1/0,   p1 126/0/2
-  balanced:           p0 127/0/1,   p1 127/0/1
-  mixed:              p0 128/0/0,   p1 127/1/0
-  heuristic league_score = 97.66%
+v5 + rollout-search vs heuristic league, 512 games/row, seed 30530:
+  expander:           p0 495/17/0,  p1 496/13/3
+  city-rush:          p0 510/0/2,   p1 512/0/0
+  general-hunter:     p0 507/2/3,   p1 508/1/3
+  defensive-expander: p0 509/2/1,   p1 501/6/5
+  balanced:           p0 507/1/4,   p1 509/1/2
+  mixed:              p0 508/2/2,   p1 511/1/0
+  required pairs = 12/12 passed
+  heuristic league_score = 96.68%
 ```
 
 当前严格表述：`v5 + rollout-search` 作为强辅助推理策略，已经在当前证据下超过所有 heuristic 和 v5 的 80% 胜率门槛；但这不是纯 `.eqx` checkpoint。若目标限定为纯模型文件，仍需继续把 search 行为蒸馏或训练进 checkpoint。
