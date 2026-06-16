@@ -16,6 +16,9 @@ from generals.core.grid import generate_grid
 
 ADAPTIVE_INPUT_CHANNELS = 15
 ADAPTIVE_GLOBAL_INPUT_CHANNELS = 20
+ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS = 5
+ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS = 10
+ADAPTIVE_HISTORY_INPUT_CHANNELS = ADAPTIVE_GLOBAL_INPUT_CHANNELS + ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS
 ADAPTIVE_MOVE_PLANES = 8
 
 
@@ -72,11 +75,42 @@ def active_cells_for_size(effective_size: int, pad_size: int) -> jnp.ndarray:
     return (rows < effective_size) & (cols < effective_size)
 
 
+def adaptive_scoreboard_features(obs, effective_size: int) -> jnp.ndarray:
+    """Return normalized land/army/time features for one fogged observation."""
+    active_area = jnp.maximum(jnp.asarray(effective_size * effective_size, dtype=jnp.float32), 1.0)
+    army_scale = jnp.log1p(jnp.maximum(active_area * 100.0, 1.0))
+    owned_land = jnp.asarray(obs.owned_land_count, dtype=jnp.float32)
+    owned_army = jnp.asarray(obs.owned_army_count, dtype=jnp.float32)
+    opponent_land = jnp.asarray(obs.opponent_land_count, dtype=jnp.float32)
+    opponent_army = jnp.asarray(obs.opponent_army_count, dtype=jnp.float32)
+    timestep = jnp.asarray(obs.timestep, dtype=jnp.float32)
+    return jnp.stack(
+        [
+            owned_land / active_area,
+            jnp.log1p(jnp.maximum(owned_army, 0.0)) / army_scale,
+            opponent_land / active_area,
+            jnp.log1p(jnp.maximum(opponent_army, 0.0)) / army_scale,
+            timestep / 750.0,
+        ]
+    )
+
+
+def adaptive_scoreboard_history_context(previous: jnp.ndarray, current: jnp.ndarray) -> jnp.ndarray:
+    """Return previous scoreboard features plus one-step feature deltas."""
+    return jnp.concatenate([previous, current - previous], axis=-1)
+
+
+def reset_adaptive_scoreboard_history(current: jnp.ndarray, dones: jnp.ndarray) -> jnp.ndarray:
+    """Keep current scoreboard features for continuing rows and clear finished rows."""
+    return jnp.where(dones[..., None], jnp.zeros_like(current), current)
+
+
 def adaptive_obs_to_array(
     obs,
     effective_size: int,
     pad_size: int,
     include_global_context: bool = False,
+    scoreboard_history: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Convert an observation to adaptive policy channels plus active-cell mask."""
     base = obs_to_array(obs)
@@ -108,22 +142,9 @@ def adaptive_obs_to_array(
         return adaptive, active
 
     active_f = active.astype(jnp.float32)
-    active_area = jnp.maximum(jnp.asarray(effective_size * effective_size, dtype=jnp.float32), 1.0)
-    army_scale = jnp.log1p(jnp.maximum(active_area * 100.0, 1.0))
-    owned_land = jnp.asarray(obs.owned_land_count, dtype=jnp.float32)
-    owned_army = jnp.asarray(obs.owned_army_count, dtype=jnp.float32)
-    opponent_land = jnp.asarray(obs.opponent_land_count, dtype=jnp.float32)
-    opponent_army = jnp.asarray(obs.opponent_army_count, dtype=jnp.float32)
-    timestep = jnp.asarray(obs.timestep, dtype=jnp.float32)
-    global_values = jnp.stack(
-        [
-            owned_land / active_area,
-            jnp.log1p(jnp.maximum(owned_army, 0.0)) / army_scale,
-            opponent_land / active_area,
-            jnp.log1p(jnp.maximum(opponent_army, 0.0)) / army_scale,
-            timestep / 750.0,
-        ]
-    )
+    global_values = adaptive_scoreboard_features(obs, effective_size)
+    if scoreboard_history is not None:
+        global_values = jnp.concatenate([global_values, scoreboard_history], axis=0)
     global_planes = global_values[:, None, None] * active_f[None, :, :]
     return jnp.concatenate([adaptive, global_planes], axis=0), active
 

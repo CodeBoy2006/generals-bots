@@ -87,6 +87,51 @@ def test_adaptive_obs_to_array_can_append_global_scoreboard_channels():
     assert jnp.all(arr[15:, :, 4:] == 0.0)
 
 
+def test_adaptive_obs_to_array_can_append_scoreboard_history_channels():
+    from examples._experimental.ppo.adaptive_common import (
+        ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        adaptive_obs_to_array,
+    )
+
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    scoreboard_history = jnp.linspace(0.1, 1.0, 10, dtype=jnp.float32)
+
+    arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size=4,
+        pad_size=6,
+        include_global_context=True,
+        scoreboard_history=scoreboard_history,
+    )
+
+    assert arr.shape == (ADAPTIVE_HISTORY_INPUT_CHANNELS, 6, 6)
+    assert active.shape == (6, 6)
+    assert jnp.allclose(arr[20:, :4, :4], scoreboard_history[:, None, None])
+    assert jnp.all(arr[20:, 4:, :] == 0.0)
+    assert jnp.all(arr[20:, :, 4:] == 0.0)
+
+
+def test_adaptive_scoreboard_history_context_and_reset():
+    from examples._experimental.ppo.adaptive_common import (
+        adaptive_scoreboard_history_context,
+        reset_adaptive_scoreboard_history,
+    )
+
+    previous = jnp.array([[0.1, 0.2, 0.3, 0.4, 0.5], [0.5, 0.4, 0.3, 0.2, 0.1]], dtype=jnp.float32)
+    current = jnp.array([[0.2, 0.1, 0.5, 0.3, 0.6], [0.6, 0.6, 0.2, 0.2, 0.2]], dtype=jnp.float32)
+    dones = jnp.array([False, True])
+
+    context = adaptive_scoreboard_history_context(previous, current)
+    reset = reset_adaptive_scoreboard_history(current, dones)
+
+    assert context.shape == (2, 10)
+    assert jnp.allclose(context[:, :5], previous)
+    assert jnp.allclose(context[:, 5:], current - previous)
+    assert jnp.allclose(reset[0], current[0])
+    assert jnp.allclose(reset[1], jnp.zeros((5,), dtype=jnp.float32))
+
+
 def test_compute_adaptive_valid_move_mask_blocks_padding_destinations():
     from examples._experimental.ppo.adaptive_common import compute_adaptive_valid_move_mask
 
@@ -235,6 +280,40 @@ def test_adaptive_network_global_context_accepts_global_input():
 
     logits, value = network.logits_value(obs_arr, mask, active)
 
+    assert logits.shape == (8 * 6 * 6 + 1,)
+    assert jnp.isfinite(value)
+    assert jnp.all(jnp.isfinite(logits))
+
+
+def test_adaptive_network_global_context_accepts_history_input_width():
+    from examples._experimental.ppo.adaptive_common import (
+        ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        adaptive_obs_to_array,
+        compute_adaptive_valid_move_mask,
+    )
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        input_channels=ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        global_context=True,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size=4,
+        pad_size=6,
+        include_global_context=True,
+        scoreboard_history=jnp.zeros((10,), dtype=jnp.float32),
+    )
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    logits, value = network.logits_value(obs_arr, mask, active)
+
+    assert network.global_linear1.weight.shape[1] == ADAPTIVE_HISTORY_INPUT_CHANNELS - 13
     assert logits.shape == (8 * 6 * 6 + 1,)
     assert jnp.isfinite(value)
     assert jnp.all(jnp.isfinite(logits))
@@ -477,6 +556,59 @@ def test_load_or_create_adaptive_network_warm_starts_global_context_from_legacy_
     assert loaded.global_context
 
 
+def test_load_or_create_adaptive_network_warm_starts_history_from_global_context(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import (
+        ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        adaptive_obs_to_array,
+        compute_adaptive_valid_move_mask,
+    )
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    source = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        input_channels=ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        global_context=True,
+    )
+    model_path = tmp_path / "adaptive-global.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=(16, 16, 16, 8),
+        init_channels=(16, 16, 16, 8),
+        input_channels=ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        init_input_channels=ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        global_context=True,
+        init_global_context=True,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    global_obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6, include_global_context=True)
+    history_obs_arr, history_active = adaptive_obs_to_array(
+        obs,
+        effective_size=4,
+        pad_size=6,
+        include_global_context=True,
+        scoreboard_history=jnp.zeros((10,), dtype=jnp.float32),
+    )
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    expected_logits, expected_value = source.logits_value(global_obs_arr, mask, active)
+    actual_logits, actual_value = loaded.logits_value(history_obs_arr, mask, history_active)
+
+    assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+    assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+    assert jnp.allclose(loaded.conv1.weight[:, ADAPTIVE_GLOBAL_INPUT_CHANNELS:], 0.0)
+    assert loaded.global_linear1.weight.shape[1] == ADAPTIVE_HISTORY_INPUT_CHANNELS - 13
+
+
 def test_load_or_create_adaptive_network_copies_shared_value_into_per_size_heads(tmp_path):
     import equinox as eqx
 
@@ -673,7 +805,7 @@ def test_collect_mixed_rollout_combines_both_learner_seats():
     states_p1, sizes_p1 = make_adaptive_initial_states(pool, 1)
     network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(1), pad_size=pad_size, channels=(16, 16, 16, 8))
 
-    _, _, _, _, batch, _ = collect_mixed_rollout(
+    _, _, history_p0, _, _, history_p1, batch, _ = collect_mixed_rollout(
         states_p0,
         sizes_p0,
         states_p1,
@@ -700,6 +832,8 @@ def test_collect_mixed_rollout_combines_both_learner_seats():
     assert rewards.shape == (1, 2)
     assert dones.shape == (1, 2)
     assert infos.winner.shape == (1, 2)
+    assert history_p0.shape == (1, 5)
+    assert history_p1.shape == (1, 5)
 
 
 def test_adaptive_expander_target_probs_has_single_pass_slot():
@@ -1120,6 +1254,7 @@ def test_train_adaptive_cli_smoke(tmp_path):
         "--init-model-path",
         str(init_model_path),
         "--global-context",
+        "--scoreboard-history",
         "--init-input-channels",
         "15",
         "--value-heads",
@@ -1159,7 +1294,6 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
 
     import equinox as eqx
 
-    from examples._experimental.ppo.adaptive_common import ADAPTIVE_GLOBAL_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
 
     base_model_path = tmp_path / "adaptive-base.eqx"
@@ -1245,7 +1379,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
 
     import equinox as eqx
 
-    from examples._experimental.ppo.adaptive_common import ADAPTIVE_GLOBAL_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_HISTORY_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
 
     model_path = tmp_path / "adaptive.eqx"
@@ -1255,7 +1389,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         AdaptivePolicyValueNetwork(
             jrandom.PRNGKey(0),
             pad_size=6,
-            input_channels=ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+            input_channels=ADAPTIVE_HISTORY_INPUT_CHANNELS,
             global_context=True,
             value_head_sizes=(4, 6),
             value_bins=8,
@@ -1280,6 +1414,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         "--map-generator",
         "simple",
         "--global-context",
+        "--scoreboard-history",
         "--value-heads",
         "per-size",
         "--value-loss",

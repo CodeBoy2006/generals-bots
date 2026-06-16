@@ -2135,6 +2135,80 @@ global iter40/final:
 
 结论更新：global-context branch is trainable and improves the same-seed 16p1 weak row versus the source checkpoint, but it does not beat the existing 512-row `71.29%` search-distill candidate and should not be promoted. The later PPO checkpoints again show drift: value loss falls while 8x8 and 16x16 seat balance degrades. The next useful step should preserve this representation path but add either scoreboard history/memory channels, search-to-Q/intent targets, or a lower-risk distillation objective that can train the global branch without destabilizing the old policy.
 
+### Adaptive scoreboard history branch
+
+2026-06-16 新增 `--scoreboard-history`。它在 `--global-context` 的 20 通道基础上追加 10 个通道：
+
+```text
+20-24: previous normalized own land, own army, opponent land, opponent army, timestep
+25-29: current - previous one-step deltas for the same five features
+```
+
+训练时每个 vectorized environment carry 一份 previous scoreboard feature。episode done/truncated 后该 row 清零，避免新 reset 局面继承上一局的 scoreboard 历史。评估时也在 `lax.scan` carry history，因此 `evaluate_adaptive_policy.py --scoreboard-history` 会使用同样的 30 通道输入模板。
+
+从旧 15 通道 checkpoint warm start 的命令仍然是：
+
+```bash
+--scoreboard-history \
+--init-input-channels 15
+```
+
+如果从已经带 global context 的 20 通道 checkpoint 扩到 history，则需要显式传 `--init-global-context --init-input-channels 20`。如果继续训练已经带 history 的 30 通道 checkpoint，不传 `--init-input-channels` 即可。
+
+CUDA smoke 已通过：
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-history-smoke.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 64 envs, num_steps=32, num_iterations=2, mixed learner, terminal reward,
+        ema_decay=0.999, eval_ema, value_heads=per-size, value_loss=hl-gauss,
+        scoreboard_history=True, init_input_channels=15
+device: cuda:0
+```
+
+Focused verification used `tests/test_adaptive_ppo.py` (`43 passed`), compileall, `git diff --check`, and CUDA train/eval smoke. Full pytest was intentionally interrupted after 53 passing tests to keep iteration speed high; this branch should be judged by GPU training feedback.
+
+Next fast triage:
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 4096 \
+  --num-steps 256 \
+  --num-iterations 40 \
+  --num-epochs 1 \
+  --minibatch-size 1024 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --truncation-reward-scale 0.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --scoreboard-history \
+  --init-input-channels 15 \
+  --value-heads per-size \
+  --init-value-heads shared \
+  --value-loss hl-gauss \
+  --init-value-loss mse \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-history-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 4 \
+  --model-path /tmp/generals-adaptive-ppo-v3-history.eqx \
+  --seed 70030
+```
+
 ## 评估命令
 
 评估 player 0：

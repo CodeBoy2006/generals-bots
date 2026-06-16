@@ -22,14 +22,19 @@ import optax
 
 from adaptive_common import (
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+    ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
+    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
     adaptive_obs_to_array,
+    adaptive_scoreboard_features,
+    adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
     parse_grid_sizes,
+    reset_adaptive_scoreboard_history,
 )
 from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_network
 from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
@@ -139,6 +144,11 @@ def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
     return p0_envs, num_envs - p0_envs
 
 
+def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
+    """Return empty previous-scoreboard features for vectorized rollouts."""
+    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
+
+
 @eqx.filter_jit
 def rollout_step(
     states,
@@ -154,6 +164,8 @@ def rollout_step(
     truncation_reward_scale,
     pad_size,
     global_context=False,
+    scoreboard_history=None,
+    scoreboard_history_enabled=False,
 ):
     """Collect one vectorized adaptive PPO rollout step."""
     num_envs = states.armies.shape[0]
@@ -162,12 +174,35 @@ def rollout_step(
     learner_obs_prior = jax.lax.cond(learner_player == 0, lambda _: obs_p0_prior, lambda _: obs_p1_prior, None)
     opponent_obs_prior = jax.lax.cond(learner_player == 0, lambda _: obs_p1_prior, lambda _: obs_p0_prior, None)
 
-    obs_arr, active = jax.vmap(
-        lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
-    )(
-        learner_obs_prior,
-        effective_sizes,
-    )
+    if scoreboard_history is None:
+        scoreboard_history = empty_scoreboard_history(num_envs)
+    if scoreboard_history_enabled:
+        current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
+            learner_obs_prior,
+            effective_sizes,
+        )
+        history_context = adaptive_scoreboard_history_context(scoreboard_history, current_scoreboard)
+        obs_arr, active = jax.vmap(
+            lambda obs, size, history: adaptive_obs_to_array(
+                obs,
+                size,
+                pad_size,
+                include_global_context=True,
+                scoreboard_history=history,
+            )
+        )(
+            learner_obs_prior,
+            effective_sizes,
+            history_context,
+        )
+    else:
+        current_scoreboard = scoreboard_history
+        obs_arr, active = jax.vmap(
+            lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+        )(
+            learner_obs_prior,
+            effective_sizes,
+        )
     masks = jax.vmap(
         lambda obs, size: compute_adaptive_valid_move_mask(
             obs.armies,
@@ -223,7 +258,14 @@ def rollout_step(
         current_states,
     )
     final_sizes = jnp.where(dones, reset_sizes, effective_sizes)
-    return final_states, final_sizes, (obs_arr, masks, active, learner_actions, logprobs, values, rewards, dones, infos), key
+    final_scoreboard_history = reset_adaptive_scoreboard_history(current_scoreboard, dones)
+    return (
+        final_states,
+        final_sizes,
+        final_scoreboard_history,
+        (obs_arr, masks, active, learner_actions, logprobs, values, rewards, dones, infos),
+        key,
+    )
 
 
 def collect_rollout(
@@ -241,11 +283,13 @@ def collect_rollout(
     truncation_reward_scale,
     pad_size,
     global_context=False,
+    scoreboard_history=None,
+    scoreboard_history_enabled=False,
 ):
     """Collect a Python-loop rollout, stacking step data on axis 0."""
     step_data = []
     for _ in range(num_steps):
-        states, effective_sizes, data, key = rollout_step(
+        states, effective_sizes, scoreboard_history, data, key = rollout_step(
             states,
             effective_sizes,
             pool,
@@ -259,10 +303,12 @@ def collect_rollout(
             truncation_reward_scale,
             pad_size,
             global_context,
+            scoreboard_history,
+            scoreboard_history_enabled,
         )
         step_data.append(data)
     rollout_data = jax.tree.map(lambda *xs: jnp.stack(xs), *step_data)
-    return states, effective_sizes, rollout_data, key
+    return states, effective_sizes, scoreboard_history, rollout_data, key
 
 
 def collect_mixed_rollout(
@@ -281,10 +327,13 @@ def collect_mixed_rollout(
     truncation_reward_scale,
     pad_size,
     global_context=False,
+    scoreboard_history_p0=None,
+    scoreboard_history_p1=None,
+    scoreboard_history_enabled=False,
 ):
     """Collect P0 and P1 learner trajectories, then combine them for one PPO update."""
     key, p0_key, p1_key = jrandom.split(key, 3)
-    states_p0, effective_sizes_p0, rollout_p0, _ = collect_rollout(
+    states_p0, effective_sizes_p0, scoreboard_history_p0, rollout_p0, _ = collect_rollout(
         states_p0,
         effective_sizes_p0,
         pool,
@@ -299,8 +348,10 @@ def collect_mixed_rollout(
         truncation_reward_scale,
         pad_size,
         global_context,
+        scoreboard_history_p0,
+        scoreboard_history_enabled,
     )
-    states_p1, effective_sizes_p1, rollout_p1, _ = collect_rollout(
+    states_p1, effective_sizes_p1, scoreboard_history_p1, rollout_p1, _ = collect_rollout(
         states_p1,
         effective_sizes_p1,
         pool,
@@ -315,9 +366,20 @@ def collect_mixed_rollout(
         truncation_reward_scale,
         pad_size,
         global_context,
+        scoreboard_history_p1,
+        scoreboard_history_enabled,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
-    return states_p0, effective_sizes_p0, states_p1, effective_sizes_p1, rollout_data, key
+    return (
+        states_p0,
+        effective_sizes_p0,
+        scoreboard_history_p0,
+        states_p1,
+        effective_sizes_p1,
+        scoreboard_history_p1,
+        rollout_data,
+        key,
+    )
 
 
 @jax.jit
@@ -549,6 +611,7 @@ def parse_args():
     parser.add_argument("--channels", default=None)
     parser.add_argument("--init-channels", default=None)
     parser.add_argument("--global-context", action="store_true")
+    parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
@@ -682,8 +745,11 @@ def main():
             print(f"Warm inputs:   {args.init_input_channels} channels")
         if args.init_global_context:
             print("Warm global:   enabled")
-    if args.global_context:
+    network_global_context = args.global_context or args.scoreboard_history
+    if network_global_context:
         print(f"Global ctx:    scoreboard channels ({ADAPTIVE_GLOBAL_INPUT_CHANNELS})")
+    if args.scoreboard_history:
+        print(f"Score history: previous+delta channels ({ADAPTIVE_HISTORY_INPUT_CHANNELS})")
     if args.value_heads != "shared":
         print(f"Value heads:   {args.value_heads}")
         if args.init_model_path is not None:
@@ -708,9 +774,20 @@ def main():
         if args.init_value_loss == "hl-gauss"
         else 0
     )
-    input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS if args.global_context else ADAPTIVE_INPUT_CHANNELS
+    network_global_context = args.global_context or args.scoreboard_history
+    if args.scoreboard_history:
+        input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
+    elif network_global_context:
+        input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
+    else:
+        input_channels = ADAPTIVE_INPUT_CHANNELS
     init_input_channels = args.init_input_channels
-    if init_input_channels is None and args.init_model_path is not None and args.global_context and not args.init_global_context:
+    if (
+        init_input_channels is None
+        and args.init_model_path is not None
+        and network_global_context
+        and not args.init_global_context
+    ):
         init_input_channels = ADAPTIVE_INPUT_CHANNELS
     network = load_or_create_adaptive_network(
         net_key,
@@ -729,7 +806,7 @@ def main():
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_aux_weight > 0.0,
         init_outcome_head=args.init_outcome_head,
-        global_context=args.global_context,
+        global_context=network_global_context,
         init_global_context=args.init_global_context,
     )
     optimizer = optax.adam(args.lr)
@@ -759,6 +836,8 @@ def main():
         effective_sizes_p0 = mixed_effective_sizes[:mixed_p0_envs]
         states_p1 = jax.tree.map(lambda x: x[mixed_p0_envs:], mixed_states)
         effective_sizes_p1 = mixed_effective_sizes[mixed_p0_envs:]
+        scoreboard_history_p0 = empty_scoreboard_history(mixed_p0_envs)
+        scoreboard_history_p1 = empty_scoreboard_history(mixed_p1_envs)
         learner_players_for_log = jnp.concatenate(
             [
                 jnp.zeros((mixed_p0_envs,), dtype=jnp.int32),
@@ -767,11 +846,12 @@ def main():
         )
     else:
         states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
+        scoreboard_history = empty_scoreboard_history(args.num_envs)
 
     print("Warming up...")
     if mixed_learner:
         key, warmup_p0_key, warmup_p1_key = jrandom.split(key, 3)
-        states_p0, effective_sizes_p0, _, _ = rollout_step(
+        states_p0, effective_sizes_p0, scoreboard_history_p0, _, _ = rollout_step(
             states_p0,
             effective_sizes_p0,
             pool,
@@ -784,9 +864,11 @@ def main():
             args.terminal_reward_scale,
             args.truncation_reward_scale,
             args.pad_to,
-            args.global_context,
+            network_global_context,
+            scoreboard_history_p0,
+            args.scoreboard_history,
         )
-        states_p1, effective_sizes_p1, _, _ = rollout_step(
+        states_p1, effective_sizes_p1, scoreboard_history_p1, _, _ = rollout_step(
             states_p1,
             effective_sizes_p1,
             pool,
@@ -799,13 +881,15 @@ def main():
             args.terminal_reward_scale,
             args.truncation_reward_scale,
             args.pad_to,
-            args.global_context,
+            network_global_context,
+            scoreboard_history_p1,
+            args.scoreboard_history,
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
     else:
         warmup_learner_player = resolve_learner_player(args.learner_player, 1)
-        states, effective_sizes, _, key = rollout_step(
+        states, effective_sizes, scoreboard_history, _, key = rollout_step(
             states,
             effective_sizes,
             pool,
@@ -818,7 +902,9 @@ def main():
             args.terminal_reward_scale,
             args.truncation_reward_scale,
             args.pad_to,
-            args.global_context,
+            network_global_context,
+            scoreboard_history,
+            args.scoreboard_history,
         )
         jax.block_until_ready(states)
 
@@ -827,7 +913,16 @@ def main():
     for iteration in range(1, args.num_iterations + 1):
         t0 = time.time()
         if mixed_learner:
-            states_p0, effective_sizes_p0, states_p1, effective_sizes_p1, rollout_data, key = collect_mixed_rollout(
+            (
+                states_p0,
+                effective_sizes_p0,
+                scoreboard_history_p0,
+                states_p1,
+                effective_sizes_p1,
+                scoreboard_history_p1,
+                rollout_data,
+                key,
+            ) = collect_mixed_rollout(
                 states_p0,
                 effective_sizes_p0,
                 states_p1,
@@ -842,13 +937,16 @@ def main():
                 args.terminal_reward_scale,
                 args.truncation_reward_scale,
                 args.pad_to,
-                args.global_context,
+                network_global_context,
+                scoreboard_history_p0,
+                scoreboard_history_p1,
+                args.scoreboard_history,
             )
             jax.block_until_ready(states_p0)
             jax.block_until_ready(states_p1)
         else:
             iteration_learner_player = resolve_learner_player(args.learner_player, iteration)
-            states, effective_sizes, rollout_data, key = collect_rollout(
+            states, effective_sizes, scoreboard_history, rollout_data, key = collect_rollout(
                 states,
                 effective_sizes,
                 pool,
@@ -862,7 +960,9 @@ def main():
                 args.terminal_reward_scale,
                 args.truncation_reward_scale,
                 args.pad_to,
-                args.global_context,
+                network_global_context,
+                scoreboard_history,
+                args.scoreboard_history,
             )
             jax.block_until_ready(states)
         obs, masks, active, actions, logprobs, values, rewards, dones, infos = rollout_data

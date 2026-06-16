@@ -22,9 +22,13 @@ import jax.random as jrandom
 
 from adaptive_common import (
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+    ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
+    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_index_to_action,
     adaptive_obs_to_array,
+    adaptive_scoreboard_features,
+    adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
     make_adaptive_state_pool,
     parse_grid_sizes,
@@ -105,24 +109,47 @@ def evaluate_batch(
     policy_player,
     pad_size,
     global_context=False,
+    scoreboard_history=False,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
     effective_sizes = jnp.full((num_envs,), effective_size, dtype=jnp.int32)
+    initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
     def body(carry, _):
-        states, key = carry
+        states, key, history = carry
         obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
         policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
         opponent_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
 
-        obs_arr, active = jax.vmap(
-            lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
-        )(
-            policy_obs,
-            effective_sizes,
-        )
+        if scoreboard_history:
+            current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
+                policy_obs,
+                effective_sizes,
+            )
+            history_context = adaptive_scoreboard_history_context(history, current_scoreboard)
+            obs_arr, active = jax.vmap(
+                lambda obs, size, row_history: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=True,
+                    scoreboard_history=row_history,
+                )
+            )(
+                policy_obs,
+                effective_sizes,
+                history_context,
+            )
+        else:
+            current_scoreboard = history
+            obs_arr, active = jax.vmap(
+                lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+            )(
+                policy_obs,
+                effective_sizes,
+            )
         masks = jax.vmap(
             lambda obs, size: compute_adaptive_valid_move_mask(
                 obs.armies,
@@ -154,9 +181,9 @@ def evaluate_batch(
             states,
             new_states,
         )
-        return (final_states, key), infos
+        return (final_states, key, current_scoreboard), infos
 
-    (states, key), _ = jax.lax.scan(body, (states, key), None, length=max_steps)
+    (states, key, _), _ = jax.lax.scan(body, (states, key, initial_history), None, length=max_steps)
     return jax.vmap(game.get_info)(states)
 
 
@@ -179,6 +206,7 @@ def parse_args():
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
     parser.add_argument("--global-context", action="store_true")
+    parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
@@ -234,7 +262,13 @@ def main():
     args = parse_args()
     key = jrandom.PRNGKey(args.seed)
     key, net_key = jrandom.split(key)
-    input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS if args.global_context else ADAPTIVE_INPUT_CHANNELS
+    network_global_context = args.global_context or args.scoreboard_history
+    if args.scoreboard_history:
+        input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
+    elif network_global_context:
+        input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
+    else:
+        input_channels = ADAPTIVE_INPUT_CHANNELS
     network = load_or_create_adaptive_network(
         net_key,
         pad_size=args.pad_to,
@@ -248,8 +282,8 @@ def main():
         value_max=args.value_max,
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_head,
-        global_context=args.global_context,
-        init_global_context=args.global_context,
+        global_context=network_global_context,
+        init_global_context=network_global_context,
     )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -271,8 +305,10 @@ def main():
         )
     if args.outcome_head:
         print("Outcome:    auxiliary head loaded")
-    if args.global_context:
-        print(f"Global ctx: {ADAPTIVE_GLOBAL_INPUT_CHANNELS} input channels")
+    if network_global_context:
+        print(f"Global ctx: {input_channels} input channels")
+    if args.scoreboard_history:
+        print("Score hist: previous+delta channels")
     print()
 
     for grid_size in args.grid_sizes:
@@ -301,7 +337,8 @@ def main():
                 policy_mode,
                 policy_player,
                 args.pad_to,
-                args.global_context,
+                network_global_context,
+                args.scoreboard_history,
             )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -327,7 +364,8 @@ def main():
         "policy_mode": args.policy_mode,
         "num_games": args.num_games,
         "max_steps": args.max_steps,
-        "global_context": args.global_context,
+        "global_context": network_global_context,
+        "scoreboard_history": args.scoreboard_history,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

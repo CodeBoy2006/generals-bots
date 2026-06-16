@@ -14,6 +14,7 @@ from generals.agents.ppo_policy_agent import DEFAULT_POLICY_CHANNELS, PolicyChan
 try:
     from .adaptive_common import (
         ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        ADAPTIVE_HISTORY_INPUT_CHANNELS,
         ADAPTIVE_INPUT_CHANNELS,
         adaptive_action_to_index,
         adaptive_index_to_action,
@@ -21,6 +22,7 @@ try:
 except ImportError:  # pragma: no cover - used when running this directory as scripts.
     from adaptive_common import (
         ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        ADAPTIVE_HISTORY_INPUT_CHANNELS,
         ADAPTIVE_INPUT_CHANNELS,
         adaptive_action_to_index,
         adaptive_index_to_action,
@@ -163,7 +165,10 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.outcome_linear2 = eqx.nn.Linear(64, 3, key=keys[outcome_offset]) if outcome_head else None
         global_offset = outcome_offset + outcome_keys
         if global_context:
-            self.global_linear1 = eqx.nn.Linear(7, 64, key=keys[global_offset])
+            global_context_features = input_channels - 13
+            if global_context_features <= 0:
+                raise ValueError("global_context requires at least 14 input channels")
+            self.global_linear1 = eqx.nn.Linear(global_context_features, 64, key=keys[global_offset])
             global_linear2 = eqx.nn.Linear(64, channels[3], key=keys[global_offset + 1])
             self.global_linear2 = eqx.tree_at(
                 lambda layer: (layer.weight, layer.bias),
@@ -189,7 +194,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         active = obs[9] > 0.5
         active_f = active.astype(jnp.float32)
         denom = jnp.maximum(jnp.sum(active_f), 1.0)
-        global_features = jnp.sum(obs[13:20] * active_f[None, :, :], axis=(1, 2)) / denom
+        global_features = jnp.sum(obs[13:] * active_f[None, :, :], axis=(1, 2)) / denom
         hidden = jax.nn.relu(self.global_linear1(global_features))
         return self.global_linear2(hidden)
 

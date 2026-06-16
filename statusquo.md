@@ -507,3 +507,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the global-context checkpoints; next try should add scoreboard history/memory channels, search-to-Q/intent targets, or a lower-risk distillation objective for the new global branch.
 - **Context:** Best retained global checkpoint was iter 10 at `69.14%` min over 256 games/row on seed 69040. It improved same-seed source 16p1 but remained below the existing 512-row `71.29%` search-distill candidate; iter 20/30/40 continued the PPO drift pattern.
+
+## [2026-06-16 22:52] Adaptive Scoreboard History Branch
+- **Changes:** Added `--scoreboard-history` 30-channel adaptive inputs with previous scoreboard features plus one-step deltas, per-env history carry/reset in adaptive PPO, evaluator history carry, variable-width global context MLP loading, tests, and docs.
+- **Status:** Completed
+- **Next Steps:** Run the 256-env CUDA scoreboard-history triage from the 71.29% search-distill checkpoint and compare retained checkpoints at 256 games/row.
+- **Context:** Focused adaptive tests passed (`43 passed`), compileall and `git diff --check` passed, and CUDA train/eval smoke ran on `cuda:0`. Full pytest was interrupted after 53 passing tests to prioritize fast training iteration per user direction.
