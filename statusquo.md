@@ -537,3 +537,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the mixed-seat history-distill CUDA probe and compare retained checkpoints against the same-seed source before any wider promotion.
 - **Context:** Verification stayed lightweight per user direction: compileall, `git diff --check`, one CPU CLI smoke (`1 passed`), and a CUDA mixed smoke on `cuda:0` saving `/tmp/generals-adaptive-history-distill-mixed-smoke.eqx`.
+
+## [2026-06-16 23:19] Adaptive Freeze-Legacy Distillation
+- **Changes:** Added `adaptive_search_distill.py --freeze-legacy-weights`, which masks gradients to the new post-15-channel conv1 inputs and global/history MLP while freezing the legacy adaptive trunk and heads. Updated the focused smoke test and docs.
+- **Status:** Completed
+- **Next Steps:** Run a mixed-seat history-distill probe with `--freeze-legacy-weights` and compare 256-row retained checkpoints against the active-soft mixed run.
+- **Context:** Verification stayed lightweight: compileall, `git diff --check`, one CPU CLI smoke (`1 passed`), and a CUDA freeze smoke on `cuda:0` saving `/tmp/generals-adaptive-history-distill-freeze-smoke.eqx`.

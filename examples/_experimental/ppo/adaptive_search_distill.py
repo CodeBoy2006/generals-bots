@@ -72,6 +72,24 @@ def concatenate_flat_batches(*batches):
     return tuple(jnp.concatenate(items, axis=0) for items in zip(*batches, strict=True))
 
 
+def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS):
+    """Keep gradients only for newly added adaptive input paths."""
+    masked = jax.tree.map(lambda leaf: jnp.zeros_like(leaf) if eqx.is_inexact_array(leaf) else leaf, grads)
+    if grads.conv1.weight is not None:
+        conv1_weight = jnp.zeros_like(grads.conv1.weight)
+        conv1_weight = conv1_weight.at[:, legacy_input_channels:].set(grads.conv1.weight[:, legacy_input_channels:])
+    else:
+        conv1_weight = None
+    conv1_bias = jnp.zeros_like(grads.conv1.bias) if grads.conv1.bias is not None else None
+    conv1_grad = eqx.tree_at(lambda layer: (layer.weight, layer.bias), grads.conv1, (conv1_weight, conv1_bias))
+    masked = eqx.tree_at(lambda net: net.conv1, masked, conv1_grad)
+    if grads.global_linear1 is not None:
+        masked = eqx.tree_at(lambda net: net.global_linear1, masked, grads.global_linear1)
+    if grads.global_linear2 is not None:
+        masked = eqx.tree_at(lambda net: net.global_linear2, masked, grads.global_linear2)
+    return masked
+
+
 def compute_adaptive_conservative_loss(
     student_network,
     base_network,
@@ -427,6 +445,8 @@ def train_adaptive_conservative_minibatch(
     kl_weight,
     improve_weight,
     temperature,
+    freeze_legacy_weights=False,
+    legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Train one adaptive hard-target distillation minibatch."""
     obs, masks, active, base_obs, base_masks, base_active, target_indices, improve_weights, kl_weights = minibatch
@@ -450,6 +470,8 @@ def train_adaptive_conservative_minibatch(
         )
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
+    if freeze_legacy_weights:
+        grads = mask_legacy_distill_grads(grads, legacy_input_channels)
     params = eqx.filter(student_network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     student_network = eqx.apply_updates(student_network, updates)
@@ -467,6 +489,8 @@ def train_adaptive_soft_minibatch(
     improve_weight,
     improvement_extra_weight,
     temperature,
+    freeze_legacy_weights=False,
+    legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Train one adaptive soft-target distillation minibatch."""
     (
@@ -505,6 +529,8 @@ def train_adaptive_soft_minibatch(
         )
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
+    if freeze_legacy_weights:
+        grads = mask_legacy_distill_grads(grads, legacy_input_channels)
     params = eqx.filter(student_network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     student_network = eqx.apply_updates(student_network, updates)
@@ -581,6 +607,8 @@ def train_adaptive_conservative_epoch(
     kl_weight,
     improve_weight,
     temperature,
+    freeze_legacy_weights=False,
+    legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Run adaptive hard-target distillation over shuffled minibatches."""
     obs, masks, active, base_obs, base_masks, base_active, target_indices, improve_weights, kl_weights, margins = (
@@ -622,6 +650,8 @@ def train_adaptive_conservative_epoch(
                 kl_weight,
                 improve_weight,
                 temperature,
+                freeze_legacy_weights,
+                legacy_input_channels,
             )
             epoch_loss += loss
             if epoch_metrics is None:
@@ -653,6 +683,8 @@ def train_adaptive_soft_epoch(
     improve_weight,
     improvement_extra_weight,
     temperature,
+    freeze_legacy_weights=False,
+    legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Run adaptive soft-target distillation over shuffled minibatches."""
     (
@@ -707,6 +739,8 @@ def train_adaptive_soft_epoch(
                 improve_weight,
                 improvement_extra_weight,
                 temperature,
+                freeze_legacy_weights,
+                legacy_input_channels,
             )
             epoch_loss += loss
             if epoch_metrics is None:
@@ -1122,6 +1156,7 @@ def parse_args():
     parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
+    parser.add_argument("--freeze-legacy-weights", action="store_true")
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
@@ -1203,6 +1238,8 @@ def parse_args():
         parser.error("--checkpoint-every and --keep-checkpoints cannot be negative")
     if args.init_input_channels is not None and args.init_input_channels <= 0:
         parser.error("--init-input-channels must be positive")
+    if args.freeze_legacy_weights and not (args.global_context or args.scoreboard_history):
+        parser.error("--freeze-legacy-weights requires --global-context or --scoreboard-history")
     try:
         args.channels = parse_policy_channels(args.channels)
         args.base_channels = parse_policy_channels(args.base_channels or args.channels)
@@ -1250,6 +1287,8 @@ def main():
         print("Score history: enabled")
     elif network_global_context:
         print("Global ctx:    enabled")
+    if args.freeze_legacy_weights:
+        print("Frozen legacy: conv1 old inputs + trunk/heads")
     if mixed_learner:
         mixed_p0_envs, mixed_p1_envs = split_mixed_env_counts(args.num_envs)
         learner_label = f"mixed players 0/1 ({mixed_p0_envs}+{mixed_p1_envs} envs)"
@@ -1416,6 +1455,8 @@ def main():
                 args.kl_weight,
                 args.improve_weight,
                 args.temperature,
+                args.freeze_legacy_weights,
+                ADAPTIVE_INPUT_CHANNELS,
             )
         else:
             if mixed_learner:
@@ -1519,6 +1560,8 @@ def main():
                 args.improve_weight,
                 args.soft_improvement_extra_weight,
                 args.temperature,
+                args.freeze_legacy_weights,
+                ADAPTIVE_INPUT_CHANNELS,
             )
         jax.block_until_ready(student_network)
 

@@ -1355,6 +1355,7 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
         "--scoreboard-history",
         "--init-input-channels",
         "15",
+        "--freeze-legacy-weights",
         "--checkpoint-dir",
         str(checkpoint_dir),
         "--checkpoint-every",

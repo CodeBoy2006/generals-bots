@@ -2280,6 +2280,8 @@ result: saved /tmp/generals-adaptive-history-distill-smoke.eqx
 
 Single-seat p0/p1 probes improved the weak same-seed 16p1 row slightly but still shifted weakness between seats and degraded by iter20. The next probe should therefore use `--learner-player mixed`, so p0 and p1 search labels enter the same optimizer update.
 
+2026-06-16 follow-up added `--freeze-legacy-weights` for distillation. When used with global/history inputs, gradients are kept only for conv1 weights connected to channels after the legacy 15-channel observation plus the global/history MLP. The old conv trunk and policy/value heads stay frozen, so the history branch can learn additive corrections without dragging the existing 15-channel policy away from the 71.29% anchor.
+
 Next fast GPU probe:
 
 ```bash
@@ -2309,6 +2311,7 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_sea
   --init-channels 32,32,32,16 \
   --scoreboard-history \
   --init-input-channels 15 \
+  --freeze-legacy-weights \
   --checkpoint-dir /tmp/generals-adaptive-history-distill-mixed-v1-ckpts \
   --checkpoint-every 10 \
   --keep-checkpoints 3 \
