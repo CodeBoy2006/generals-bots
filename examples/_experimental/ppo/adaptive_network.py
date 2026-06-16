@@ -148,14 +148,13 @@ def load_or_create_adaptive_network(
 
 
 def _copy_conv_prefix(target: eqx.nn.Conv2d, source: eqx.nn.Conv2d) -> eqx.nn.Conv2d:
-    """Copy a smaller conv into a larger conv prefix and zero unused channels."""
+    """Copy source outputs while keeping extra target output channels trainable."""
     out_channels = min(target.weight.shape[0], source.weight.shape[0])
     in_channels = min(target.weight.shape[1], source.weight.shape[1])
-    weight = jnp.zeros_like(target.weight)
+    weight = target.weight.at[:out_channels].set(0.0)
     weight = weight.at[:out_channels, :in_channels].set(source.weight[:out_channels, :in_channels])
-    bias = None
+    bias = target.bias
     if target.bias is not None and source.bias is not None:
-        bias = jnp.zeros_like(target.bias)
         bias = bias.at[:out_channels].set(source.bias[:out_channels])
     return eqx.tree_at(lambda layer: (layer.weight, layer.bias), target, (weight, bias))
 

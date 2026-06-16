@@ -161,6 +161,9 @@ def test_load_or_create_adaptive_network_expands_channels_without_changing_outpu
 
     assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
     assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+    assert jnp.any(jnp.abs(expanded.conv1.weight[source_channels[0] :]) > 0.0)
+    assert jnp.any(jnp.abs(expanded.conv2.weight[source_channels[1] :]) > 0.0)
+    assert jnp.allclose(expanded.policy_conv.weight[:, source_channels[3] :], 0.0)
 
 
 def test_make_adaptive_state_pool_balances_sizes():

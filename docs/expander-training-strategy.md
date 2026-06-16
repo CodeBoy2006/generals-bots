@@ -1502,7 +1502,7 @@ trainer-v2 首轮结果没有超过当前 best：
   128 games/row min_win_rate = 31.25%
 ```
 
-结论：wide-from-scratch/BC 会丢掉当前 best 的 70% 策略质量；真正有意义的容量路线应该从当前 best 小模型扩容，而不是从弱 BC 重新学。`load_or_create_adaptive_network(..., init_channels=...)` 现在支持把小 adaptive checkpoint 按通道前缀复制到更宽网络，额外通道置零，保证初始 logits/value 与源 checkpoint 一致。
+结论：wide-from-scratch/BC 会丢掉当前 best 的 70% 策略质量；真正有意义的容量路线应该从当前 best 小模型扩容，而不是从弱 BC 重新学。`load_or_create_adaptive_network(..., init_channels=...)` 现在支持把小 adaptive checkpoint 按通道前缀复制到更宽网络，额外卷积特征保留随机初始化，但它们通往旧输出/head 的连接初始为零，因此初始 logits/value 与源 checkpoint 一致且新通道仍可学习。
 
 下一条建议从当前 best 做零填充扩容：
 
