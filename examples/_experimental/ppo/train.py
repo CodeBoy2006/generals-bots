@@ -112,12 +112,75 @@ def make_initial_states(pool, num_envs):
     return states._replace(pool_idx=pool_idx)
 
 
-def resolve_opponent_source(opponent_policy_path, self_play_opponent):
+def parse_opponent_policy_pool(pool_value, modes_value):
+    """Parse comma-separated frozen opponent checkpoint paths and execution modes."""
+    if not pool_value:
+        return []
+    paths = [item.strip() for item in pool_value.split(",") if item.strip()]
+    if modes_value:
+        modes = [item.strip() for item in modes_value.split(",") if item.strip()]
+        if len(modes) != len(paths):
+            raise ValueError("--opponent-policy-pool-modes must match --opponent-policy-pool length")
+    else:
+        modes = ["sample"] * len(paths)
+    for mode in modes:
+        if mode not in POLICY_MODE_NAMES:
+            raise ValueError(f"Unsupported opponent policy mode: {mode}")
+    return list(zip(paths, modes))
+
+
+def load_opponent_policy_pool(key, pool_specs, grid_size, channels, input_channels):
+    """Load a same-architecture pool of ordinary PolicyValueNetwork opponents."""
+    networks = []
+    modes = []
+    for index, (path_value, mode_name) in enumerate(pool_specs):
+        path = Path(path_value)
+        if not path.exists():
+            raise FileNotFoundError(f"Opponent pool checkpoint not found: {path}")
+        network = PolicyValueNetwork(
+            jrandom.fold_in(key, index),
+            grid_size=grid_size,
+            channels=channels,
+            input_channels=input_channels,
+        )
+        networks.append(eqx.tree_deserialise_leaves(path, network))
+        modes.append(POLICY_MODE_NAME_TO_ID[mode_name])
+    return tuple(networks), jnp.array(modes, dtype=jnp.int32)
+
+
+def policy_pool_state_action(opponent_networks, opponent_modes, opponent_index, key, state, obs, player, policy_input):
+    """Dispatch one action from a tuple of frozen ordinary policy opponents."""
+    branches = tuple(
+        (
+            lambda network, mode: (
+                lambda _: policy_state_action(
+                    network,
+                    key,
+                    state,
+                    obs,
+                    player,
+                    mode,
+                    policy_input,
+                )
+            )
+        )(network, opponent_modes[index])
+        for index, network in enumerate(opponent_networks)
+    )
+    return jax.lax.switch(opponent_index, branches, None)
+
+
+def resolve_opponent_source(opponent_policy_path, self_play_opponent, opponent_policy_pool=None):
     """Select which opponent source the PPO rollout loop should use."""
-    if self_play_opponent and opponent_policy_path is not None:
-        raise ValueError("--self-play-opponent cannot be combined with --opponent-policy-path")
+    has_pool = bool(opponent_policy_pool)
+    enabled_sources = sum(bool(value) for value in (opponent_policy_path, self_play_opponent, has_pool))
+    if enabled_sources > 1:
+        raise ValueError(
+            "--opponent-policy-path, --self-play-opponent, and --opponent-policy-pool are mutually exclusive"
+        )
     if self_play_opponent:
         return "current"
+    if has_pool:
+        return "checkpoint_pool"
     if opponent_policy_path is not None:
         return "checkpoint"
     return "heuristic"
@@ -492,6 +555,117 @@ def rollout_step_policy_opponent(
     return final_states, (obs_arr, masks, learner_actions, logprobs, values, rewards, dones, infos), key
 
 
+@eqx.filter_jit
+def rollout_step_policy_pool_opponent(
+    states,
+    pool,
+    network,
+    opponent_networks,
+    opponent_modes,
+    opponent_indices,
+    key,
+    truncation,
+    learner_player,
+    terminal_reward_scale,
+    policy_input=0,
+    opponent_policy_input=0,
+    general_target_reward_scale=0.0,
+    general_target_max_distance=16,
+    general_target_min_army=2,
+    path_assignment_reward_scale=0.0,
+    path_assignment_max_distance=64,
+    path_assignment_min_army=2,
+    path_assignment_general_weight=1.0,
+    path_assignment_city_weight=0.8,
+    path_assignment_frontier_weight=0.25,
+):
+    """Vectorized rollout step against a pool of frozen policy checkpoint opponents."""
+    num_envs = states.armies.shape[0]
+    opponent_player = 1 - learner_player
+
+    obs_p0_prior = jax.vmap(lambda s: game.get_observation(s, 0))(states)
+    obs_p1_prior = jax.vmap(lambda s: game.get_observation(s, 1))(states)
+    learner_obs_prior = select_learner_obs(obs_p0_prior, obs_p1_prior, learner_player)
+    opponent_obs_prior = select_opponent_obs(obs_p0_prior, obs_p1_prior, learner_player)
+
+    obs_arr, masks = jax.vmap(
+        lambda state, obs: policy_input_array_and_mask(state, obs, learner_player, policy_input)
+    )(states, learner_obs_prior)
+
+    key, *keys = jrandom.split(key, num_envs + 1)
+    learner_actions, values, logprobs, entropies = jax.vmap(network, in_axes=(0, 0, 0, None))(
+        obs_arr, masks, jnp.stack(keys), None
+    )
+
+    key, *keys = jrandom.split(key, num_envs + 1)
+    opponent_actions = jax.vmap(
+        lambda opponent_index, state, k, obs: policy_pool_state_action(
+            opponent_networks,
+            opponent_modes,
+            opponent_index,
+            k,
+            state,
+            obs,
+            opponent_player,
+            opponent_policy_input,
+        )
+    )(
+        opponent_indices,
+        states,
+        jnp.stack(keys),
+        opponent_obs_prior,
+    )
+
+    actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
+    new_states, infos = jax.vmap(game.step)(states, actions)
+
+    obs_p0_new = jax.vmap(lambda s: game.get_observation(s, 0))(new_states)
+    obs_p1_new = jax.vmap(lambda s: game.get_observation(s, 1))(new_states)
+    learner_obs_new = select_learner_obs(obs_p0_new, obs_p1_new, learner_player)
+    rewards = jax.vmap(composite_reward_fn)(learner_obs_prior, learner_actions, learner_obs_new)
+    rewards = apply_general_target_rewards(
+        rewards,
+        states,
+        new_states,
+        learner_player,
+        general_target_reward_scale,
+        general_target_max_distance,
+        general_target_min_army,
+    )
+    rewards = apply_path_assignment_rewards(
+        rewards,
+        states,
+        new_states,
+        learner_player,
+        path_assignment_reward_scale,
+        path_assignment_max_distance,
+        path_assignment_min_army,
+        path_assignment_general_weight,
+        path_assignment_city_weight,
+        path_assignment_frontier_weight,
+    )
+    rewards = apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale)
+
+    terminated = infos.is_done
+    truncated = (new_states.time >= truncation) & ~terminated
+    dones = terminated | truncated
+
+    pool_size = pool.armies.shape[0]
+    reset_indices = new_states.pool_idx % pool_size
+    reset_states = jax.tree.map(lambda x: x[reset_indices], pool)
+    next_pool_idx = jnp.where(dones, new_states.pool_idx + num_envs, new_states.pool_idx)
+    reset_states = reset_states._replace(pool_idx=next_pool_idx)
+    current_states = new_states._replace(pool_idx=next_pool_idx)
+
+    final_states = jax.tree.map(
+        lambda reset, current: jnp.where(dones.reshape(num_envs, *([1] * (reset.ndim - 1))), reset, current),
+        reset_states,
+        current_states,
+    )
+
+    return final_states, (obs_arr, masks, learner_actions, logprobs, values, rewards, dones, infos), key
+
+
 @jax.jit
 def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     """Compute GAE advantages and value returns."""
@@ -722,6 +896,16 @@ def main():
         help="Optional frozen PPO checkpoint to use as the player-1 opponent instead of --opponent.",
     )
     parser.add_argument(
+        "--opponent-policy-pool",
+        default=None,
+        help="Comma-separated frozen PPO checkpoints to sample as ordinary policy opponents.",
+    )
+    parser.add_argument(
+        "--opponent-policy-pool-modes",
+        default=None,
+        help="Comma-separated execution modes for --opponent-policy-pool. Defaults to sample for every checkpoint.",
+    )
+    parser.add_argument(
         "--self-play-opponent",
         action="store_true",
         help="Use the current learner policy as the non-learner opponent on each rollout.",
@@ -843,7 +1027,8 @@ def main():
     if args.opponent_input_channels is not None and args.opponent_input_channels <= 0:
         parser.error("--opponent-input-channels must be positive")
     try:
-        opponent_source = resolve_opponent_source(args.opponent_policy_path, args.self_play_opponent)
+        opponent_policy_pool = parse_opponent_policy_pool(args.opponent_policy_pool, args.opponent_policy_pool_modes)
+        opponent_source = resolve_opponent_source(args.opponent_policy_path, args.self_play_opponent, opponent_policy_pool)
     except ValueError as exc:
         parser.error(str(exc))
     input_channels = args.input_channels or policy_input_default_channels(args.policy_input)
@@ -879,6 +1064,12 @@ def main():
     elif opponent_source == "checkpoint":
         print(f"Opponent:      policy checkpoint ({args.opponent_policy_mode})")
         print(f"Opponent path: {args.opponent_policy_path}")
+        print(f"Opponent ch:   {opponent_channels}")
+        print(f"Opponent in:   {opponent_policy_input_name} ({opponent_input_channels} channels)")
+    elif opponent_source == "checkpoint_pool":
+        print(f"Opponent:      policy checkpoint pool ({len(opponent_policy_pool)} checkpoints)")
+        for pool_index, (pool_path, pool_mode) in enumerate(opponent_policy_pool):
+            print(f"  pool[{pool_index}]: {pool_mode} {pool_path}")
         print(f"Opponent ch:   {opponent_channels}")
         print(f"Opponent in:   {opponent_policy_input_name} ({opponent_input_channels} channels)")
     else:
@@ -925,11 +1116,21 @@ def main():
         init_input_channels=init_input_channels,
     )
     opponent_network = None
+    opponent_networks = ()
+    opponent_pool_modes = jnp.array([], dtype=jnp.int32)
     if opponent_source == "checkpoint":
         opponent_network = load_or_create_network(
             opponent_net_key,
             grid_size=grid_size,
             init_model_path=args.opponent_policy_path,
+            channels=opponent_channels,
+            input_channels=opponent_input_channels,
+        )
+    elif opponent_source == "checkpoint_pool":
+        opponent_networks, opponent_pool_modes = load_opponent_policy_pool(
+            opponent_net_key,
+            opponent_policy_pool,
+            grid_size=grid_size,
             channels=opponent_channels,
             input_channels=opponent_input_channels,
         )
@@ -979,7 +1180,7 @@ def main():
                 args.path_assignment_city_weight,
                 args.path_assignment_frontier_weight,
             )
-        else:
+        elif opponent_source in ("checkpoint", "current"):
             active_opponent_network = network if opponent_source == "current" else opponent_network
             states, _, key = rollout_step_policy_opponent(
                 states,
@@ -989,6 +1190,38 @@ def main():
                 key,
                 args.truncation,
                 opponent_policy_mode,
+                args.learner_player,
+                args.terminal_reward_scale,
+                policy_input,
+                opponent_policy_input,
+                args.general_target_reward_scale,
+                general_target_max_distance,
+                args.general_target_min_army,
+                args.path_assignment_reward_scale,
+                path_assignment_max_distance,
+                args.path_assignment_min_army,
+                args.path_assignment_general_weight,
+                args.path_assignment_city_weight,
+                args.path_assignment_frontier_weight,
+            )
+        else:
+            key, opponent_index_key = jrandom.split(key)
+            opponent_indices = jrandom.randint(
+                opponent_index_key,
+                (num_envs,),
+                0,
+                len(opponent_networks),
+                dtype=jnp.int32,
+            )
+            states, _, key = rollout_step_policy_pool_opponent(
+                states,
+                pool,
+                network,
+                opponent_networks,
+                opponent_pool_modes,
+                opponent_indices,
+                key,
+                args.truncation,
                 args.learner_player,
                 args.terminal_reward_scale,
                 policy_input,
@@ -1013,6 +1246,16 @@ def main():
     
     for iteration in range(num_iterations):
         t0 = time.time()
+        opponent_indices = None
+        if opponent_source == "checkpoint_pool":
+            key, opponent_index_key = jrandom.split(key)
+            opponent_indices = jrandom.randint(
+                opponent_index_key,
+                (num_envs,),
+                0,
+                len(opponent_networks),
+                dtype=jnp.int32,
+            )
         
         # Collect rollout
         rollout_data = []
@@ -1038,7 +1281,7 @@ def main():
                     args.path_assignment_city_weight,
                     args.path_assignment_frontier_weight,
                 )
-            else:
+            elif opponent_source in ("checkpoint", "current"):
                 active_opponent_network = network if opponent_source == "current" else opponent_network
                 states, data, key = rollout_step_policy_opponent(
                     states,
@@ -1048,6 +1291,30 @@ def main():
                     key,
                     args.truncation,
                     opponent_policy_mode,
+                    args.learner_player,
+                    args.terminal_reward_scale,
+                    policy_input,
+                    opponent_policy_input,
+                    args.general_target_reward_scale,
+                    general_target_max_distance,
+                    args.general_target_min_army,
+                    args.path_assignment_reward_scale,
+                    path_assignment_max_distance,
+                    args.path_assignment_min_army,
+                    args.path_assignment_general_weight,
+                    args.path_assignment_city_weight,
+                    args.path_assignment_frontier_weight,
+                )
+            else:
+                states, data, key = rollout_step_policy_pool_opponent(
+                    states,
+                    pool,
+                    network,
+                    opponent_networks,
+                    opponent_pool_modes,
+                    opponent_indices,
+                    key,
+                    args.truncation,
                     args.learner_player,
                     args.terminal_reward_scale,
                     policy_input,

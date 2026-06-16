@@ -243,3 +243,9 @@
 - **Status:** Completed
 - **Next Steps:** Implement ordinary PPO opponent checkpoint pools so best-response training can sample multiple frozen historical policies.
 - **Context:** Targeted verification passed for `tests/test_ppo_train.py` and `tests/test_recurrent_ppo.py`, including CLI smoke runs that write and prune periodic checkpoints.
+
+## [2026-06-16 11:48] PPO Opponent Checkpoint Pool
+- **Changes:** Added `--opponent-policy-pool` and `--opponent-policy-pool-modes` to ordinary PPO training, same-architecture frozen pool loading, pool action dispatch, and rollout support that samples one frozen opponent index per environment per training iteration.
+- **Status:** Completed
+- **Next Steps:** Run full verification, document league workflow commands, then start the first v5 warm-start league best-response training run.
+- **Context:** `JAX_PLATFORMS=cpu uv run pytest -q tests/test_ppo_train.py` passed, including parser, loader, and CLI smoke coverage for checkpoint-pool training.

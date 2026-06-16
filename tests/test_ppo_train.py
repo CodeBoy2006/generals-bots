@@ -14,7 +14,9 @@ from examples._experimental.ppo.train import (
     apply_path_assignment_rewards,
     apply_terminal_reward,
     checkpoint_path_for_iteration,
+    load_opponent_policy_pool,
     load_or_create_network,
+    parse_opponent_policy_pool,
     prune_old_checkpoints,
     resolve_opponent_source,
     rollout_step_policy_opponent,
@@ -80,6 +82,91 @@ def test_train_cli_writes_periodic_checkpoint(tmp_path):
     assert model_path.exists()
     assert not (checkpoint_dir / "final-iter-000001.eqx").exists()
     assert (checkpoint_dir / "final-iter-000002.eqx").exists()
+
+
+def test_parse_opponent_policy_pool_splits_paths_and_modes():
+    pool = parse_opponent_policy_pool("a.eqx,b.eqx", "sample,greedy")
+    assert pool == [("a.eqx", "sample"), ("b.eqx", "greedy")]
+
+
+def test_parse_opponent_policy_pool_defaults_modes():
+    pool = parse_opponent_policy_pool("a.eqx,b.eqx", None)
+    assert pool == [("a.eqx", "sample"), ("b.eqx", "sample")]
+
+
+def test_resolve_opponent_source_rejects_single_and_pool():
+    try:
+        resolve_opponent_source("a.eqx", False, opponent_policy_pool=[("b.eqx", "sample")])
+    except ValueError as exc:
+        assert "--opponent-policy-path" in str(exc)
+        assert "--opponent-policy-pool" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_load_opponent_policy_pool_restores_checkpoints(tmp_path):
+    path_a = tmp_path / "a.eqx"
+    path_b = tmp_path / "b.eqx"
+    saved_a = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=4)
+    saved_b = PolicyValueNetwork(jrandom.PRNGKey(1), grid_size=4)
+    eqx.tree_serialise_leaves(path_a, saved_a)
+    eqx.tree_serialise_leaves(path_b, saved_b)
+
+    networks, modes = load_opponent_policy_pool(
+        jrandom.PRNGKey(2),
+        [(str(path_a), "sample"), (str(path_b), "greedy")],
+        grid_size=4,
+        channels=(32, 32, 32, 16),
+        input_channels=9,
+    )
+
+    obs = jnp.zeros((9, 4, 4), dtype=jnp.float32)
+    mask = jnp.ones((4, 4, 4), dtype=bool)
+    saved_logits, saved_value = saved_a.logits_value(obs, mask)
+    loaded_logits, loaded_value = networks[0].logits_value(obs, mask)
+    assert len(networks) == 2
+    assert jnp.array_equal(modes, jnp.array([1, 0], dtype=jnp.int32))
+    assert jnp.allclose(loaded_logits, saved_logits)
+    assert jnp.allclose(loaded_value, saved_value)
+
+
+def test_train_cli_accepts_opponent_policy_pool(tmp_path):
+    path_a = tmp_path / "a.eqx"
+    path_b = tmp_path / "b.eqx"
+    model_path = tmp_path / "final.eqx"
+    eqx.tree_serialise_leaves(path_a, PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=4))
+    eqx.tree_serialise_leaves(path_b, PolicyValueNetwork(jrandom.PRNGKey(1), grid_size=4))
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/train.py",
+        "4",
+        "--grid-size",
+        "4",
+        "--pool-size",
+        "8",
+        "--num-steps",
+        "2",
+        "--num-iterations",
+        "1",
+        "--num-epochs",
+        "1",
+        "--minibatch-size",
+        "8",
+        "--opponent-policy-pool",
+        f"{path_a},{path_b}",
+        "--opponent-policy-pool-modes",
+        "sample,greedy",
+        "--model-path",
+        str(model_path),
+        "--seed",
+        "30420",
+    ]
+
+    subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+
+    assert model_path.exists()
 
 
 def test_load_or_create_network_restores_checkpoint(tmp_path):
