@@ -33,7 +33,7 @@ from adaptive_common import (
 from adaptive_network import load_or_create_adaptive_network
 from common import TEACHER_NAME_TO_ID, TEACHER_NAMES, heuristic_action
 from generals.core import game
-from train import random_action
+from train import checkpoint_path_for_iteration, prune_old_checkpoints, random_action
 
 
 @eqx.filter_jit
@@ -147,6 +147,9 @@ def parse_args():
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="/tmp/generals-adaptive-bc-8-12-16.eqx")
+    parser.add_argument("--checkpoint-dir", default=None)
+    parser.add_argument("--checkpoint-every", type=int, default=0)
+    parser.add_argument("--keep-checkpoints", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -174,6 +177,10 @@ def parse_args():
         parser.error("city count must satisfy 2 <= min <= max")
     if args.city_army_min >= args.city_army_max:
         parser.error("city army range must satisfy min < max")
+    if args.checkpoint_every < 0:
+        parser.error("--checkpoint-every cannot be negative")
+    if args.keep_checkpoints < 0:
+        parser.error("--keep-checkpoints cannot be negative")
     return args
 
 
@@ -189,6 +196,8 @@ def main():
     print(f"Reset pool:    {args.pool_size}")
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
+    if args.checkpoint_dir is not None and args.checkpoint_every > 0:
+        print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
 
     key = jrandom.PRNGKey(args.seed)
@@ -215,6 +224,8 @@ def main():
     jax.block_until_ready(pool.states.armies)
     states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
 
+    checkpoint_paths = []
+    model_stem = Path(args.model_path).stem
     for iteration in range(args.num_iterations):
         t0 = time.time()
         states, effective_sizes, batch, key = collect_teacher_batch(
@@ -239,6 +250,18 @@ def main():
             optimizer,
         )
         jax.block_until_ready(network)
+
+        iteration_number = iteration + 1
+        if (
+            args.checkpoint_dir is not None
+            and args.checkpoint_every > 0
+            and iteration_number % args.checkpoint_every == 0
+        ):
+            checkpoint_path = checkpoint_path_for_iteration(args.checkpoint_dir, model_stem, iteration_number)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            eqx.tree_serialise_leaves(checkpoint_path, network)
+            checkpoint_paths.append(checkpoint_path)
+            prune_old_checkpoints(checkpoint_paths, args.keep_checkpoints)
 
         if iteration % 10 == 0 or iteration == args.num_iterations - 1:
             episodes = int(dones.sum())

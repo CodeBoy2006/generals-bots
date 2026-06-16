@@ -333,3 +333,9 @@
 - **Status:** Completed
 - **Next Steps:** Start a full adaptive BC warm start, then run adaptive PPO with periodic checkpoints and evaluate candidate `min_win_rate` across all required sizes and seats.
 - **Context:** Verification passed after the docs update: adaptive focused tests, full CPU pytest, compileall, and `git diff --check`. This proves the infrastructure and docs, not the 90% target checkpoint.
+
+## [2026-06-16 14:03] Adaptive BC Checkpoints
+- **Changes:** Added `--checkpoint-dir`, `--checkpoint-every`, and `--keep-checkpoints` to `behavior_clone_adaptive.py`, plus CLI coverage and docs updates for long adaptive BC warm-start runs.
+- **Status:** Completed
+- **Next Steps:** Run a medium CPU adaptive BC baseline using periodic checkpoints, then evaluate the resulting checkpoint across the 8/12/16 size-seat matrix.
+- **Context:** Task followed TDD: the checkpoint-pruning CLI test first failed because the adaptive BC parser lacked the flags, then passed after wiring the existing checkpoint helpers. Full CPU pytest passed with 155 tests.

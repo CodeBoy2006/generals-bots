@@ -352,6 +352,9 @@ uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
   --num-steps 32 \
   --num-iterations 2000 \
   --lr 0.0007 \
+  --checkpoint-dir /tmp/generals-adaptive-bc-checkpoints \
+  --checkpoint-every 100 \
+  --keep-checkpoints 10 \
   --model-path /tmp/generals-adaptive-bc-8-12-16.eqx
 ```
 
