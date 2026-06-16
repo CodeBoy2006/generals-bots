@@ -1,14 +1,31 @@
 """Play Generals against a trained PPO .eqx checkpoint."""
 
 import argparse
+import sys
+from dataclasses import dataclass
+from pathlib import Path
 import time
 from typing import Protocol
 
 import jax.numpy as jnp
 import jax.random as jrandom
+import numpy as np
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from generals.agents import PPOPolicyAgent
-from generals.agents.ppo_policy_agent import POLICY_INPUT_CHOICES, PolicyPreview, policy_input_default_channels
+from examples._experimental.ppo.search_policy import rollout_search_action, rollout_search_candidates
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_CHOICES,
+    PolicyInputOption,
+    PolicyPreview,
+    action_tuple_to_candidate,
+    load_policy_network,
+    policy_input_default_channels,
+)
 from generals.core import game
 from generals.core.action import compute_valid_move_mask, create_action
 from generals.core.game import create_initial_state
@@ -18,10 +35,122 @@ from generals.gui import GUI
 from generals.gui.event_handler import GameCommand
 from generals.gui.properties import GuiMode
 
+POLICY_MODE_NAME_TO_ID = {"greedy": 0, "sample": 1}
+
 
 class PlayAgent(Protocol):
     def act(self, observation, key: jnp.ndarray) -> jnp.ndarray:
         """Return one public Generals action."""
+
+
+@dataclass(frozen=True)
+class SearchConfig:
+    """Rollout-search parameters shared by GUI player agents."""
+
+    rollout_policy_mode: str
+    top_k: int
+    rollout_steps: int
+    rollouts_per_action: int
+    army_weight: float
+    land_weight: float
+    prior_weight: float
+
+
+class RolloutSearchPolicyAgent:
+    """GUI agent that wraps a 9-channel PPO checkpoint with rollout search."""
+
+    def __init__(
+        self,
+        model_path: str,
+        grid_size: int,
+        *,
+        agent_id: str = "PPO Search",
+        policy_input: PolicyInputOption = "auto",
+        input_channels: int | None = None,
+        top_k: int = 4,
+        rollout_steps: int = 16,
+        rollouts_per_action: int = 4,
+        rollout_policy_mode: str = "sample",
+        army_weight: float = 12.0,
+        land_weight: float = 8.0,
+        prior_weight: float = 0.01,
+    ):
+        if policy_input not in ("auto", "observation"):
+            raise ValueError("--search-policy only supports observation checkpoints")
+        if input_channels not in (None, 9):
+            raise ValueError("--search-policy requires a 9-channel observation checkpoint")
+        if rollout_policy_mode not in POLICY_MODE_NAME_TO_ID:
+            raise ValueError("rollout_policy_mode must be 'greedy' or 'sample'")
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if rollout_steps <= 0:
+            raise ValueError("rollout_steps must be positive")
+        if rollouts_per_action <= 0:
+            raise ValueError("rollouts_per_action must be positive")
+
+        self.id = agent_id
+        self.grid_size = grid_size
+        self.network = load_policy_network(model_path, grid_size, input_channels=9)
+        self.rollout_policy_mode = rollout_policy_mode
+        self.rollout_policy_mode_id = POLICY_MODE_NAME_TO_ID[rollout_policy_mode]
+        self.top_k = top_k
+        self.rollout_steps = rollout_steps
+        self.rollouts_per_action = rollouts_per_action
+        self.army_weight = army_weight
+        self.land_weight = land_weight
+        self.prior_weight = prior_weight
+
+    def _validate_grid_shape(self, shape: tuple[int, ...]) -> None:
+        if shape != (self.grid_size, self.grid_size):
+            raise ValueError(f"PPO checkpoint expects {self.grid_size}x{self.grid_size} states, got {shape}")
+
+    def act(self, observation, key: jnp.ndarray) -> jnp.ndarray:
+        raise ValueError("rollout-search requires act_for_state so it can simulate from the full game state")
+
+    def act_for_state(self, state: game.GameState, player: int, key: jnp.ndarray) -> jnp.ndarray:
+        """Return the rollout-search action for one player in the current state."""
+        self._validate_grid_shape(state.armies.shape)
+        return rollout_search_action(
+            self.network,
+            state,
+            key,
+            player,
+            self.top_k,
+            self.rollout_steps,
+            self.rollouts_per_action,
+            self.rollout_policy_mode_id,
+            self.army_weight,
+            self.land_weight,
+            self.prior_weight,
+        )
+
+    def explain_for_state(self, state: game.GameState, player: int, top_k: int = 3) -> PolicyPreview:
+        """Show rollout-search candidates ranked by simulated score."""
+        self._validate_grid_shape(state.armies.shape)
+        actions, _, _, search_scores = rollout_search_candidates(
+            self.network,
+            state,
+            jrandom.PRNGKey(0),
+            player,
+            self.top_k,
+            self.rollout_steps,
+            self.rollouts_per_action,
+            self.rollout_policy_mode_id,
+            self.army_weight,
+            self.land_weight,
+            self.prior_weight,
+        )
+        scores_np = np.asarray(search_scores)
+        order = np.argsort(scores_np)[::-1][:top_k]
+        shifted_scores = scores_np - np.max(scores_np)
+        all_probabilities = np.exp(shifted_scores) / np.sum(np.exp(shifted_scores))
+        probabilities = all_probabilities[order]
+        candidates = []
+        for candidate_index, probability in zip(order.tolist(), probabilities.tolist(), strict=True):
+            action = tuple(int(value) for value in np.asarray(actions[candidate_index]).tolist())
+            candidates.append(action_tuple_to_candidate(action, float(probability)))
+        value = float(np.max(scores_np)) if scores_np.size else 0.0
+        return PolicyPreview(candidates=tuple(candidates), value=value, policy_mode="rollout-search")
 
 
 def make_simple_general_grid(key: jnp.ndarray, grid_size: int) -> jnp.ndarray:
@@ -78,6 +207,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-size", type=int, default=8, help="Square map size used by the saved model.")
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="sample")
+    parser.add_argument("--search-policy", action="store_true", help="Wrap the primary PPO checkpoint with rollout search.")
+    parser.add_argument(
+        "--opponent-search-policy",
+        action="store_true",
+        help="Wrap the second PPO checkpoint with rollout search in machine-vs-machine mode.",
+    )
+    parser.add_argument(
+        "--search-rollout-policy-mode",
+        choices=("greedy", "sample"),
+        default="sample",
+        help="Policy mode used inside rollout-search simulations.",
+    )
+    parser.add_argument("--search-top-k", type=int, default=4, help="Policy-prior candidates scored by rollout search.")
+    parser.add_argument("--search-rollout-steps", type=int, default=16, help="Simulated steps per rollout-search candidate.")
+    parser.add_argument(
+        "--search-rollouts-per-action",
+        type=int,
+        default=4,
+        help="Rollout samples per candidate action.",
+    )
+    parser.add_argument("--search-army-weight", type=float, default=12.0)
+    parser.add_argument("--search-land-weight", type=float, default=8.0)
+    parser.add_argument("--search-prior-weight", type=float, default=0.01)
     parser.add_argument(
         "--policy-input",
         choices=POLICY_INPUT_CHOICES,
@@ -150,6 +302,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-steps must be positive")
     if args.tick_rate <= 0:
         parser.error("--tick-rate must be positive")
+    if args.search_top_k <= 0:
+        parser.error("--search-top-k must be positive")
+    if args.search_rollout_steps <= 0:
+        parser.error("--search-rollout-steps must be positive")
+    if args.search_rollouts_per_action <= 0:
+        parser.error("--search-rollouts-per-action must be positive")
     if not (1 <= args.preview_top_k <= 5):
         parser.error("--preview-top-k must be between 1 and 5")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
@@ -228,6 +386,16 @@ def parse_args() -> argparse.Namespace:
             args.model_1_input_channels = args.model_0_input_channels
         else:
             args.model_1_input_channels = resolve_input_channels(args.model_1_policy_input, None)
+    if args.search_policy:
+        if args.model_0_policy_input not in ("auto", "observation"):
+            parser.error("--search-policy only supports --model-0-policy-input observation or auto")
+        if args.model_0_input_channels not in (None, 9):
+            parser.error("--search-policy requires --model-0-input-channels 9")
+    if args.opponent_search_policy:
+        if args.model_1_policy_input not in ("auto", "observation"):
+            parser.error("--opponent-search-policy only supports --model-1-policy-input observation or auto")
+        if args.model_1_input_channels not in (None, 9):
+            parser.error("--opponent-search-policy requires --model-1-input-channels 9")
 
     args.effective_min_generals_distance = args.min_generals_distance
     if args.effective_min_generals_distance is None:
@@ -247,6 +415,55 @@ def make_player_names(human_player: int, machine_vs_machine: bool = False) -> li
     names[human_player] = "Human"
     names[1 - human_player] = "PPO Model"
     return names
+
+
+def make_search_config(args: argparse.Namespace) -> SearchConfig:
+    """Build rollout-search settings from parsed CLI arguments."""
+    return SearchConfig(
+        rollout_policy_mode=args.search_rollout_policy_mode,
+        top_k=args.search_top_k,
+        rollout_steps=args.search_rollout_steps,
+        rollouts_per_action=args.search_rollouts_per_action,
+        army_weight=args.search_army_weight,
+        land_weight=args.search_land_weight,
+        prior_weight=args.search_prior_weight,
+    )
+
+
+def make_gui_agent(
+    model_path: str,
+    grid_size: int,
+    policy_mode: str,
+    agent_id: str,
+    policy_input: PolicyInputOption,
+    input_channels: int | None,
+    use_search_policy: bool,
+    search_config: SearchConfig,
+) -> PlayAgent:
+    """Create either a plain PPO GUI agent or a rollout-search wrapper."""
+    if use_search_policy:
+        return RolloutSearchPolicyAgent(
+            model_path,
+            grid_size,
+            agent_id=agent_id,
+            policy_input=policy_input,
+            input_channels=input_channels,
+            top_k=search_config.top_k,
+            rollout_steps=search_config.rollout_steps,
+            rollouts_per_action=search_config.rollouts_per_action,
+            rollout_policy_mode=search_config.rollout_policy_mode,
+            army_weight=search_config.army_weight,
+            land_weight=search_config.land_weight,
+            prior_weight=search_config.prior_weight,
+        )
+    return PPOPolicyAgent(
+        model_path,
+        grid_size,
+        policy_mode,
+        agent_id=agent_id,
+        policy_input=policy_input,
+        input_channels=input_channels,
+    )
 
 
 def human_can_move(state: game.GameState, human_player: int) -> bool:
@@ -331,38 +548,45 @@ def main() -> None:
     model_player = 1 - args.human_player
     key = jrandom.PRNGKey(args.seed)
     names = make_player_names(args.human_player, machine_vs_machine=args.machine_vs_machine)
+    search_config = make_search_config(args)
     if args.machine_vs_machine:
         opponent_model_path = args.opponent_model_path or args.model_path
         opponent_policy_mode = args.opponent_policy_mode or args.policy_mode
         machine_agents = (
-            PPOPolicyAgent(
+            make_gui_agent(
                 args.model_path,
                 args.grid_size,
                 args.policy_mode,
-                agent_id=names[0],
-                policy_input=args.model_0_policy_input,
-                input_channels=args.model_0_input_channels,
+                names[0],
+                args.model_0_policy_input,
+                args.model_0_input_channels,
+                args.search_policy,
+                search_config,
             ),
-            PPOPolicyAgent(
+            make_gui_agent(
                 opponent_model_path,
                 args.grid_size,
                 opponent_policy_mode,
-                agent_id=names[1],
-                policy_input=args.model_1_policy_input,
-                input_channels=args.model_1_input_channels,
+                names[1],
+                args.model_1_policy_input,
+                args.model_1_input_channels,
+                args.opponent_search_policy,
+                search_config,
             ),
         )
         policy_agent = machine_agents[0]
         preview_player = 0
     else:
         machine_agents = None
-        policy_agent = PPOPolicyAgent(
+        policy_agent = make_gui_agent(
             args.model_path,
             args.grid_size,
             args.policy_mode,
-            agent_id="PPO Model",
-            policy_input=args.model_0_policy_input,
-            input_channels=args.model_0_input_channels,
+            "PPO Model",
+            args.model_0_policy_input,
+            args.model_0_input_channels,
+            args.search_policy,
+            search_config,
         )
         preview_player = model_player
 
@@ -407,7 +631,14 @@ def main() -> None:
         print("Press R after game over to restart, Q to quit.")
         print(f"Playing as player {args.human_player} on {args.grid_size}x{args.grid_size}.")
     if args.ai_preview:
-        print(f"AI preview: showing top {args.preview_top_k} PPO candidate actions in the right panel.")
+        preview_kind = "rollout-search" if args.search_policy else "PPO"
+        print(f"AI preview: showing top {args.preview_top_k} {preview_kind} candidate actions in the right panel.")
+    if args.search_policy or (args.machine_vs_machine and args.opponent_search_policy):
+        print(
+            "Rollout search: "
+            f"top_k={args.search_top_k}, rollout_steps={args.search_rollout_steps}, "
+            f"rollouts/action={args.search_rollouts_per_action}, rollout_policy={args.search_rollout_policy_mode}."
+        )
     if args.auto_tick:
         print(f"Auto tick: {args.tick_rate:g} turns/sec. Idle human turns pass automatically.")
 

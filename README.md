@@ -143,6 +143,40 @@ MODEL_1_PATH=generals-ppo-8x8-expander-gpu-v5.eqx \
 形状自动为该玩家使用 `augmented-full-state`。也可以用 `MODEL_0_POLICY_INPUT`
 和 `MODEL_1_POLICY_INPUT` 分别覆盖两个 AI 的输入类型。
 
+用 GUI 运行 `v5 + rollout-search`：
+
+```bash
+SEARCH_POLICY=1 ./play-v5.command
+```
+
+这会让人机模式里的 PPO 对手使用 v5 checkpoint 作为 policy prior，并在每步对
+top-k 候选动作做短 rollout 搜索。默认搜索预算为
+`SEARCH_TOP_K=4`、`SEARCH_ROLLOUT_STEPS=16`、`SEARCH_ROLLOUTS_PER_ACTION=4`，
+比普通 v5 明显更慢。若想先流畅观察，可降低预算：
+
+```bash
+SEARCH_POLICY=1 \
+SEARCH_TOP_K=2 \
+SEARCH_ROLLOUT_STEPS=8 \
+SEARCH_ROLLOUTS_PER_ACTION=2 \
+./play-v5.command
+```
+
+观看对战时可以只让 player 0 使用 rollout-search：
+
+```bash
+MODEL_0_SEARCH_POLICY=1 ./watch-v5.command
+```
+
+或者两边都使用搜索：
+
+```bash
+MODEL_0_SEARCH_POLICY=1 MODEL_1_SEARCH_POLICY=1 ./watch-v5.command
+```
+
+rollout-search GUI 目前只支持 9 通道 observation checkpoint，当前
+`generals-ppo-8x8-expander-gpu-v5.eqx` 满足这个条件。
+
 也可以手动指定两个 checkpoint：
 
 ```bash
@@ -157,6 +191,20 @@ uv run python examples/play_against_model.py \
   --policy-mode sample \
   --opponent-policy-mode sample \
   --tick-rate 4
+```
+
+手动打开 rollout-search：
+
+```bash
+uv run python examples/play_against_model.py generals-ppo-8x8-expander-gpu-v5.eqx \
+  --grid-size 8 \
+  --map-generator generated \
+  --policy-mode sample \
+  --policy-input observation \
+  --search-policy \
+  --search-top-k 4 \
+  --search-rollout-steps 16 \
+  --search-rollouts-per-action 4
 ```
 
 手动指定 checkpoint 和参数：

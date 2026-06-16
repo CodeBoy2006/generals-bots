@@ -436,6 +436,26 @@ learner-only winner cloning, 200 iterations:
 
 `examples/_experimental/ppo/search_policy.py` 将 checkpoint 当作 policy prior，对当前局面的 top-k 候选动作做短 rollout 评分，再选择期望更高的动作。它不产生新的 `.eqx` checkpoint，但可以作为强评估策略和后续蒸馏 teacher。
 
+GUI 中使用同一个强辅助策略：
+
+```bash
+SEARCH_POLICY=1 ./play-v5.command
+```
+
+watch 单边搜索：
+
+```bash
+MODEL_0_SEARCH_POLICY=1 ./watch-v5.command
+```
+
+watch 双边搜索：
+
+```bash
+MODEL_0_SEARCH_POLICY=1 MODEL_1_SEARCH_POLICY=1 ./watch-v5.command
+```
+
+GUI 搜索默认使用 `top_k=4, rollout_steps=16, rollouts_per_action=4`，与下面的评测配置一致。若窗口交互太慢，可通过 `SEARCH_TOP_K`、`SEARCH_ROLLOUT_STEPS` 和 `SEARCH_ROLLOUTS_PER_ACTION` 临时降低预算。当前 GUI search agent 只支持 9 通道 observation checkpoint，因此适用于 v5 这类标准 checkpoint；18 通道 augmented/full-state checkpoint 仍应使用普通 PPO GUI 或另行实现对应搜索 prior。
+
 推荐的强辅助配置：
 
 ```bash

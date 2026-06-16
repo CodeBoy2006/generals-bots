@@ -569,6 +569,38 @@ uv run python examples/play_against_model.py \
   --tick-rate 4
 ```
 
+若要在 GUI 中使用 `v5 + rollout-search`，直接用脚本环境变量打开搜索：
+
+```bash
+SEARCH_POLICY=1 ./play-v5.command
+```
+
+观看机器对战时，可只让 player 0 使用搜索：
+
+```bash
+MODEL_0_SEARCH_POLICY=1 ./watch-v5.command
+```
+
+也可以让双方都使用搜索：
+
+```bash
+MODEL_0_SEARCH_POLICY=1 MODEL_1_SEARCH_POLICY=1 ./watch-v5.command
+```
+
+rollout-search 会在每个真实动作前模拟 top-k 候选动作，默认
+`SEARCH_TOP_K=4`、`SEARCH_ROLLOUT_STEPS=16`、`SEARCH_ROLLOUTS_PER_ACTION=4`，
+因此比普通 v5 慢很多。需要更流畅观察时，可以先降低预算：
+
+```bash
+SEARCH_POLICY=1 \
+SEARCH_TOP_K=2 \
+SEARCH_ROLLOUT_STEPS=8 \
+SEARCH_ROLLOUTS_PER_ACTION=2 \
+./play-v5.command
+```
+
+当前 GUI 搜索只支持 9 通道 observation checkpoint；v5 checkpoint 可直接使用。
+
 控制方式：
 
 - 左键点击自己的可移动格子作为源格，再点击相邻目标格提交移动。

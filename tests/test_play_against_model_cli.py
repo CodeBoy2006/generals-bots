@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import pytest
 
+import examples.play_against_model as play_against_model
 from examples.play_against_model import (
     advance_until_human_can_move,
     auto_tick_due,
@@ -96,6 +97,43 @@ def test_parse_args_accepts_machine_vs_machine_options(monkeypatch):
     assert args.machine_vs_machine is True
     assert args.opponent_model_path == "opponent.eqx"
     assert args.opponent_policy_mode == "greedy"
+
+
+def test_parse_args_accepts_rollout_search_options(monkeypatch):
+    args = parse_with_args(
+        monkeypatch,
+        "--search-policy",
+        "--opponent-search-policy",
+        "--search-rollout-policy-mode",
+        "greedy",
+        "--search-top-k",
+        "2",
+        "--search-rollout-steps",
+        "3",
+        "--search-rollouts-per-action",
+        "4",
+        "--search-army-weight",
+        "5.5",
+        "--search-land-weight",
+        "6.5",
+        "--search-prior-weight",
+        "0.25",
+    )
+
+    assert args.search_policy is True
+    assert args.opponent_search_policy is True
+    assert args.search_rollout_policy_mode == "greedy"
+    assert args.search_top_k == 2
+    assert args.search_rollout_steps == 3
+    assert args.search_rollouts_per_action == 4
+    assert args.search_army_weight == 5.5
+    assert args.search_land_weight == 6.5
+    assert args.search_prior_weight == 0.25
+
+
+def test_parse_args_rejects_nonpositive_search_budget(monkeypatch):
+    with pytest.raises(SystemExit):
+        parse_with_args(monkeypatch, "--search-policy", "--search-top-k", "0")
 
 
 def test_parse_args_accepts_explicit_machine_model_paths_without_positional(monkeypatch):
@@ -236,3 +274,68 @@ def test_choose_machine_actions_uses_both_player_observations():
     actions = choose_machine_actions(state, agents, jnp.array([0, 1], dtype=jnp.uint32))
 
     assert actions.tolist() == [[1, 0, 0, 0, 0], [0, 3, 3, 0, 0]]
+
+
+def test_rollout_search_agent_delegates_to_search_action(monkeypatch):
+    calls = {}
+    sentinel_network = object()
+
+    def fake_load_policy_network(model_path, grid_size, *, channels=None, input_channels=9):
+        calls["load"] = (model_path, grid_size, channels, input_channels)
+        return sentinel_network
+
+    def fake_rollout_search_action(
+        network,
+        state,
+        key,
+        player,
+        top_k,
+        rollout_steps,
+        rollouts_per_action,
+        policy_mode,
+        army_weight,
+        land_weight,
+        prior_weight,
+    ):
+        calls["search"] = (
+            network,
+            state,
+            key,
+            player,
+            top_k,
+            rollout_steps,
+            rollouts_per_action,
+            policy_mode,
+            army_weight,
+            land_weight,
+            prior_weight,
+        )
+        return jnp.array([1, 0, 0, 0, 0], dtype=jnp.int32)
+
+    monkeypatch.setattr(play_against_model, "load_policy_network", fake_load_policy_network)
+    monkeypatch.setattr(play_against_model, "rollout_search_action", fake_rollout_search_action)
+
+    agent = play_against_model.RolloutSearchPolicyAgent(
+        "policy.eqx",
+        grid_size=4,
+        top_k=2,
+        rollout_steps=3,
+        rollouts_per_action=4,
+        rollout_policy_mode="greedy",
+        army_weight=5.0,
+        land_weight=6.0,
+        prior_weight=0.2,
+    )
+    grid = jnp.zeros((4, 4), dtype=jnp.int32).at[0, 0].set(1).at[3, 3].set(2)
+    state = game.create_initial_state(grid)
+    key = jnp.array([0, 1], dtype=jnp.uint32)
+
+    action = agent.act_for_state(state, 1, key)
+
+    assert action.tolist() == [1, 0, 0, 0, 0]
+    assert calls["load"] == ("policy.eqx", 4, None, 9)
+    search_call = calls["search"]
+    assert search_call[0] is sentinel_network
+    assert search_call[1] is state
+    assert search_call[2] is key
+    assert search_call[3:] == (1, 2, 3, 4, 0, 5.0, 6.0, 0.2)
