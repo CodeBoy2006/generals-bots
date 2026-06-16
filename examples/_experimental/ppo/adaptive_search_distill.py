@@ -178,3 +178,159 @@ def compute_adaptive_soft_conservative_loss(
         "target_entropy": jnp.sum(target_entropy * search_weights) / search_normalizer,
     }
     return loss, metrics
+
+
+def adaptive_score_observation(
+    info: GameInfo,
+    obs: Observation,
+    player: int,
+    army_weight: float = 12.0,
+    land_weight: float = 8.0,
+    terminal_score: float = 1000.0,
+):
+    """Score a final adaptive rollout observation from one player's perspective."""
+    army_balance = (obs.owned_army_count.astype(jnp.float32) - obs.opponent_army_count.astype(jnp.float32)) / jnp.maximum(
+        obs.owned_army_count + obs.opponent_army_count,
+        1,
+    )
+    land_balance = (obs.owned_land_count.astype(jnp.float32) - obs.opponent_land_count.astype(jnp.float32)) / obs.armies.size
+    terminal = jnp.where(
+        info.winner == player,
+        terminal_score,
+        jnp.where(info.winner == 1 - player, -terminal_score, 0.0),
+    )
+    return terminal + army_weight * army_balance + land_weight * land_balance
+
+
+def adaptive_policy_action(network, obs, effective_size, key, policy_mode, pad_size: int):
+    """Dispatch an adaptive checkpoint action using greedy or sampled execution."""
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size, pad_size)
+    mask = compute_adaptive_valid_move_mask(
+        obs.armies,
+        obs.owned_cells,
+        obs.mountains,
+        effective_size,
+        pad_size,
+    )
+    logits, _ = network.logits_value(obs_arr, mask, active)
+    index = jax.lax.cond(
+        policy_mode == 0,
+        lambda _: jnp.argmax(logits),
+        lambda _: jrandom.categorical(key, logits),
+        None,
+    )
+    return adaptive_index_to_action(index, pad_size)
+
+
+@eqx.filter_jit
+def adaptive_rollout_search_candidates(
+    network,
+    state,
+    effective_size,
+    key,
+    player,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    policy_mode,
+    army_weight,
+    land_weight,
+    prior_weight,
+    terminal_score,
+    pad_size,
+):
+    """Return adaptive top-k prior candidates and short rollout-search scores."""
+    obs = game.get_observation(state, player)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size, pad_size)
+    mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
+    logits, _ = network.logits_value(obs_arr, mask, active)
+    prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
+    candidate_actions = jax.vmap(lambda idx: adaptive_index_to_action(idx, pad_size))(candidate_indices)
+
+    opponent_player = 1 - player
+    opponent_obs = game.get_observation(state, opponent_player)
+    key, opponent_key = jrandom.split(key)
+    opponent_first_action = adaptive_policy_action(
+        network,
+        opponent_obs,
+        effective_size,
+        opponent_key,
+        policy_mode,
+        pad_size,
+    )
+
+    def rollout_score(initial_state, rollout_key):
+        def body(carry, _):
+            rollout_state, step_key = carry
+            step_key, k0, k1 = jrandom.split(step_key, 3)
+            obs_p0 = game.get_observation(rollout_state, 0)
+            obs_p1 = game.get_observation(rollout_state, 1)
+            action_p0 = adaptive_policy_action(network, obs_p0, effective_size, k0, policy_mode, pad_size)
+            action_p1 = adaptive_policy_action(network, obs_p1, effective_size, k1, policy_mode, pad_size)
+            next_state, _ = game.step(rollout_state, jnp.stack([action_p0, action_p1]))
+            already_done = game.get_info(rollout_state).is_done
+            final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
+            return (final_state, step_key), None
+
+        (final_state, _), _ = jax.lax.scan(body, (initial_state, rollout_key), None, length=rollout_steps)
+        final_info = game.get_info(final_state)
+        final_obs = game.get_observation(final_state, player)
+        return adaptive_score_observation(final_info, final_obs, player, army_weight, land_weight, terminal_score)
+
+    def candidate_score(action, prior_score, candidate_key):
+        first_actions = jax.lax.cond(
+            player == 0,
+            lambda _: jnp.stack([action, opponent_first_action]),
+            lambda _: jnp.stack([opponent_first_action, action]),
+            None,
+        )
+        next_state, first_info = game.step(state, first_actions)
+        rollout_keys = jrandom.split(candidate_key, rollouts_per_action)
+        scores = jax.vmap(lambda rollout_key: rollout_score(next_state, rollout_key))(rollout_keys)
+        first_terminal = jnp.where(
+            first_info.winner == player,
+            terminal_score,
+            jnp.where(first_info.winner == opponent_player, -terminal_score, 0.0),
+        )
+        return first_terminal + jnp.mean(scores) + prior_weight * prior_score
+
+    candidate_keys = jrandom.split(key, top_k)
+    scores = jax.vmap(candidate_score)(candidate_actions, prior_scores, candidate_keys)
+    return candidate_actions, candidate_indices, prior_scores, scores
+
+
+@eqx.filter_jit
+def adaptive_rollout_search_action(
+    network,
+    state,
+    effective_size,
+    key,
+    player,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    policy_mode,
+    army_weight,
+    land_weight,
+    prior_weight,
+    terminal_score,
+    pad_size,
+):
+    """Choose one adaptive action by scoring top-k prior actions with short rollouts."""
+    candidate_actions, _, _, scores = adaptive_rollout_search_candidates(
+        network,
+        state,
+        effective_size,
+        key,
+        player,
+        top_k,
+        rollout_steps,
+        rollouts_per_action,
+        policy_mode,
+        army_weight,
+        land_weight,
+        prior_weight,
+        terminal_score,
+        pad_size,
+    )
+    return candidate_actions[jnp.argmax(scores)]

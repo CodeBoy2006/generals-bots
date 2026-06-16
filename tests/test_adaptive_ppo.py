@@ -269,6 +269,45 @@ def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
     assert jnp.allclose(jnp.sum(target_probs, axis=1), jnp.ones((2,), dtype=jnp.float32))
 
 
+def test_adaptive_rollout_search_candidates_respects_effective_size():
+    from examples._experimental.ppo.adaptive_common import adaptive_action_space_size
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import adaptive_rollout_search_candidates
+
+    pad_size = 6
+    effective_size = 4
+    network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=pad_size, channels=(16, 16, 16, 8))
+    state = make_padded_state(size=effective_size, pad_to=pad_size)
+
+    candidate_actions, candidate_indices, prior_scores, search_scores = adaptive_rollout_search_candidates(
+        network,
+        state,
+        jnp.asarray(effective_size, dtype=jnp.int32),
+        jrandom.PRNGKey(1),
+        player=0,
+        top_k=2,
+        rollout_steps=1,
+        rollouts_per_action=1,
+        policy_mode=0,
+        army_weight=12.0,
+        land_weight=8.0,
+        prior_weight=0.01,
+        terminal_score=1000.0,
+        pad_size=pad_size,
+    )
+
+    assert candidate_actions.shape == (2, 5)
+    assert candidate_indices.shape == (2,)
+    assert prior_scores.shape == (2,)
+    assert search_scores.shape == (2,)
+    assert jnp.all(candidate_indices >= 0)
+    assert jnp.all(candidate_indices < adaptive_action_space_size(pad_size))
+    non_pass = candidate_actions[:, 0] == 0
+    assert jnp.all((candidate_actions[:, 1] < effective_size) | ~non_pass)
+    assert jnp.all((candidate_actions[:, 2] < effective_size) | ~non_pass)
+    assert jnp.all(jnp.isfinite(search_scores))
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess
