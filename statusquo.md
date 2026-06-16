@@ -387,3 +387,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the CUDA trainer-v2 continuation from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx`, then evaluate retained checkpoints across all 8/12/16 size-seat rows.
 - **Context:** Verification passed with focused adaptive tests, compileall, `git diff --check`, and full CPU pytest. This implements training controls only; the 90% Expander target remains unproven until an independently evaluated checkpoint clears every required row.
+
+## [2026-06-16 15:40] Adaptive Capacity Route
+- **Changes:** Added `--channels` support to `behavior_clone_adaptive.py`, extended adaptive BC smoke coverage, and documented trainer-v2/no-trunc CUDA results plus the next larger-capacity adaptive route.
+- **Status:** Completed
+- **Next Steps:** Train a `64,64,64,32` adaptive BC warm start, continue PPO against Expander, and evaluate all retained checkpoints across 8x8/12x12/16x16 and both seats.
+- **Context:** Trainer-v2 controls alone did not beat the current best 70.31% minimum row: v2 reached 67.97% over 256 games/row, iter-100 reached 67.19% over 512 games/row, and the no-truncation control reached 68.36% over 256 games/row.

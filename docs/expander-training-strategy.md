@@ -1232,6 +1232,7 @@ uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
   --num-steps 32 \
   --num-iterations 2000 \
   --lr 0.0007 \
+  --channels 64,64,64,32 \
   --checkpoint-dir /tmp/generals-adaptive-bc-checkpoints \
   --checkpoint-every 100 \
   --keep-checkpoints 10 \
@@ -1458,6 +1459,29 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
 ```
 
 评估顺序：先对 final 和保留的 checkpoint 做 256 games/row triage；若 `min_win_rate` 高于 70.31%，再升到 512 games/row 或 2048 games/row。只有六个 size-seat pair 的总胜率都超过 90%，才可替换当前 best。
+
+trainer-v2 首轮结果没有超过当前 best：
+
+```text
+/tmp/generals-adaptive-ppo-gpu-v2.eqx
+  config: weights 8:1.5,12:1,16:2, learner_player=alternate, truncation_reward_scale=0.5
+  256 games/row min_win_rate = 67.97%
+  16x16 p0 = 174/25/57, win rate 67.97%
+  16x16 p1 = 184/22/50, win rate 71.88%
+
+/tmp/generals-adaptive-ppo-gpu-v2-checkpoints/generals-adaptive-ppo-gpu-v2-iter-000100.eqx
+  512 games/row min_win_rate = 67.19%
+```
+
+去掉截断惩罚的隔离对照也没有超过当前 best：
+
+```text
+/tmp/generals-adaptive-ppo-gpu-v2-notrunc.eqx
+  config: weights 8:1.5,12:1,16:2, learner_player=alternate, truncation_reward_scale=0.0
+  256 games/row min_win_rate = 68.36%
+```
+
+结论：weighted pool + alternating seat 可以把部分 12x12 行拉高，但会牺牲 8x8 或 16x16；`truncation_reward_scale=0.5` 不是当前瓶颈的直接解。下一步应尝试更大 adaptive 网络容量，例如 `--channels 64,64,64,32`，先用 adaptive BC warm start，再用 PPO 细调和 size-seat matrix 评估。
 
 ## 评估命令
 

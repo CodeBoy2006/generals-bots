@@ -352,6 +352,7 @@ uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
   --num-steps 32 \
   --num-iterations 2000 \
   --lr 0.0007 \
+  --channels 64,64,64,32 \
   --checkpoint-dir /tmp/generals-adaptive-bc-checkpoints \
   --checkpoint-every 100 \
   --keep-checkpoints 10 \
@@ -397,7 +398,7 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
 ```
 
 `behavior_clone_adaptive.py`、`train_adaptive.py` 和 `evaluate_adaptive_policy.py` 使用固定 `--pad-to` 画布保存一个 checkpoint，并通过 `--grid-sizes` 在 8x8、12x12、16x16 等有效棋盘之间切换。评估器会自动跑每个尺寸的 player 0 和 player 1 两个座位，`--require-win-rate 0.90` 会在任一尺寸或座位未达标时返回非零退出码。当前 GUI 和固定尺寸 `evaluate_policy.py` 仍只支持普通 `PolicyValueNetwork` checkpoint，不能直接加载 adaptive checkpoint。
-`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--learner-player alternate` 按 training iteration 交替更新两个座位，`--truncation-reward-scale` 对非终局截断加入负奖励以降低 draw-heavy 策略。
+`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--channels` 指定 adaptive 网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--learner-player alternate` 按 training iteration 交替更新两个座位，`--truncation-reward-scale` 对非终局截断加入负奖励以降低 draw-heavy 策略。
 
 Residual GRU 记忆 PPO：
 

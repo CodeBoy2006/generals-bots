@@ -147,6 +147,7 @@ def parse_args():
     parser.add_argument("--max-generals-distance", type=int, default=None)
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
+    parser.add_argument("--channels", default=None)
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="/tmp/generals-adaptive-bc-8-12-16.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -205,6 +206,8 @@ def main():
         print(f"Size weights:  {weights_label}")
     print(f"Iterations:    {args.num_iterations} x {args.num_steps} steps")
     print(f"Reset pool:    {args.pool_size}")
+    if args.channels is not None:
+        print(f"Channels:      {args.channels}")
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
@@ -217,6 +220,7 @@ def main():
         net_key,
         pad_size=args.pad_to,
         init_model_path=args.init_model_path,
+        channels=args.channels,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))

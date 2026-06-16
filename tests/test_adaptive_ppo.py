@@ -219,6 +219,8 @@ def test_behavior_clone_adaptive_cli_smoke(tmp_path):
         "1",
         "--num-iterations",
         "1",
+        "--channels",
+        "16,16,16,8",
         "--model-path",
         str(model_path),
         "--seed",
