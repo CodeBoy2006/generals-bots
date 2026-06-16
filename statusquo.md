@@ -303,3 +303,9 @@
 - **Status:** Completed
 - **Next Steps:** Add adaptive size-balanced reset pools and Expander target distributions for behavior cloning.
 - **Context:** Task 2 followed TDD: network tests first failed on missing module, then passed after implementation. The existing fixed-size `PolicyValueNetwork` remains unchanged.
+
+## [2026-06-16 13:37] Adaptive Pool And Targets
+- **Changes:** Extended `examples/_experimental/ppo/adaptive_common.py` with padded simple-grid generation, size-balanced adaptive state pools, adaptive initial-state selection, and soft Expander target distributions using the single-pass adaptive action space.
+- **Status:** Completed
+- **Next Steps:** Add `behavior_clone_adaptive.py` and its CLI smoke test so the adaptive checkpoint can get an Expander warm start.
+- **Context:** Task 3 followed TDD: pool/target tests first failed on missing helpers, then passed after implementation. The pool assigns remainder slots to larger sizes to bias scarce capacity toward harder maps.

@@ -117,3 +117,33 @@ def test_adaptive_network_samples_and_scores_action():
     assert jnp.isfinite(value)
     assert jnp.isfinite(logprob)
     assert jnp.isfinite(entropy)
+
+
+def test_make_adaptive_state_pool_balances_sizes():
+    from examples._experimental.ppo.adaptive_common import make_adaptive_state_pool
+
+    pool = make_adaptive_state_pool(
+        jrandom.PRNGKey(0),
+        pool_size=5,
+        grid_sizes=(4, 6),
+        pad_size=6,
+        map_generator="simple",
+        mountain_density_range=(0.0, 0.0),
+        num_cities_range=(2, 2),
+        max_generals_distance=None,
+        castle_val_range=(10, 11),
+    )
+
+    assert pool.states.armies.shape == (5, 6, 6)
+    assert sorted(pool.effective_sizes.tolist()) == [4, 4, 6, 6, 6]
+
+
+def test_adaptive_expander_target_probs_has_single_pass_slot():
+    from examples._experimental.ppo.adaptive_common import adaptive_expander_target_probs
+
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    target = adaptive_expander_target_probs(obs, effective_size=4, pad_size=6)
+
+    assert target.shape == (8 * 6 * 6 + 1,)
+    assert jnp.isclose(jnp.sum(target), 1.0)

@@ -134,3 +134,111 @@ def adaptive_action_to_target_probs(action: jnp.ndarray, pad_size: int) -> jnp.n
     """Return one-hot target probabilities for one adaptive action."""
     index = adaptive_action_to_index(action, pad_size)
     return jax.nn.one_hot(index, adaptive_action_space_size(pad_size), dtype=jnp.float32)
+
+
+def make_simple_general_grid(key, grid_size: int, pad_size: int) -> jnp.ndarray:
+    """Create a padded simple map with two random generals."""
+    grid = jnp.full((pad_size, pad_size), -2, dtype=jnp.int32)
+    grid = grid.at[:grid_size, :grid_size].set(0)
+    idx = jrandom.choice(key, grid_size * grid_size, shape=(2,), replace=False)
+    pos_a = (idx[0] // grid_size, idx[0] % grid_size)
+    pos_b = (idx[1] // grid_size, idx[1] % grid_size)
+    return grid.at[pos_a].set(1).at[pos_b].set(2)
+
+
+def _pool_counts(pool_size: int, grid_sizes: tuple[int, ...]) -> tuple[int, ...]:
+    """Split pool slots across sizes, assigning remainders to larger sizes."""
+    base = pool_size // len(grid_sizes)
+    remainder = pool_size % len(grid_sizes)
+    counts = [base] * len(grid_sizes)
+    for index in range(remainder):
+        counts[len(counts) - 1 - index] += 1
+    return tuple(counts)
+
+
+def make_adaptive_state_pool(
+    key,
+    pool_size: int,
+    grid_sizes: tuple[int, ...],
+    pad_size: int,
+    map_generator: str,
+    mountain_density_range: tuple[float, float],
+    num_cities_range: tuple[int, int],
+    max_generals_distance: int | None,
+    castle_val_range: tuple[int, int],
+) -> AdaptiveStatePool:
+    """Generate a size-balanced padded state pool for adaptive rollouts."""
+    keys = jrandom.split(key, pool_size + 1)
+    shuffle_key = keys[0]
+    offset = 1
+    pools = []
+    sizes = []
+    for grid_size, count in zip(grid_sizes, _pool_counts(pool_size, grid_sizes), strict=True):
+        combo_keys = keys[offset : offset + count]
+        offset += count
+        if map_generator == "simple":
+            grids = jax.vmap(lambda k, s=grid_size: make_simple_general_grid(k, s, pad_size))(combo_keys)
+        else:
+            grids = jax.vmap(
+                lambda k, s=grid_size: generate_grid(
+                    k,
+                    grid_dims=(s, s),
+                    pad_to=pad_size,
+                    mountain_density_range=mountain_density_range,
+                    num_cities_range=num_cities_range,
+                    min_generals_distance=min_distance_for_size(s),
+                    max_generals_distance=max_generals_distance,
+                    castle_val_range=castle_val_range,
+                )
+            )(combo_keys)
+        pools.append(jax.vmap(game.create_initial_state)(grids))
+        sizes.append(jnp.full((count,), grid_size, dtype=jnp.int32))
+
+    states = jax.tree.map(lambda *xs: jnp.concatenate(xs), *pools)
+    effective_sizes = jnp.concatenate(sizes)
+    permutation = jrandom.permutation(shuffle_key, pool_size)
+    return AdaptiveStatePool(
+        states=jax.tree.map(lambda x: x[permutation], states),
+        effective_sizes=effective_sizes[permutation],
+    )
+
+
+def make_adaptive_initial_states(pool: AdaptiveStatePool, num_envs: int) -> tuple[game.GameState, jnp.ndarray]:
+    """Take initial states and matching effective sizes from an adaptive pool."""
+    states = jax.tree.map(lambda x: x[:num_envs], pool.states)
+    sizes = pool.effective_sizes[:num_envs]
+    pool_size = pool.states.armies.shape[0]
+    pool_idx = (jnp.arange(num_envs, dtype=jnp.int32) + num_envs) % pool_size
+    return states._replace(pool_idx=pool_idx), sizes
+
+
+def adaptive_expander_target_probs(obs, effective_size: int, pad_size: int) -> jnp.ndarray:
+    """Return a soft Expander target distribution over adaptive action indices."""
+    valid_mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
+    target = jnp.zeros(adaptive_action_space_size(pad_size), dtype=jnp.float32)
+    rows = jnp.arange(pad_size)[:, None, None]
+    cols = jnp.arange(pad_size)[None, :, None]
+    dest_i = jnp.clip(rows + DIRECTIONS[None, None, :, 0], 0, pad_size - 1)
+    dest_j = jnp.clip(cols + DIRECTIONS[None, None, :, 1], 0, pad_size - 1)
+
+    source_armies = obs.armies[:, :, None]
+    dest_armies = obs.armies[dest_i, dest_j]
+    is_opponent = obs.opponent_cells[dest_i, dest_j]
+    is_neutral = obs.neutral_cells[dest_i, dest_j]
+    is_owned = obs.owned_cells[dest_i, dest_j]
+
+    can_capture = source_armies > dest_armies + 1
+    is_expansion = ~is_owned & (is_opponent | is_neutral)
+    scores = source_armies.astype(jnp.float32)
+    scores = jnp.where(is_expansion & can_capture, scores * jnp.where(is_opponent, 20.0, 10.0), scores)
+    scores = jnp.where(valid_mask & can_capture, scores, 0.0)
+
+    score_sum = jnp.sum(scores)
+    num_valid = jnp.sum(valid_mask)
+    fallback = valid_mask.astype(jnp.float32) / jnp.maximum(num_valid, 1)
+    move_probs = jnp.where(score_sum > 0, scores / jnp.maximum(score_sum, 1e-8), fallback)
+    move_probs = jnp.where(num_valid > 0, move_probs, jnp.zeros_like(move_probs))
+    full_planes = jnp.transpose(move_probs, (2, 0, 1)).reshape(4 * pad_size * pad_size)
+    target = target.at[: 4 * pad_size * pad_size].set(full_planes)
+    target = target.at[-1].set(jnp.where(num_valid == 0, 1.0, 0.0))
+    return target
