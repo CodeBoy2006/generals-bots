@@ -378,6 +378,8 @@ uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
 
 该脚本用固定 base checkpoint 做 rollout-search teacher，并用 KL 约束学生贴近 base。`--target-mode hard` 只在 search 最优动作明显优于 base top-prior 动作时加入小权重动作监督；`--target-mode soft` 会把 top-k rollout 分数转成软目标，避免把近似并列候选强行压成单标签。`--policy-input full-state` 会用 privileged 完整状态替换标准 observation；`--policy-input augmented-full-state` 会保留原 9 个 observation 通道，并追加 9 个 full-state 通道。augmented 模式默认使用 18 输入通道，并支持从 9 通道 checkpoint 自动扩展 conv1 权重。评估时也要给 `evaluate_policy.py` 传同名 `--policy-input`，必要时传 `--input-channels` 和 `--opponent-input-channels`。它适合继续研究 search distillation，不应把训练 loss 当成棋力指标；仍需用 `evaluate_policy.py --opponent-policy-path` 独立评估。
 
+若要用同一门槛评估 checkpoint 或强辅助策略，可使用 `evaluate_league.py`。默认会评估所有 heuristic 的两个 seat；加 `--checkpoint-opponent v5=...:sample` 可纳入 v5 gate；加 `--search-policy` 会评估 `v5 + rollout-search` 这类强辅助推理策略，并输出最低 required pair 胜率 `league_score`。
+
 行为克隆 warm start：
 
 ```bash

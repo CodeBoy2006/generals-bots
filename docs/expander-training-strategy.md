@@ -299,6 +299,37 @@ uv run python examples/_experimental/ppo/evaluate_league.py /tmp/generals-ppo-8x
 
 `evaluate_league.py` 默认评估所有 `HEURISTIC_NAMES` 的两个 seat；`--checkpoint-opponent` 用来加入 v5 或其它 frozen checkpoint。报告中的 `league_score` 是所有 required opponent-seat pair 的最低总胜率，因此它比平均胜率更适合作为 promotion gate。最终目标只有在每个 heuristic seat 和 v5 两个 seat 都超过 `80%` 时才算完成。
 
+第一轮普通 checkpoint-pool PPO 从 v5 warm start，对 v2-v5 sample pool 训练 player 0。训练在 iter 120 手动中止，但 `--checkpoint-every 50` 保留了 iter 50/100：
+
+```text
+/tmp/generals-league-p0-v1/generals-ppo-8x8-league-p0-v1-iter-000050.eqx
+/tmp/generals-league-p0-v1/generals-ppo-8x8-league-p0-v1-iter-000100.eqx
+```
+
+同 seed 512 局 league 评估显示，heuristic gate 全部保住，但 v5 gate 只有噪声级变化：
+
+```text
+v5 baseline league, seed 30300:
+  heuristic required pairs passed = 12/12
+  v5 player 0 = 237/224/51, win rate 46.29%
+  v5 player 1 = 225/228/59, win rate 43.95%
+  league_score = 43.95%
+
+league p0-v1 iter 50:
+  heuristic required pairs passed = 12/12
+  v5 player 0 = 224/231/57, win rate 43.75%
+  v5 player 1 = 230/233/49, win rate 44.92%
+  league_score = 43.75%
+
+league p0-v1 iter 100:
+  heuristic required pairs passed = 12/12
+  v5 player 0 = 226/238/48, win rate 44.14%
+  v5 player 1 = 231/235/46, win rate 45.12%
+  league_score = 44.14%
+```
+
+结论：ordinary checkpoint-pool PPO 能力已经可用，但第一轮没有产生接近 80% 的 best-response 信号。继续做纯 checkpoint 时，应优先引入 search teacher 或更强的 policy/value 改进目标，而不是只扩大同一 PPO 配方。
+
 ### 当前 v5 自博弈结果
 
 以 `/tmp/generals-ppo-8x8-expander-gpu-v5.eqx` 为 current checkpoint，sample-vs-sample 自身基线在 2048 局独立评估中接近 50% decisive：
@@ -440,6 +471,35 @@ rollout-search as player 1 vs v5 sample, seed 19193:
   win rate = 87.70%
   decisive win rate = 90.52%
 ```
+
+2026-06-16 用相同 search 配置重新验证 v5-vs-v5，512 局两席都超过 80%：
+
+```text
+rollout-search as player 0 vs v5 sample, seed 30510:
+  wins/losses/draws = 462/32/18
+  win rate = 90.23%
+  decisive win rate = 93.52%
+
+rollout-search as player 1 vs v5 sample, seed 30511:
+  wins/losses/draws = 454/43/15
+  win rate = 88.67%
+  decisive win rate = 91.35%
+```
+
+同日新增 `evaluate_league.py --search-policy` 后，用 128 局/row 对所有 heuristic 两席做 search-assisted league 评估：
+
+```text
+v5 + rollout-search vs heuristic league, seed 30520:
+  expander:           p0 126/1/1,   p1 125/2/1
+  city-rush:          p0 128/0/0,   p1 128/0/0
+  general-hunter:     p0 127/1/0,   p1 127/0/1
+  defensive-expander: p0 127/1/0,   p1 126/0/2
+  balanced:           p0 127/0/1,   p1 127/0/1
+  mixed:              p0 128/0/0,   p1 127/1/0
+  heuristic league_score = 97.66%
+```
+
+当前严格表述：`v5 + rollout-search` 作为强辅助推理策略，已经在当前证据下超过所有 heuristic 和 v5 的 80% 胜率门槛；但这不是纯 `.eqx` checkpoint。若目标限定为纯模型文件，仍需继续把 search 行为蒸馏或训练进 checkpoint。
 
 蒸馏尝试：
 
