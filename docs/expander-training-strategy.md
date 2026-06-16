@@ -2278,6 +2278,8 @@ config: 16 envs, num_steps=1, num_iterations=2, top_k=2,
 result: saved /tmp/generals-adaptive-history-distill-smoke.eqx
 ```
 
+Single-seat p0/p1 probes improved the weak same-seed 16p1 row slightly but still shifted weakness between seats and degraded by iter20. The next probe should therefore use `--learner-player mixed`, so p0 and p1 search labels enter the same optimizer update.
+
 Next fast GPU probe:
 
 ```bash
@@ -2289,11 +2291,11 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_sea
   --map-generator generated \
   --pool-size 1024 \
   --base-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
-  --model-path /tmp/generals-adaptive-history-distill-p1-v1.eqx \
+  --model-path /tmp/generals-adaptive-history-distill-mixed-v1.eqx \
   --target-mode soft \
   --soft-weight-mode active \
   --soft-improvement-extra-weight 0.02 \
-  --learner-player 1 \
+  --learner-player mixed \
   --num-steps 8 \
   --num-iterations 20 \
   --num-epochs 1 \
@@ -2307,7 +2309,7 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_sea
   --init-channels 32,32,32,16 \
   --scoreboard-history \
   --init-input-channels 15 \
-  --checkpoint-dir /tmp/generals-adaptive-history-distill-p1-v1-ckpts \
+  --checkpoint-dir /tmp/generals-adaptive-history-distill-mixed-v1-ckpts \
   --checkpoint-every 10 \
   --keep-checkpoints 3 \
   --seed 71100

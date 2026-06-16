@@ -531,3 +531,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the short CUDA history-distill p1 probe, evaluate retained checkpoints at 256 games/row, and only promote if the six-row min clearly beats the current `71.29%`/512 best.
 - **Context:** Verification was intentionally focused for speed: compileall, `git diff --check`, one CPU CLI smoke (`1 passed`), and a CUDA smoke on `cuda:0` saving `/tmp/generals-adaptive-history-distill-smoke.eqx`.
+
+## [2026-06-16 23:14] Adaptive Mixed-Seat Search Distillation
+- **Changes:** Added `adaptive_search_distill.py --learner-player mixed`, splitting envs across p0/p1, collecting both search-labeled batches, and concatenating them into one distillation update. Updated the focused smoke test and docs.
+- **Status:** Completed
+- **Next Steps:** Run the mixed-seat history-distill CUDA probe and compare retained checkpoints against the same-seed source before any wider promotion.
+- **Context:** Verification stayed lightweight per user direction: compileall, `git diff --check`, one CPU CLI smoke (`1 passed`), and a CUDA mixed smoke on `cuda:0` saving `/tmp/generals-adaptive-history-distill-mixed-smoke.eqx`.

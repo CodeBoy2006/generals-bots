@@ -1331,7 +1331,7 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
         "--soft-improvement-extra-weight",
         "0.1",
         "--learner-player",
-        "1",
+        "mixed",
         "--num-steps",
         "1",
         "--num-iterations",

@@ -59,6 +59,19 @@ def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
     return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
+def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
+    """Split total vectorized environments across both learner seats."""
+    if num_envs < 2:
+        raise ValueError("mixed learner mode requires at least two environments")
+    p0_envs = num_envs // 2
+    return p0_envs, num_envs - p0_envs
+
+
+def concatenate_flat_batches(*batches):
+    """Concatenate already-flattened p0/p1 distillation batches."""
+    return tuple(jnp.concatenate(items, axis=0) for items in zip(*batches, strict=True))
+
+
 def compute_adaptive_conservative_loss(
     student_network,
     base_network,
@@ -1113,7 +1126,7 @@ def parse_args():
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
-    parser.add_argument("--learner-player", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--learner-player", choices=("0", "1", "mixed"), default="0")
     parser.add_argument("--num-steps", type=int, default=16)
     parser.add_argument("--num-iterations", type=int, default=100)
     parser.add_argument("--num-epochs", type=int, default=1)
@@ -1160,6 +1173,8 @@ def parse_args():
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_envs <= 0:
         parser.error("num_envs must be positive")
+    if args.learner_player == "mixed" and args.num_envs < 2:
+        parser.error("--learner-player mixed requires num_envs >= 2")
     if args.pool_size < args.num_envs:
         parser.error("--pool-size must be at least num_envs")
     if args.num_steps <= 0 or args.num_iterations <= 0 or args.num_epochs <= 0:
@@ -1203,6 +1218,8 @@ def main():
     init_model_path = args.init_model_path or args.base_model_path
     policy_mode = POLICY_MODE_NAME_TO_ID[args.policy_mode]
     opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
+    mixed_learner = args.learner_player == "mixed"
+    fixed_learner_player = 0 if args.learner_player == "0" else 1
     network_global_context = args.global_context or args.scoreboard_history
     if args.scoreboard_history:
         input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
@@ -1233,7 +1250,12 @@ def main():
         print("Score history: enabled")
     elif network_global_context:
         print("Global ctx:    enabled")
-    print(f"Learner:       player {args.learner_player}")
+    if mixed_learner:
+        mixed_p0_envs, mixed_p1_envs = split_mixed_env_counts(args.num_envs)
+        learner_label = f"mixed players 0/1 ({mixed_p0_envs}+{mixed_p1_envs} envs)"
+    else:
+        learner_label = f"player {fixed_learner_player}"
+    print(f"Learner:       {learner_label}")
     print(f"Rollout:       {args.num_iterations} x {args.num_steps} steps, envs={args.num_envs}")
     print(
         "Search:        "
@@ -1292,34 +1314,96 @@ def main():
             args.grid_size_weights,
         )
         states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
+        if mixed_learner:
+            mixed_p0_envs, _ = split_mixed_env_counts(args.num_envs)
+            states_p0 = jax.tree.map(lambda x: x[:mixed_p0_envs], states)
+            effective_sizes_p0 = effective_sizes[:mixed_p0_envs]
+            states_p1 = jax.tree.map(lambda x: x[mixed_p0_envs:], states)
+            effective_sizes_p1 = effective_sizes[mixed_p0_envs:]
 
         if args.target_mode == "hard":
-            _, batch, rollout_key = collect_adaptive_conservative_batch(
-                student_network,
-                base_network,
-                opponent_network,
-                states,
-                effective_sizes,
-                rollout_key,
-                args.num_steps,
-                policy_mode,
-                opponent_policy_mode,
-                args.learner_player,
-                args.top_k,
-                args.rollout_steps,
-                args.rollouts_per_action,
-                args.army_weight,
-                args.land_weight,
-                args.prior_weight,
-                args.terminal_score,
-                args.min_margin,
-                args.margin_scale,
-                args.max_improve_weight,
-                args.pad_to,
-                network_global_context,
-                args.scoreboard_history,
-            )
-            flat_batch = flatten_adaptive_conservative_batch(*batch)
+            if mixed_learner:
+                _, batch_p0, rollout_key = collect_adaptive_conservative_batch(
+                    student_network,
+                    base_network,
+                    opponent_network,
+                    states_p0,
+                    effective_sizes_p0,
+                    rollout_key,
+                    args.num_steps,
+                    policy_mode,
+                    opponent_policy_mode,
+                    0,
+                    args.top_k,
+                    args.rollout_steps,
+                    args.rollouts_per_action,
+                    args.army_weight,
+                    args.land_weight,
+                    args.prior_weight,
+                    args.terminal_score,
+                    args.min_margin,
+                    args.margin_scale,
+                    args.max_improve_weight,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                )
+                _, batch_p1, rollout_key = collect_adaptive_conservative_batch(
+                    student_network,
+                    base_network,
+                    opponent_network,
+                    states_p1,
+                    effective_sizes_p1,
+                    rollout_key,
+                    args.num_steps,
+                    policy_mode,
+                    opponent_policy_mode,
+                    1,
+                    args.top_k,
+                    args.rollout_steps,
+                    args.rollouts_per_action,
+                    args.army_weight,
+                    args.land_weight,
+                    args.prior_weight,
+                    args.terminal_score,
+                    args.min_margin,
+                    args.margin_scale,
+                    args.max_improve_weight,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                )
+                flat_batch = concatenate_flat_batches(
+                    flatten_adaptive_conservative_batch(*batch_p0),
+                    flatten_adaptive_conservative_batch(*batch_p1),
+                )
+            else:
+                _, batch, rollout_key = collect_adaptive_conservative_batch(
+                    student_network,
+                    base_network,
+                    opponent_network,
+                    states,
+                    effective_sizes,
+                    rollout_key,
+                    args.num_steps,
+                    policy_mode,
+                    opponent_policy_mode,
+                    fixed_learner_player,
+                    args.top_k,
+                    args.rollout_steps,
+                    args.rollouts_per_action,
+                    args.army_weight,
+                    args.land_weight,
+                    args.prior_weight,
+                    args.terminal_score,
+                    args.min_margin,
+                    args.margin_scale,
+                    args.max_improve_weight,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                )
+                flat_batch = flatten_adaptive_conservative_batch(*batch)
             student_network, opt_state, loss, metrics, update_key = train_adaptive_conservative_epoch(
                 student_network,
                 base_network,
@@ -1334,34 +1418,94 @@ def main():
                 args.temperature,
             )
         else:
-            _, batch, rollout_key = collect_adaptive_soft_batch(
-                student_network,
-                base_network,
-                opponent_network,
-                states,
-                effective_sizes,
-                rollout_key,
-                args.num_steps,
-                policy_mode,
-                opponent_policy_mode,
-                args.learner_player,
-                args.top_k,
-                args.rollout_steps,
-                args.rollouts_per_action,
-                args.army_weight,
-                args.land_weight,
-                args.prior_weight,
-                args.terminal_score,
-                args.soft_weight_mode_id,
-                args.min_margin,
-                args.margin_scale,
-                args.max_improve_weight,
-                args.score_temperature,
-                args.pad_to,
-                network_global_context,
-                args.scoreboard_history,
-            )
-            flat_batch = flatten_adaptive_soft_batch(*batch)
+            if mixed_learner:
+                _, batch_p0, rollout_key = collect_adaptive_soft_batch(
+                    student_network,
+                    base_network,
+                    opponent_network,
+                    states_p0,
+                    effective_sizes_p0,
+                    rollout_key,
+                    args.num_steps,
+                    policy_mode,
+                    opponent_policy_mode,
+                    0,
+                    args.top_k,
+                    args.rollout_steps,
+                    args.rollouts_per_action,
+                    args.army_weight,
+                    args.land_weight,
+                    args.prior_weight,
+                    args.terminal_score,
+                    args.soft_weight_mode_id,
+                    args.min_margin,
+                    args.margin_scale,
+                    args.max_improve_weight,
+                    args.score_temperature,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                )
+                _, batch_p1, rollout_key = collect_adaptive_soft_batch(
+                    student_network,
+                    base_network,
+                    opponent_network,
+                    states_p1,
+                    effective_sizes_p1,
+                    rollout_key,
+                    args.num_steps,
+                    policy_mode,
+                    opponent_policy_mode,
+                    1,
+                    args.top_k,
+                    args.rollout_steps,
+                    args.rollouts_per_action,
+                    args.army_weight,
+                    args.land_weight,
+                    args.prior_weight,
+                    args.terminal_score,
+                    args.soft_weight_mode_id,
+                    args.min_margin,
+                    args.margin_scale,
+                    args.max_improve_weight,
+                    args.score_temperature,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                )
+                flat_batch = concatenate_flat_batches(
+                    flatten_adaptive_soft_batch(*batch_p0),
+                    flatten_adaptive_soft_batch(*batch_p1),
+                )
+            else:
+                _, batch, rollout_key = collect_adaptive_soft_batch(
+                    student_network,
+                    base_network,
+                    opponent_network,
+                    states,
+                    effective_sizes,
+                    rollout_key,
+                    args.num_steps,
+                    policy_mode,
+                    opponent_policy_mode,
+                    fixed_learner_player,
+                    args.top_k,
+                    args.rollout_steps,
+                    args.rollouts_per_action,
+                    args.army_weight,
+                    args.land_weight,
+                    args.prior_weight,
+                    args.terminal_score,
+                    args.soft_weight_mode_id,
+                    args.min_margin,
+                    args.margin_scale,
+                    args.max_improve_weight,
+                    args.score_temperature,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                )
+                flat_batch = flatten_adaptive_soft_batch(*batch)
             student_network, opt_state, loss, metrics, update_key = train_adaptive_soft_epoch(
                 student_network,
                 base_network,
