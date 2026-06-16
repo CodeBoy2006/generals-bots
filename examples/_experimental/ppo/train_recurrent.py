@@ -36,10 +36,12 @@ from train import (
     apply_general_target_rewards,
     apply_path_assignment_rewards,
     apply_terminal_reward,
+    checkpoint_path_for_iteration,
     compute_gae,
     load_or_create_network,
     make_initial_states,
     make_state_pool,
+    prune_old_checkpoints,
     random_action,
     select_learner_obs,
     select_opponent_obs,
@@ -437,6 +439,9 @@ def main():
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--init-recurrent-model-path", default=None)
     parser.add_argument("--model-path", default="jax_recurrent_ppo_model.eqx")
+    parser.add_argument("--checkpoint-dir", default=None)
+    parser.add_argument("--checkpoint-every", type=int, default=0)
+    parser.add_argument("--keep-checkpoints", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -450,6 +455,10 @@ def main():
         parser.error("--num-epochs must be positive")
     if args.minibatch_size is not None and args.minibatch_size <= 0:
         parser.error("--minibatch-size must be positive when provided")
+    if args.checkpoint_every < 0:
+        parser.error("--checkpoint-every cannot be negative")
+    if args.keep_checkpoints < 0:
+        parser.error("--keep-checkpoints cannot be negative")
     if args.terminal_reward_scale < 0.0:
         parser.error("--terminal-reward-scale must be non-negative")
     if args.general_target_reward_scale < 0.0:
@@ -502,6 +511,8 @@ def main():
         print(f"Base warm:     {args.init_model_path}")
     if args.init_recurrent_model_path is not None:
         print(f"RNN warm:      {args.init_recurrent_model_path}")
+    if args.checkpoint_dir is not None and args.checkpoint_every > 0:
+        print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
 
     key = jrandom.PRNGKey(args.seed)
@@ -596,6 +607,11 @@ def main():
     jax.block_until_ready(states)
 
     print("Training...\n")
+    saved_checkpoints = []
+    checkpoint_stem = Path(args.model_path).stem
+    if args.checkpoint_dir is not None:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
     for iteration in range(args.num_iterations):
         t0 = time.time()
         rollout_data = []
@@ -688,6 +704,18 @@ def main():
                 f"Wins: {wins:2d}/{num_episodes} ({win_rate:.0f}%) | "
                 f"SPS: {sps:7.0f} | Time: {elapsed:.2f}s"
             )
+
+        completed_iteration = iteration + 1
+        if (
+            args.checkpoint_dir is not None
+            and args.checkpoint_every > 0
+            and completed_iteration % args.checkpoint_every == 0
+        ):
+            checkpoint_path = checkpoint_path_for_iteration(args.checkpoint_dir, checkpoint_stem, completed_iteration)
+            eqx.tree_serialise_leaves(checkpoint_path, network)
+            saved_checkpoints.append(checkpoint_path)
+            prune_old_checkpoints(saved_checkpoints, args.keep_checkpoints)
+            saved_checkpoints = [path for path in saved_checkpoints if path.exists()]
 
     print("\nTraining complete!")
     eqx.tree_serialise_leaves(args.model_path, network)

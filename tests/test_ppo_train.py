@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -9,7 +13,9 @@ from examples._experimental.ppo.train import (
     apply_general_target_rewards,
     apply_path_assignment_rewards,
     apply_terminal_reward,
+    checkpoint_path_for_iteration,
     load_or_create_network,
+    prune_old_checkpoints,
     resolve_opponent_source,
     rollout_step_policy_opponent,
     stack_learner_actions,
@@ -17,6 +23,63 @@ from examples._experimental.ppo.train import (
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, greedy_policy_action
 from generals.core import game
 from generals.core.game import GameInfo
+
+
+def test_checkpoint_path_for_iteration_uses_zero_padded_iteration(tmp_path):
+    path = checkpoint_path_for_iteration(tmp_path, "candidate", 50)
+    assert path == tmp_path / "candidate-iter-000050.eqx"
+
+
+def test_prune_old_checkpoints_keeps_newest(tmp_path):
+    paths = [tmp_path / f"candidate-iter-{idx:06d}.eqx" for idx in (50, 100, 150)]
+    for path in paths:
+        path.write_text("x", encoding="utf-8")
+
+    prune_old_checkpoints(paths, keep=2)
+
+    assert not paths[0].exists()
+    assert paths[1].exists()
+    assert paths[2].exists()
+
+
+def test_train_cli_writes_periodic_checkpoint(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    model_path = tmp_path / "final.eqx"
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/train.py",
+        "4",
+        "--grid-size",
+        "4",
+        "--pool-size",
+        "8",
+        "--num-steps",
+        "2",
+        "--num-iterations",
+        "2",
+        "--num-epochs",
+        "1",
+        "--minibatch-size",
+        "8",
+        "--checkpoint-dir",
+        str(checkpoint_dir),
+        "--checkpoint-every",
+        "1",
+        "--keep-checkpoints",
+        "1",
+        "--model-path",
+        str(model_path),
+        "--seed",
+        "30400",
+    ]
+
+    subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+
+    assert model_path.exists()
+    assert not (checkpoint_dir / "final-iter-000001.eqx").exists()
+    assert (checkpoint_dir / "final-iter-000002.eqx").exists()
 
 
 def test_load_or_create_network_restores_checkpoint(tmp_path):

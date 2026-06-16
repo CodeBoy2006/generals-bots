@@ -178,6 +178,19 @@ def load_or_create_network(key, grid_size, init_model_path=None, channels=None, 
     return eqx.tree_deserialise_leaves(path, network)
 
 
+def checkpoint_path_for_iteration(checkpoint_dir, model_stem, iteration):
+    """Return the periodic checkpoint path for one training iteration."""
+    return Path(checkpoint_dir) / f"{model_stem}-iter-{iteration:06d}.eqx"
+
+
+def prune_old_checkpoints(paths, keep):
+    """Delete older periodic checkpoints when a positive keep limit is configured."""
+    if keep is None or keep <= 0:
+        return
+    for path in list(paths)[:-keep]:
+        Path(path).unlink(missing_ok=True)
+
+
 def stack_learner_actions(learner_actions, opponent_actions, learner_player):
     """Place learner/opponent actions into the environment's player slots."""
     return jax.lax.cond(
@@ -763,6 +776,9 @@ def main():
     )
     parser.add_argument("--init-model-path", default=None, help="Optional checkpoint to warm-start PPO from.")
     parser.add_argument("--model-path", default="jax_ppo_model.eqx", help="Path where the trained model is saved.")
+    parser.add_argument("--checkpoint-dir", default=None, help="Optional directory for periodic training checkpoints.")
+    parser.add_argument("--checkpoint-every", type=int, default=0, help="Save a periodic checkpoint every N iterations.")
+    parser.add_argument("--keep-checkpoints", type=int, default=0, help="Keep only the newest N periodic checkpoints.")
     parser.add_argument("--seed", type=int, default=42, help="Training PRNG seed.")
     args = parser.parse_args()
 
@@ -789,6 +805,10 @@ def main():
         parser.error("--num-epochs must be positive")
     if args.minibatch_size is not None and args.minibatch_size <= 0:
         parser.error("--minibatch-size must be positive when provided")
+    if args.checkpoint_every < 0:
+        parser.error("--checkpoint-every cannot be negative")
+    if args.keep_checkpoints < 0:
+        parser.error("--keep-checkpoints cannot be negative")
     if args.terminal_reward_scale < 0.0:
         parser.error("--terminal-reward-scale must be non-negative")
     if args.general_target_reward_scale < 0.0:
@@ -889,6 +909,8 @@ def main():
         )
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
+    if args.checkpoint_dir is not None and args.checkpoint_every > 0:
+        print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
     
     # Initialize
@@ -984,6 +1006,10 @@ def main():
     jax.block_until_ready(states)
     
     print("Training...\n")
+    saved_checkpoints = []
+    checkpoint_stem = Path(args.model_path).stem
+    if args.checkpoint_dir is not None:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     
     for iteration in range(num_iterations):
         t0 = time.time()
@@ -1080,6 +1106,18 @@ def main():
                   f"Reward: {float(avg_reward):+.4f} | Episodes: {num_episodes:3d} | "
                   f"Wins: {wins:2d}/{num_episodes} ({win_rate:.0f}%) | "
                   f"SPS: {sps:7.0f} | Time: {elapsed:.2f}s")
+
+        completed_iteration = iteration + 1
+        if (
+            args.checkpoint_dir is not None
+            and args.checkpoint_every > 0
+            and completed_iteration % args.checkpoint_every == 0
+        ):
+            checkpoint_path = checkpoint_path_for_iteration(args.checkpoint_dir, checkpoint_stem, completed_iteration)
+            eqx.tree_serialise_leaves(checkpoint_path, network)
+            saved_checkpoints.append(checkpoint_path)
+            prune_old_checkpoints(saved_checkpoints, args.keep_checkpoints)
+            saved_checkpoints = [path for path in saved_checkpoints if path.exists()]
     
     print("\nTraining complete!")
     

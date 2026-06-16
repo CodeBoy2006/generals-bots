@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -6,6 +10,7 @@ import optax
 
 from examples._experimental.ppo.common import POLICY_INPUT_NAME_TO_ID
 from examples._experimental.ppo.train_recurrent import (
+    checkpoint_path_for_iteration,
     load_or_create_recurrent_network,
     rollout_step_recurrent_heuristic_opponent,
     rollout_step_recurrent_policy_opponent,
@@ -15,6 +20,52 @@ from examples._experimental.ppo.evaluate_recurrent_policy import evaluate_recurr
 from examples._experimental.ppo.recurrent_network import RecurrentPolicyValueNetwork
 from generals.agents.ppo_policy_agent import PolicyValueNetwork
 from generals.core import game
+
+
+def test_recurrent_checkpoint_path_for_iteration(tmp_path):
+    assert checkpoint_path_for_iteration(tmp_path, "rnn", 7) == tmp_path / "rnn-iter-000007.eqx"
+
+
+def test_train_recurrent_cli_writes_periodic_checkpoint(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    model_path = tmp_path / "rnn-final.eqx"
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/train_recurrent.py",
+        "4",
+        "--grid-size",
+        "4",
+        "--pool-size",
+        "8",
+        "--num-steps",
+        "2",
+        "--num-iterations",
+        "2",
+        "--num-epochs",
+        "1",
+        "--minibatch-size",
+        "8",
+        "--hidden-size",
+        "8",
+        "--checkpoint-dir",
+        str(checkpoint_dir),
+        "--checkpoint-every",
+        "1",
+        "--keep-checkpoints",
+        "1",
+        "--model-path",
+        str(model_path),
+        "--seed",
+        "30410",
+    ]
+
+    subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+
+    assert model_path.exists()
+    assert not (checkpoint_dir / "rnn-final-iter-000001.eqx").exists()
+    assert (checkpoint_dir / "rnn-final-iter-000002.eqx").exists()
 
 
 def test_recurrent_network_zero_delta_matches_base_policy_outputs():
