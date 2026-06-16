@@ -58,6 +58,35 @@ def test_adaptive_obs_to_array_marks_padding_separately_from_real_mountain():
     assert arr[10, 4, 4] == 1.0
 
 
+def test_adaptive_obs_to_array_can_append_global_scoreboard_channels():
+    from examples._experimental.ppo.adaptive_common import (
+        ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        ADAPTIVE_INPUT_CHANNELS,
+        adaptive_obs_to_array,
+    )
+
+    state = make_padded_state(size=4, pad_to=6)
+    state = state._replace(
+        time=jnp.asarray(25, dtype=jnp.int32),
+        armies=state.armies.at[0, 0].set(12).at[3, 3].set(5),
+        ownership=state.ownership.at[0, 0, 1].set(True).at[1, 3, 2].set(True),
+    )
+    obs = game.get_observation(state, 0)
+
+    base_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    arr, global_active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6, include_global_context=True)
+
+    assert base_arr.shape == (ADAPTIVE_INPUT_CHANNELS, 6, 6)
+    assert arr.shape == (ADAPTIVE_GLOBAL_INPUT_CHANNELS, 6, 6)
+    assert jnp.array_equal(active, global_active)
+    assert jnp.allclose(arr[:ADAPTIVE_INPUT_CHANNELS], base_arr)
+    assert jnp.allclose(arr[15, :4, :4], 2.0 / 16.0)
+    assert jnp.allclose(arr[17, :4, :4], 2.0 / 16.0)
+    assert jnp.allclose(arr[19, :4, :4], 25.0 / 750.0)
+    assert jnp.all(arr[15:, 4:, :] == 0.0)
+    assert jnp.all(arr[15:, :, 4:] == 0.0)
+
+
 def test_compute_adaptive_valid_move_mask_blocks_padding_destinations():
     from examples._experimental.ppo.adaptive_common import compute_adaptive_valid_move_mask
 
@@ -184,6 +213,31 @@ def test_adaptive_network_can_expose_outcome_auxiliary_logits():
     assert jnp.all(jnp.isfinite(outcome_logits))
     assert jnp.allclose(legacy_logits, logits)
     assert jnp.allclose(legacy_value, value)
+
+
+def test_adaptive_network_global_context_accepts_global_input():
+    from examples._experimental.ppo.adaptive_common import (
+        adaptive_obs_to_array,
+        compute_adaptive_valid_move_mask,
+    )
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        global_context=True,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6, include_global_context=True)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    logits, value = network.logits_value(obs_arr, mask, active)
+
+    assert logits.shape == (8 * 6 * 6 + 1,)
+    assert jnp.isfinite(value)
+    assert jnp.all(jnp.isfinite(logits))
 
 
 def test_load_or_create_adaptive_network_can_warm_start_hl_gauss_from_scalar_checkpoint(tmp_path):
@@ -375,6 +429,52 @@ def test_load_or_create_adaptive_network_expands_channels_without_changing_outpu
     assert jnp.any(jnp.abs(expanded.conv1.weight[source_channels[0] :]) > 0.0)
     assert jnp.any(jnp.abs(expanded.conv2.weight[source_channels[1] :]) > 0.0)
     assert jnp.allclose(expanded.policy_conv.weight[:, source_channels[3] :], 0.0)
+
+
+def test_load_or_create_adaptive_network_warm_starts_global_context_from_legacy_input(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import (
+        ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        ADAPTIVE_INPUT_CHANNELS,
+        adaptive_obs_to_array,
+        compute_adaptive_valid_move_mask,
+    )
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
+    model_path = tmp_path / "adaptive-legacy.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=(16, 16, 16, 8),
+        init_channels=(16, 16, 16, 8),
+        input_channels=ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+        init_input_channels=ADAPTIVE_INPUT_CHANNELS,
+        global_context=True,
+        init_global_context=False,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    legacy_obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    global_obs_arr, global_active = adaptive_obs_to_array(
+        obs,
+        effective_size=4,
+        pad_size=6,
+        include_global_context=True,
+    )
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    expected_logits, expected_value = source.logits_value(legacy_obs_arr, mask, active)
+    actual_logits, actual_value = loaded.logits_value(global_obs_arr, mask, global_active)
+
+    assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+    assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+    assert jnp.allclose(loaded.conv1.weight[:, ADAPTIVE_INPUT_CHANNELS:], 0.0)
+    assert loaded.global_context
 
 
 def test_load_or_create_adaptive_network_copies_shared_value_into_per_size_heads(tmp_path):
@@ -1019,6 +1119,9 @@ def test_train_adaptive_cli_smoke(tmp_path):
         "16,16,16,8",
         "--init-model-path",
         str(init_model_path),
+        "--global-context",
+        "--init-input-channels",
+        "15",
         "--value-heads",
         "per-size",
         "--init-value-heads",
@@ -1056,6 +1159,7 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
 
     import equinox as eqx
 
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_GLOBAL_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
 
     base_model_path = tmp_path / "adaptive-base.eqx"
@@ -1141,6 +1245,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
 
     import equinox as eqx
 
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_GLOBAL_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
 
     model_path = tmp_path / "adaptive.eqx"
@@ -1150,6 +1255,8 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         AdaptivePolicyValueNetwork(
             jrandom.PRNGKey(0),
             pad_size=6,
+            input_channels=ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+            global_context=True,
             value_head_sizes=(4, 6),
             value_bins=8,
             value_sigma=0.2,
@@ -1172,6 +1279,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         "4",
         "--map-generator",
         "simple",
+        "--global-context",
         "--value-heads",
         "per-size",
         "--value-loss",

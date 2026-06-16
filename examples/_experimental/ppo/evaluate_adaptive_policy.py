@@ -21,6 +21,8 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from adaptive_common import (
+    ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+    ADAPTIVE_INPUT_CHANNELS,
     adaptive_index_to_action,
     adaptive_obs_to_array,
     compute_adaptive_valid_move_mask,
@@ -92,7 +94,18 @@ def summarize_row(info, grid_size: int, policy_player: int, num_games: int) -> A
 
 
 @eqx.filter_jit
-def evaluate_batch(network, states, effective_size, key, max_steps, opponent, policy_mode, policy_player, pad_size):
+def evaluate_batch(
+    network,
+    states,
+    effective_size,
+    key,
+    max_steps,
+    opponent,
+    policy_mode,
+    policy_player,
+    pad_size,
+    global_context=False,
+):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
     effective_sizes = jnp.full((num_envs,), effective_size, dtype=jnp.int32)
@@ -104,7 +117,9 @@ def evaluate_batch(network, states, effective_size, key, max_steps, opponent, po
         policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
         opponent_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
 
-        obs_arr, active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
+        obs_arr, active = jax.vmap(
+            lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+        )(
             policy_obs,
             effective_sizes,
         )
@@ -163,6 +178,7 @@ def parse_args():
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
+    parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
@@ -218,17 +234,22 @@ def main():
     args = parse_args()
     key = jrandom.PRNGKey(args.seed)
     key, net_key = jrandom.split(key)
+    input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS if args.global_context else ADAPTIVE_INPUT_CHANNELS
     network = load_or_create_adaptive_network(
         net_key,
         pad_size=args.pad_to,
         init_model_path=args.model_path,
         channels=args.channels,
+        input_channels=input_channels,
+        init_input_channels=input_channels,
         value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
         value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
         value_min=args.value_min,
         value_max=args.value_max,
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_head,
+        global_context=args.global_context,
+        init_global_context=args.global_context,
     )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -250,6 +271,8 @@ def main():
         )
     if args.outcome_head:
         print("Outcome:    auxiliary head loaded")
+    if args.global_context:
+        print(f"Global ctx: {ADAPTIVE_GLOBAL_INPUT_CHANNELS} input channels")
     print()
 
     for grid_size in args.grid_sizes:
@@ -278,6 +301,7 @@ def main():
                 policy_mode,
                 policy_player,
                 args.pad_to,
+                args.global_context,
             )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -303,6 +327,7 @@ def main():
         "policy_mode": args.policy_mode,
         "num_games": args.num_games,
         "max_steps": args.max_steps,
+        "global_context": args.global_context,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

@@ -13,12 +13,14 @@ from generals.agents.ppo_policy_agent import DEFAULT_POLICY_CHANNELS, PolicyChan
 
 try:
     from .adaptive_common import (
+        ADAPTIVE_GLOBAL_INPUT_CHANNELS,
         ADAPTIVE_INPUT_CHANNELS,
         adaptive_action_to_index,
         adaptive_index_to_action,
     )
 except ImportError:  # pragma: no cover - used when running this directory as scripts.
     from adaptive_common import (
+        ADAPTIVE_GLOBAL_INPUT_CHANNELS,
         ADAPTIVE_INPUT_CHANNELS,
         adaptive_action_to_index,
         adaptive_index_to_action,
@@ -86,6 +88,8 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_linear2: eqx.nn.Linear
     categorical_value_linear2: eqx.nn.Linear | None
     outcome_linear2: eqx.nn.Linear | None
+    global_linear1: eqx.nn.Linear | None
+    global_linear2: eqx.nn.Linear | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
     size_value_linear2: tuple[eqx.nn.Linear, ...]
     size_categorical_value_linear2: tuple[eqx.nn.Linear, ...]
@@ -96,6 +100,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_max: float = eqx.field(static=True)
     value_sigma: float = eqx.field(static=True)
     outcome_head: bool = eqx.field(static=True)
+    global_context: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -109,12 +114,19 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         value_max: float = 1.0,
         value_sigma: float = 0.04,
         outcome_head: bool = False,
+        global_context: bool = False,
     ):
+        if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
+            input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
         parsed_value_head_sizes = tuple(value_head_sizes or ())
         parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
         outcome_keys = 1 if outcome_head else 0
-        keys = jrandom.split(key, 8 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys)
+        global_keys = 2 if global_context else 0
+        keys = jrandom.split(
+            key,
+            8 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys + global_keys,
+        )
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
         self.value_bins = parsed_value_bins
@@ -122,6 +134,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.value_max = value_max
         self.value_sigma = value_sigma
         self.outcome_head = bool(outcome_head)
+        self.global_context = bool(global_context)
         self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
         self.conv3 = eqx.nn.Conv2d(channels[1], channels[2], kernel_size=3, padding=1, key=keys[2])
@@ -148,12 +161,37 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         )
         outcome_offset = categorical_offset + categorical_keys
         self.outcome_linear2 = eqx.nn.Linear(64, 3, key=keys[outcome_offset]) if outcome_head else None
+        global_offset = outcome_offset + outcome_keys
+        if global_context:
+            self.global_linear1 = eqx.nn.Linear(7, 64, key=keys[global_offset])
+            global_linear2 = eqx.nn.Linear(64, channels[3], key=keys[global_offset + 1])
+            self.global_linear2 = eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                global_linear2,
+                (jnp.zeros_like(global_linear2.weight), jnp.zeros_like(global_linear2.bias)),
+            )
+        else:
+            self.global_linear1 = None
+            self.global_linear2 = None
 
     def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.conv1(obs))
         x = jax.nn.relu(self.conv2(x))
         x = jax.nn.relu(self.conv3(x))
-        return jax.nn.relu(self.conv4(x))
+        x = jax.nn.relu(self.conv4(x))
+        if self.global_context:
+            x = x + self._global_context_vector(obs)[:, None, None]
+        return x
+
+    def _global_context_vector(self, obs: jnp.ndarray) -> jnp.ndarray:
+        if self.global_linear1 is None or self.global_linear2 is None:
+            return jnp.zeros((self.conv4.weight.shape[0],), dtype=obs.dtype)
+        active = obs[9] > 0.5
+        active_f = active.astype(jnp.float32)
+        denom = jnp.maximum(jnp.sum(active_f), 1.0)
+        global_features = jnp.sum(obs[13:20] * active_f[None, :, :], axis=(1, 2)) / denom
+        hidden = jax.nn.relu(self.global_linear1(global_features))
+        return self.global_linear2(hidden)
 
     def _masked_pool(self, x: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
         active_f = active.astype(jnp.float32)[None, :, :]
@@ -287,6 +325,7 @@ def load_or_create_adaptive_network(
     channels: str | PolicyChannels | list[int] | None = None,
     init_channels: str | PolicyChannels | list[int] | None = None,
     input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    init_input_channels: int | None = None,
     value_head_sizes: tuple[int, ...] | None = None,
     init_value_head_sizes: tuple[int, ...] | None = None,
     value_bins: int = 0,
@@ -299,6 +338,8 @@ def load_or_create_adaptive_network(
     init_value_sigma: float | None = None,
     outcome_head: bool = False,
     init_outcome_head: bool | None = None,
+    global_context: bool = False,
+    init_global_context: bool | None = None,
 ) -> AdaptivePolicyValueNetwork:
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
     parsed_channels = parse_policy_channels(channels)
@@ -315,6 +356,7 @@ def load_or_create_adaptive_network(
         value_max=value_max,
         value_sigma=value_sigma,
         outcome_head=outcome_head,
+        global_context=global_context,
     )
     if init_model_path is None:
         return network
@@ -322,6 +364,7 @@ def load_or_create_adaptive_network(
     if not path.exists():
         raise FileNotFoundError(f"Warm-start checkpoint not found: {path}")
     parsed_init_channels = parse_policy_channels(init_channels) if init_channels is not None else parsed_channels
+    parsed_init_input_channels = input_channels if init_input_channels is None else int(init_input_channels)
     parsed_init_value_head_sizes = (
         parsed_value_head_sizes
         if init_value_head_sizes is None
@@ -338,27 +381,31 @@ def load_or_create_adaptive_network(
         parsed_init_value_sigma,
     )
     parsed_init_outcome_head = outcome_head if init_outcome_head is None else bool(init_outcome_head)
+    parsed_init_global_context = global_context if init_global_context is None else bool(init_global_context)
     needs_expansion = (
         parsed_init_channels != parsed_channels
+        or parsed_init_input_channels != input_channels
         or parsed_init_value_head_sizes != parsed_value_head_sizes
         or parsed_init_value_bins != parsed_value_bins
         or parsed_init_value_min != value_min
         or parsed_init_value_max != value_max
         or parsed_init_value_sigma != value_sigma
         or parsed_init_outcome_head != outcome_head
+        or parsed_init_global_context != global_context
     )
     if needs_expansion:
         source_network = AdaptivePolicyValueNetwork(
             key,
             pad_size=pad_size,
             channels=parsed_init_channels,
-            input_channels=input_channels,
+            input_channels=parsed_init_input_channels,
             value_head_sizes=parsed_init_value_head_sizes,
             value_bins=parsed_init_value_bins,
             value_min=parsed_init_value_min,
             value_max=parsed_init_value_max,
             value_sigma=parsed_init_value_sigma,
             outcome_head=parsed_init_outcome_head,
+            global_context=parsed_init_global_context,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
         return expand_adaptive_network_channels(network, source_network)
@@ -542,5 +589,21 @@ def expand_adaptive_network_channels(
             lambda net: net.outcome_linear2,
             target,
             _copy_linear_prefix(target.outcome_linear2, source.outcome_linear2),
+        )
+    if (
+        target.global_linear1 is not None
+        and target.global_linear2 is not None
+        and source.global_linear1 is not None
+        and source.global_linear2 is not None
+    ):
+        target = eqx.tree_at(
+            lambda net: net.global_linear1,
+            target,
+            _copy_linear_prefix(target.global_linear1, source.global_linear1),
+        )
+        target = eqx.tree_at(
+            lambda net: net.global_linear2,
+            target,
+            _copy_linear_prefix(target.global_linear2, source.global_linear2),
         )
     return target

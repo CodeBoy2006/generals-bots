@@ -495,3 +495,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop sweeping this exact rollout-local outcome auxiliary loss; next implementation should change representation or teacher signal, such as memory/global context channels, scoreboard history, or search-to-Q/intent distillation.
 - **Context:** `outcome_aux_weight=0.05` damaged size-seat stability with best 256-row min `67.58%`. `0.005` reached `71.88%` at iter 10 over 256 games/row but failed 512-row promotion at `68.95%`, below the existing 71.29%/512-row search-distill candidate.
+
+## [2026-06-16 22:35] Adaptive Global Context Branch
+- **Changes:** Added optional 20-channel adaptive global-context inputs, a zero-initialized scoreboard MLP branch in `AdaptivePolicyValueNetwork`, train/eval CLI flags, warm-start support from legacy 15-channel checkpoints, focused tests, and README/manual/strategy docs.
+- **Status:** Completed
+- **Next Steps:** Run the 256-env CUDA global-context triage from `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx`, then evaluate retained checkpoints at 256 games/row before any 512-row promotion.
+- **Context:** Verification passed with focused adaptive tests (`39 passed`), compileall, `git diff --check`, full CPU pytest (`182 passed`), and CUDA train/eval smoke on `cuda:0`. The smoke only validates training/saving/loading with `--global-context`; it is not a strength result.

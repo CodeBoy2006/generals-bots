@@ -15,6 +15,7 @@ from generals.core.action import DIRECTIONS
 from generals.core.grid import generate_grid
 
 ADAPTIVE_INPUT_CHANNELS = 15
+ADAPTIVE_GLOBAL_INPUT_CHANNELS = 20
 ADAPTIVE_MOVE_PLANES = 8
 
 
@@ -71,7 +72,12 @@ def active_cells_for_size(effective_size: int, pad_size: int) -> jnp.ndarray:
     return (rows < effective_size) & (cols < effective_size)
 
 
-def adaptive_obs_to_array(obs, effective_size: int, pad_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+def adaptive_obs_to_array(
+    obs,
+    effective_size: int,
+    pad_size: int,
+    include_global_context: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Convert an observation to adaptive policy channels plus active-cell mask."""
     base = obs_to_array(obs)
     active = active_cells_for_size(effective_size, pad_size)
@@ -97,7 +103,29 @@ def adaptive_obs_to_array(obs, effective_size: int, pad_size: int) -> tuple[jnp.
         ],
         axis=0,
     )
-    return jnp.concatenate([normalized_base, extra], axis=0), active
+    adaptive = jnp.concatenate([normalized_base, extra], axis=0)
+    if not include_global_context:
+        return adaptive, active
+
+    active_f = active.astype(jnp.float32)
+    active_area = jnp.maximum(jnp.asarray(effective_size * effective_size, dtype=jnp.float32), 1.0)
+    army_scale = jnp.log1p(jnp.maximum(active_area * 100.0, 1.0))
+    owned_land = jnp.asarray(obs.owned_land_count, dtype=jnp.float32)
+    owned_army = jnp.asarray(obs.owned_army_count, dtype=jnp.float32)
+    opponent_land = jnp.asarray(obs.opponent_land_count, dtype=jnp.float32)
+    opponent_army = jnp.asarray(obs.opponent_army_count, dtype=jnp.float32)
+    timestep = jnp.asarray(obs.timestep, dtype=jnp.float32)
+    global_values = jnp.stack(
+        [
+            owned_land / active_area,
+            jnp.log1p(jnp.maximum(owned_army, 0.0)) / army_scale,
+            opponent_land / active_area,
+            jnp.log1p(jnp.maximum(opponent_army, 0.0)) / army_scale,
+            timestep / 750.0,
+        ]
+    )
+    global_planes = global_values[:, None, None] * active_f[None, :, :]
+    return jnp.concatenate([adaptive, global_planes], axis=0), active
 
 
 def compute_adaptive_valid_move_mask(

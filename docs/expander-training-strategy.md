@@ -2035,6 +2035,79 @@ train log:
 
 结论更新：outcome auxiliary infrastructure is useful for future representation work, but the simple rollout-local loss is not enough by itself. Weight `0.05` overpowers PPO and hurts 16x16; weight `0.005` produced a 256-row blip but failed 512-row validation. Do not continue sweeping this exact auxiliary loss. The next aligned step is to change what the network can observe or what the teacher provides: memory/global context channels, scoreboard-history tokens, or search-to-Q/intent distillation.
 
+### Adaptive global context branch
+
+2026-06-16 新增 `train_adaptive.py --global-context` 和 `evaluate_adaptive_policy.py --global-context`。开启后，`adaptive_obs_to_array` 从 15 通道扩展到 20 通道：
+
+```text
+0-8:   原 fogged observation spatial planes
+9-14:  active/padding/row/col/size/area adaptive planes
+15-19: normalized own land, own army, opponent land, opponent army, timestep
+```
+
+`AdaptivePolicyValueNetwork` 同时新增一个很小的 global-context MLP。它从 active cells 上的 `size/area/scoreboard/time` 取 7 维均值，投到 conv4 feature map；第二层零初始化，所以从旧 15 通道 checkpoint 扩展时初始 policy logits/value 与源 checkpoint 对齐。旧 checkpoint warm start 推荐传：
+
+```bash
+--global-context \
+--init-input-channels 15
+```
+
+如果加载已经带 global context 的 checkpoint 继续训练，才额外传 `--init-global-context`。评估 global checkpoint 时必须传 `--global-context`，否则 Equinox tree 和输入通道模板会不匹配。
+
+CUDA smoke 已通过：
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-global-smoke.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 64 envs, num_steps=32, num_iterations=2, mixed learner, terminal reward,
+        ema_decay=0.999, eval_ema, value_heads=per-size, value_loss=hl-gauss,
+        global_context=True, init_input_channels=15
+device: cuda:0
+```
+
+对应 `evaluate_adaptive_policy.py --global-context --value-heads per-size --value-loss hl-gauss` 也能在 CUDA 上加载并运行。该 smoke 使用 8 games/row 和 64 max steps，只验证训练/保存/加载链路，不作为强度结果。
+
+下一轮 GPU triage 应从当前 71.29% search-distill candidate 启动，保留 v3-noarch 控制项和 HL-Gauss/per-size value，只加 global context：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 4096 \
+  --num-steps 256 \
+  --num-iterations 40 \
+  --num-epochs 1 \
+  --minibatch-size 1024 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --truncation-reward-scale 0.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --global-context \
+  --init-input-channels 15 \
+  --value-heads per-size \
+  --init-value-heads shared \
+  --value-loss hl-gauss \
+  --init-value-loss mse \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-global-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 4 \
+  --model-path /tmp/generals-adaptive-ppo-v3-global.eqx \
+  --seed 69030
+```
+
 ## 评估命令
 
 评估 player 0：

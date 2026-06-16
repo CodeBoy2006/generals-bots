@@ -21,6 +21,8 @@ import jax.random as jrandom
 import optax
 
 from adaptive_common import (
+    ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+    ADAPTIVE_INPUT_CHANNELS,
     adaptive_action_to_index,
     adaptive_obs_to_array,
     compute_adaptive_valid_move_mask,
@@ -151,6 +153,7 @@ def rollout_step(
     terminal_reward_scale,
     truncation_reward_scale,
     pad_size,
+    global_context=False,
 ):
     """Collect one vectorized adaptive PPO rollout step."""
     num_envs = states.armies.shape[0]
@@ -159,7 +162,9 @@ def rollout_step(
     learner_obs_prior = jax.lax.cond(learner_player == 0, lambda _: obs_p0_prior, lambda _: obs_p1_prior, None)
     opponent_obs_prior = jax.lax.cond(learner_player == 0, lambda _: obs_p1_prior, lambda _: obs_p0_prior, None)
 
-    obs_arr, active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
+    obs_arr, active = jax.vmap(
+        lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+    )(
         learner_obs_prior,
         effective_sizes,
     )
@@ -235,6 +240,7 @@ def collect_rollout(
     terminal_reward_scale,
     truncation_reward_scale,
     pad_size,
+    global_context=False,
 ):
     """Collect a Python-loop rollout, stacking step data on axis 0."""
     step_data = []
@@ -252,6 +258,7 @@ def collect_rollout(
             terminal_reward_scale,
             truncation_reward_scale,
             pad_size,
+            global_context,
         )
         step_data.append(data)
     rollout_data = jax.tree.map(lambda *xs: jnp.stack(xs), *step_data)
@@ -273,6 +280,7 @@ def collect_mixed_rollout(
     terminal_reward_scale,
     truncation_reward_scale,
     pad_size,
+    global_context=False,
 ):
     """Collect P0 and P1 learner trajectories, then combine them for one PPO update."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -290,6 +298,7 @@ def collect_mixed_rollout(
         terminal_reward_scale,
         truncation_reward_scale,
         pad_size,
+        global_context,
     )
     states_p1, effective_sizes_p1, rollout_p1, _ = collect_rollout(
         states_p1,
@@ -305,6 +314,7 @@ def collect_mixed_rollout(
         terminal_reward_scale,
         truncation_reward_scale,
         pad_size,
+        global_context,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return states_p0, effective_sizes_p0, states_p1, effective_sizes_p1, rollout_data, key
@@ -538,6 +548,9 @@ def parse_args():
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
     parser.add_argument("--init-channels", default=None)
+    parser.add_argument("--global-context", action="store_true")
+    parser.add_argument("--init-global-context", action="store_true")
+    parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
@@ -605,6 +618,8 @@ def parse_args():
         parser.error("city count must satisfy 2 <= min <= max")
     if args.city_army_min >= args.city_army_max:
         parser.error("city army range must satisfy min < max")
+    if args.init_input_channels is not None and args.init_input_channels <= 0:
+        parser.error("--init-input-channels must be positive")
     if args.value_loss == "hl-gauss":
         if args.value_bins <= 1:
             parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
@@ -663,6 +678,12 @@ def main():
         print(f"Warm start:    {args.init_model_path}")
         if args.init_channels is not None:
             print(f"Warm channels: {args.init_channels}")
+        if args.init_input_channels is not None:
+            print(f"Warm inputs:   {args.init_input_channels} channels")
+        if args.init_global_context:
+            print("Warm global:   enabled")
+    if args.global_context:
+        print(f"Global ctx:    scoreboard channels ({ADAPTIVE_GLOBAL_INPUT_CHANNELS})")
     if args.value_heads != "shared":
         print(f"Value heads:   {args.value_heads}")
         if args.init_model_path is not None:
@@ -687,12 +708,18 @@ def main():
         if args.init_value_loss == "hl-gauss"
         else 0
     )
+    input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS if args.global_context else ADAPTIVE_INPUT_CHANNELS
+    init_input_channels = args.init_input_channels
+    if init_input_channels is None and args.init_model_path is not None and args.global_context and not args.init_global_context:
+        init_input_channels = ADAPTIVE_INPUT_CHANNELS
     network = load_or_create_adaptive_network(
         net_key,
         pad_size=args.pad_to,
         init_model_path=args.init_model_path,
         channels=args.channels,
         init_channels=args.init_channels,
+        input_channels=input_channels,
+        init_input_channels=init_input_channels,
         value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
         init_value_head_sizes=args.grid_sizes if args.init_value_heads == "per-size" else (),
         value_bins=value_bins,
@@ -702,6 +729,8 @@ def main():
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_aux_weight > 0.0,
         init_outcome_head=args.init_outcome_head,
+        global_context=args.global_context,
+        init_global_context=args.init_global_context,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
@@ -755,6 +784,7 @@ def main():
             args.terminal_reward_scale,
             args.truncation_reward_scale,
             args.pad_to,
+            args.global_context,
         )
         states_p1, effective_sizes_p1, _, _ = rollout_step(
             states_p1,
@@ -769,6 +799,7 @@ def main():
             args.terminal_reward_scale,
             args.truncation_reward_scale,
             args.pad_to,
+            args.global_context,
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
@@ -787,6 +818,7 @@ def main():
             args.terminal_reward_scale,
             args.truncation_reward_scale,
             args.pad_to,
+            args.global_context,
         )
         jax.block_until_ready(states)
 
@@ -810,6 +842,7 @@ def main():
                 args.terminal_reward_scale,
                 args.truncation_reward_scale,
                 args.pad_to,
+                args.global_context,
             )
             jax.block_until_ready(states_p0)
             jax.block_until_ready(states_p1)
@@ -829,6 +862,7 @@ def main():
                 args.terminal_reward_scale,
                 args.truncation_reward_scale,
                 args.pad_to,
+                args.global_context,
             )
             jax.block_until_ready(states)
         obs, masks, active, actions, logprobs, values, rewards, dones, infos = rollout_data
