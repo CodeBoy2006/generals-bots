@@ -81,3 +81,39 @@ def test_adaptive_action_encoding_uses_single_pass_index():
     assert int(adaptive_action_to_index(move, pad_size)) == (7 * pad_size * pad_size + 2 * pad_size + 1)
     assert adaptive_index_to_action(jnp.asarray(pass_index), pad_size).tolist() == [1, 0, 0, 0, 0]
     assert adaptive_action_to_target_probs(pass_b, pad_size).shape == (8 * pad_size * pad_size + 1,)
+
+
+def test_adaptive_network_forward_uses_fixed_action_space_and_finite_value():
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6)
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    logits, value = network.logits_value(obs_arr, mask, active)
+
+    assert logits.shape == (8 * 6 * 6 + 1,)
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(logits[-1])
+
+
+def test_adaptive_network_samples_and_scores_action():
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6)
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    action, value, logprob, entropy = network(obs_arr, mask, active, jrandom.PRNGKey(1), None)
+
+    assert action.shape == (5,)
+    assert action.dtype == jnp.int32
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(logprob)
+    assert jnp.isfinite(entropy)

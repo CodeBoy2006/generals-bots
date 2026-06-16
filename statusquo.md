@@ -297,3 +297,9 @@
 - **Status:** Completed
 - **Next Steps:** Implement `AdaptivePolicyValueNetwork` with fixed adaptive action space and active-cell value pooling.
 - **Context:** Task 1 follows TDD: tests first failed on missing adaptive module, then passed after implementation. Padding is distinguished through explicit adaptive channels because fogged observations may report padded mountains as structures-in-fog rather than visible mountains.
+
+## [2026-06-16 13:35] Adaptive Policy Network
+- **Changes:** Added `examples/_experimental/ppo/adaptive_network.py` with `AdaptivePolicyValueNetwork`, eight movement planes, one global pass logit, active-cell masked pooling for the value/pass heads, checkpoint loading, and tests for finite forward/sample outputs.
+- **Status:** Completed
+- **Next Steps:** Add adaptive size-balanced reset pools and Expander target distributions for behavior cloning.
+- **Context:** Task 2 followed TDD: network tests first failed on missing module, then passed after implementation. The existing fixed-size `PolicyValueNetwork` remains unchanged.
