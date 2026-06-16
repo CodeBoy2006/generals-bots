@@ -25,6 +25,54 @@ except ImportError:  # pragma: no cover - used when running this directory as sc
     )
 
 
+def value_bin_centers(value_bins: int, value_min: float = -1.0, value_max: float = 1.0) -> jnp.ndarray:
+    """Return evenly spaced categorical value support points."""
+    if value_bins <= 1:
+        raise ValueError("value_bins must be greater than 1")
+    if value_min >= value_max:
+        raise ValueError("value_min must be less than value_max")
+    return jnp.linspace(value_min, value_max, value_bins, dtype=jnp.float32)
+
+
+def hl_gauss_target(
+    target: jnp.ndarray,
+    value_bins: int,
+    value_min: float = -1.0,
+    value_max: float = 1.0,
+    value_sigma: float = 0.04,
+) -> jnp.ndarray:
+    """Project scalar value targets onto an HL-Gauss categorical support."""
+    if value_sigma <= 0.0:
+        raise ValueError("value_sigma must be positive")
+    centers = value_bin_centers(value_bins, value_min, value_max)
+    clipped = jnp.clip(target, value_min, value_max)
+    logits = -0.5 * ((centers - clipped[..., None]) / value_sigma) ** 2
+    return jax.nn.softmax(logits, axis=-1)
+
+
+def categorical_value_expectation(
+    value_logits: jnp.ndarray,
+    value_min: float = -1.0,
+    value_max: float = 1.0,
+) -> jnp.ndarray:
+    """Convert categorical value logits back to a scalar expectation."""
+    centers = value_bin_centers(value_logits.shape[-1], value_min, value_max)
+    return jnp.sum(jax.nn.softmax(value_logits, axis=-1) * centers, axis=-1)
+
+
+def hl_gauss_value_loss(
+    value_logits: jnp.ndarray,
+    target: jnp.ndarray,
+    value_bins: int,
+    value_min: float = -1.0,
+    value_max: float = 1.0,
+    value_sigma: float = 0.04,
+) -> jnp.ndarray:
+    """Cross-entropy between predicted value logits and HL-Gauss target distribution."""
+    target_probs = hl_gauss_target(target, value_bins, value_min, value_max, value_sigma)
+    return -jnp.sum(target_probs * jax.nn.log_softmax(value_logits, axis=-1), axis=-1)
+
+
 class AdaptivePolicyValueNetwork(eqx.Module):
     """Convolutional policy-value network with fixed canvas and active-cell pooling."""
 
@@ -36,10 +84,16 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     pass_linear: eqx.nn.Linear
     value_linear1: eqx.nn.Linear
     value_linear2: eqx.nn.Linear
+    categorical_value_linear2: eqx.nn.Linear | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
     size_value_linear2: tuple[eqx.nn.Linear, ...]
+    size_categorical_value_linear2: tuple[eqx.nn.Linear, ...]
     pad_size: int = eqx.field(static=True)
     value_head_sizes: tuple[int, ...] = eqx.field(static=True)
+    value_bins: int = eqx.field(static=True)
+    value_min: float = eqx.field(static=True)
+    value_max: float = eqx.field(static=True)
+    value_sigma: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -48,11 +102,21 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         channels: PolicyChannels = DEFAULT_POLICY_CHANNELS,
         input_channels: int = ADAPTIVE_INPUT_CHANNELS,
         value_head_sizes: tuple[int, ...] | None = None,
+        value_bins: int = 0,
+        value_min: float = -1.0,
+        value_max: float = 1.0,
+        value_sigma: float = 0.04,
     ):
         parsed_value_head_sizes = tuple(value_head_sizes or ())
-        keys = jrandom.split(key, 8 + 2 * len(parsed_value_head_sizes))
+        parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
+        categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
+        keys = jrandom.split(key, 8 + 2 * len(parsed_value_head_sizes) + categorical_keys)
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
+        self.value_bins = parsed_value_bins
+        self.value_min = value_min
+        self.value_max = value_max
+        self.value_sigma = value_sigma
         self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
         self.conv3 = eqx.nn.Conv2d(channels[1], channels[2], kernel_size=3, padding=1, key=keys[2])
@@ -67,6 +131,15 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         )
         self.size_value_linear2 = tuple(
             eqx.nn.Linear(64, 1, key=keys[9 + 2 * index]) for index, _ in enumerate(parsed_value_head_sizes)
+        )
+        categorical_offset = 8 + 2 * len(parsed_value_head_sizes)
+        self.categorical_value_linear2 = (
+            eqx.nn.Linear(64, parsed_value_bins, key=keys[categorical_offset]) if parsed_value_bins > 0 else None
+        )
+        self.size_categorical_value_linear2 = tuple(
+            eqx.nn.Linear(64, parsed_value_bins, key=keys[categorical_offset + 1 + index])
+            for index, _ in enumerate(parsed_value_head_sizes)
+            if parsed_value_bins > 0
         )
 
     def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
@@ -88,6 +161,12 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         value_hidden = jax.nn.relu(self.value_linear1(pooled))
         return self.value_linear2(value_hidden)[0]
 
+    def _shared_value_logits(self, pooled: jnp.ndarray) -> jnp.ndarray:
+        if self.categorical_value_linear2 is None:
+            raise ValueError("categorical value head is not configured")
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        return self.categorical_value_linear2(value_hidden)
+
     def _size_value(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
         if not self.value_head_sizes:
             return self._shared_value(pooled)
@@ -101,8 +180,44 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         )
         return jax.lax.switch(head_index, branches, None)
 
+    def _size_value_logits(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
+        if self.categorical_value_linear2 is None:
+            raise ValueError("categorical value head is not configured")
+        if not self.value_head_sizes:
+            return self._shared_value_logits(pooled)
+
+        active_cells = jnp.sum(active.astype(jnp.int32))
+        head_cells = jnp.array([size * size for size in self.value_head_sizes], dtype=jnp.int32)
+        head_index = jnp.argmin(jnp.abs(head_cells - active_cells))
+        branches = tuple(
+            (lambda linear1, linear2: lambda _: linear2(jax.nn.relu(linear1(pooled))))(linear1, linear2)
+            for linear1, linear2 in zip(
+                self.size_value_linear1,
+                self.size_categorical_value_linear2,
+                strict=True,
+            )
+        )
+        return jax.lax.switch(head_index, branches, None)
+
+    def _value_distribution(self, pooled: jnp.ndarray, active: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+        if self.value_bins <= 0:
+            return self._size_value(pooled, active), None
+        value_logits = self._size_value_logits(pooled, active)
+        value = categorical_value_expectation(value_logits, self.value_min, self.value_max)
+        return value, value_logits
+
     def logits_value(self, obs: jnp.ndarray, mask: jnp.ndarray, active: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Compute movement logits, one global pass logit, and scalar value."""
+        logits, value, _ = self.logits_value_distribution(obs, mask, active)
+        return logits, value
+
+    def logits_value_distribution(
+        self,
+        obs: jnp.ndarray,
+        mask: jnp.ndarray,
+        active: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None]:
+        """Compute policy logits, scalar value, and optional categorical value logits."""
         x = self._features(obs)
         pooled = self._masked_pool(x, active)
 
@@ -112,9 +227,9 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         move_logits = move_logits + (1 - move_mask.astype(jnp.float32)) * -1e9
 
         pass_logit = self.pass_linear(pooled)
-        value = self._size_value(pooled, active)
+        value, value_logits = self._value_distribution(pooled, active)
         logits = jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
-        return logits, value
+        return logits, value, value_logits
 
     def __call__(
         self,
@@ -150,16 +265,29 @@ def load_or_create_adaptive_network(
     input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     value_head_sizes: tuple[int, ...] | None = None,
     init_value_head_sizes: tuple[int, ...] | None = None,
+    value_bins: int = 0,
+    init_value_bins: int | None = None,
+    value_min: float = -1.0,
+    value_max: float = 1.0,
+    value_sigma: float = 0.04,
+    init_value_min: float | None = None,
+    init_value_max: float | None = None,
+    init_value_sigma: float | None = None,
 ) -> AdaptivePolicyValueNetwork:
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
     parsed_channels = parse_policy_channels(channels)
     parsed_value_head_sizes = _normalize_value_head_sizes(value_head_sizes)
+    parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
     network = AdaptivePolicyValueNetwork(
         key,
         pad_size=pad_size,
         channels=parsed_channels,
         input_channels=input_channels,
         value_head_sizes=parsed_value_head_sizes,
+        value_bins=parsed_value_bins,
+        value_min=value_min,
+        value_max=value_max,
+        value_sigma=value_sigma,
     )
     if init_model_path is None:
         return network
@@ -172,13 +300,35 @@ def load_or_create_adaptive_network(
         if init_value_head_sizes is None
         else _normalize_value_head_sizes(init_value_head_sizes)
     )
-    if parsed_init_channels != parsed_channels or parsed_init_value_head_sizes != parsed_value_head_sizes:
+    parsed_init_value_bins = parsed_value_bins if init_value_bins is None else int(init_value_bins)
+    parsed_init_value_min = value_min if init_value_min is None else init_value_min
+    parsed_init_value_max = value_max if init_value_max is None else init_value_max
+    parsed_init_value_sigma = value_sigma if init_value_sigma is None else init_value_sigma
+    parsed_init_value_bins = _normalize_value_bins(
+        parsed_init_value_bins,
+        parsed_init_value_min,
+        parsed_init_value_max,
+        parsed_init_value_sigma,
+    )
+    needs_expansion = (
+        parsed_init_channels != parsed_channels
+        or parsed_init_value_head_sizes != parsed_value_head_sizes
+        or parsed_init_value_bins != parsed_value_bins
+        or parsed_init_value_min != value_min
+        or parsed_init_value_max != value_max
+        or parsed_init_value_sigma != value_sigma
+    )
+    if needs_expansion:
         source_network = AdaptivePolicyValueNetwork(
             key,
             pad_size=pad_size,
             channels=parsed_init_channels,
             input_channels=input_channels,
             value_head_sizes=parsed_init_value_head_sizes,
+            value_bins=parsed_init_value_bins,
+            value_min=parsed_init_value_min,
+            value_max=parsed_init_value_max,
+            value_sigma=parsed_init_value_sigma,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
         return expand_adaptive_network_channels(network, source_network)
@@ -195,6 +345,21 @@ def _normalize_value_head_sizes(value_head_sizes: tuple[int, ...] | list[int] | 
     if any(size <= 0 for size in sizes):
         raise ValueError("value head sizes must be positive")
     return sizes
+
+
+def _normalize_value_bins(value_bins: int, value_min: float, value_max: float, value_sigma: float) -> int:
+    """Validate optional categorical value support settings."""
+    bins = int(value_bins)
+    if bins < 0:
+        raise ValueError("value_bins cannot be negative")
+    if bins == 1:
+        raise ValueError("value_bins must be 0 or greater than 1")
+    if bins > 0:
+        if value_min >= value_max:
+            raise ValueError("value_min must be less than value_max")
+        if value_sigma <= 0.0:
+            raise ValueError("value_sigma must be positive")
+    return bins
 
 
 def _copy_conv_prefix(target: eqx.nn.Conv2d, source: eqx.nn.Conv2d) -> eqx.nn.Conv2d:
@@ -309,4 +474,37 @@ def expand_adaptive_network_channels(
             target_size_linear2.append(_copy_linear_prefix(target_linear2, source_linear2))
         target = eqx.tree_at(lambda net: net.size_value_linear1, target, tuple(target_size_linear1))
         target = eqx.tree_at(lambda net: net.size_value_linear2, target, tuple(target_size_linear2))
+    if target.categorical_value_linear2 is not None and source.categorical_value_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.categorical_value_linear2,
+            target,
+            _copy_linear_prefix(target.categorical_value_linear2, source.categorical_value_linear2),
+        )
+    if target.value_head_sizes and target.categorical_value_linear2 is not None:
+        source_categorical_heads = {}
+        if source.categorical_value_linear2 is not None:
+            source_categorical_heads = {
+                size: linear2
+                for size, linear2 in zip(
+                    source.value_head_sizes,
+                    source.size_categorical_value_linear2,
+                    strict=True,
+                )
+            }
+        target_size_categorical_linear2 = []
+        for size, target_linear2 in zip(
+            target.value_head_sizes,
+            target.size_categorical_value_linear2,
+            strict=True,
+        ):
+            source_linear2 = source_categorical_heads.get(size, source.categorical_value_linear2)
+            if source_linear2 is None:
+                target_size_categorical_linear2.append(target_linear2)
+            else:
+                target_size_categorical_linear2.append(_copy_linear_prefix(target_linear2, source_linear2))
+        target = eqx.tree_at(
+            lambda net: net.size_categorical_value_linear2,
+            target,
+            tuple(target_size_categorical_linear2),
+        )
     return target

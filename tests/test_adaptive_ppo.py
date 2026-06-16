@@ -114,6 +114,120 @@ def test_adaptive_network_forward_uses_fixed_action_space_and_finite_value():
     assert jnp.isfinite(logits[-1])
 
 
+def test_hl_gauss_target_is_normalized_and_clipped():
+    from examples._experimental.ppo.adaptive_network import categorical_value_expectation, hl_gauss_target
+
+    target = hl_gauss_target(jnp.array([-2.0, 0.0, 2.0], dtype=jnp.float32), 9, -1.0, 1.0, 0.15)
+
+    assert target.shape == (3, 9)
+    assert jnp.allclose(jnp.sum(target, axis=-1), jnp.ones((3,), dtype=jnp.float32), atol=1e-5)
+    assert int(jnp.argmax(target[0])) == 0
+    assert int(jnp.argmax(target[1])) == 4
+    assert int(jnp.argmax(target[2])) == 8
+
+    value = categorical_value_expectation(jnp.log(target[1]), -1.0, 1.0)
+    assert abs(float(value)) < 0.05
+
+
+def test_adaptive_network_can_expose_hl_gauss_value_logits():
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        value_head_sizes=(4, 6),
+        value_bins=8,
+        value_min=-1.0,
+        value_max=1.0,
+        value_sigma=0.2,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    logits, value, value_logits = network.logits_value_distribution(obs_arr, mask, active)
+    legacy_logits, legacy_value = network.logits_value(obs_arr, mask, active)
+
+    assert logits.shape == (8 * 6 * 6 + 1,)
+    assert value_logits.shape == (8,)
+    assert jnp.isfinite(value)
+    assert jnp.all(jnp.isfinite(value_logits))
+    assert jnp.allclose(legacy_logits, logits)
+    assert jnp.allclose(legacy_value, value)
+
+
+def test_load_or_create_adaptive_network_can_warm_start_hl_gauss_from_scalar_checkpoint(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
+    model_path = tmp_path / "adaptive-scalar.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=(16, 16, 16, 8),
+        init_channels=(16, 16, 16, 8),
+        value_head_sizes=(4, 6),
+        init_value_head_sizes=(),
+        value_bins=8,
+        init_value_bins=0,
+        value_sigma=0.2,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    expected_logits, _ = source.logits_value(obs_arr, mask, active)
+    actual_logits, value, value_logits = loaded.logits_value_distribution(obs_arr, mask, active)
+
+    assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+    assert value_logits.shape == (8,)
+    assert jnp.isfinite(value)
+
+
+def test_ppo_loss_terms_uses_hl_gauss_value_loss_when_available():
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.train_adaptive import ppo_loss_terms
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        value_bins=8,
+        value_sigma=0.2,
+    )
+    obs = jnp.zeros((ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
+    mask = jnp.ones((6, 6, 4), dtype=bool)
+    active = jnp.ones((6, 6), dtype=bool)
+    action = jnp.array([1, 0, 0, 0, 0], dtype=jnp.int32)
+
+    policy_loss, value_loss, entropy = ppo_loss_terms(
+        network,
+        obs,
+        mask,
+        active,
+        action,
+        old_logprob=jnp.asarray(0.0, dtype=jnp.float32),
+        advantage=jnp.asarray(1.0, dtype=jnp.float32),
+        ret=jnp.asarray(0.75, dtype=jnp.float32),
+    )
+
+    assert jnp.isfinite(policy_loss)
+    assert jnp.isfinite(value_loss)
+    assert jnp.isfinite(entropy)
+    assert float(value_loss) > 0.0
+
+
 def test_adaptive_network_samples_and_scores_action():
     from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
@@ -716,8 +830,17 @@ def test_train_adaptive_cli_smoke(tmp_path):
     import subprocess
     import sys
 
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    init_model_path = tmp_path / "adaptive-init.eqx"
     model_path = tmp_path / "adaptive-ppo.eqx"
     checkpoint_dir = tmp_path / "ckpts"
+    eqx.tree_serialise_leaves(
+        init_model_path,
+        AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8)),
+    )
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     cmd = [
@@ -759,6 +882,20 @@ def test_train_adaptive_cli_smoke(tmp_path):
         "16,16,16,8",
         "--init-channels",
         "16,16,16,8",
+        "--init-model-path",
+        str(init_model_path),
+        "--value-heads",
+        "per-size",
+        "--init-value-heads",
+        "shared",
+        "--value-loss",
+        "hl-gauss",
+        "--init-value-loss",
+        "mse",
+        "--value-bins",
+        "8",
+        "--value-sigma",
+        "0.2",
         "--checkpoint-dir",
         str(checkpoint_dir),
         "--checkpoint-every",
@@ -871,7 +1008,10 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
 
     model_path = tmp_path / "adaptive.eqx"
     output_path = tmp_path / "adaptive-eval.json"
-    eqx.tree_serialise_leaves(model_path, AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6))
+    eqx.tree_serialise_leaves(
+        model_path,
+        AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, value_bins=8, value_sigma=0.2),
+    )
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     cmd = [
@@ -888,6 +1028,12 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         "4",
         "--map-generator",
         "simple",
+        "--value-loss",
+        "hl-gauss",
+        "--value-bins",
+        "8",
+        "--value-sigma",
+        "0.2",
         "--json-output",
         str(output_path),
         "--seed",

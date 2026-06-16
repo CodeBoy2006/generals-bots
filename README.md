@@ -399,13 +399,13 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
 ```
 
 `behavior_clone_adaptive.py`、`train_adaptive.py` 和 `evaluate_adaptive_policy.py` 使用固定 `--pad-to` 画布保存一个 checkpoint，并通过 `--grid-sizes` 在 8x8、12x12、16x16 等有效棋盘之间切换。评估器会自动跑每个尺寸的 player 0 和 player 1 两个座位，`--require-win-rate 0.90` 会在任一尺寸或座位未达标时返回非零退出码。当前 GUI 和固定尺寸 `evaluate_policy.py` 仍只支持普通 `PolicyValueNetwork` checkpoint，不能直接加载 adaptive checkpoint。
-`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--channels` 指定 adaptive 网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 按 training iteration 交替更新两个座位；`--learner-player mixed` 会把总 `num_envs` 拆成 player 0 和 player 1 两半，并把两侧轨迹拼进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。
+`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--channels` 指定 adaptive 网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 按 training iteration 交替更新两个座位；`--learner-player mixed` 会把总 `num_envs` 拆成 player 0 和 player 1 两半，并把两侧轨迹拼进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。`--value-loss hl-gauss --value-bins 128 --value-sigma 0.04` 会把 PPO value loss 从 scalar MSE 切换为 HL-Gauss categorical CE；如果 checkpoint 使用 categorical value head，评估时也要给 `evaluate_adaptive_policy.py` 传同样的 value-loss 模板参数。
 
-下一轮 adaptive PPO v3-noarch continuation 建议从当前最强候选启动，先做 256 games/row triage：
+下一轮 adaptive PPO v3-hlgauss continuation 建议从当前最强候选启动；本地 16GB GPU 已验证 512 envs x 256 steps 会 OOM，先用 256 envs 和 1024 minibatch 做 256 games/row triage：
 
 ```bash
 JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 512 \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
   --grid-sizes 8,12,16 \
   --grid-size-weights 8:1,12:1,16:2 \
   --pad-to 16 \
@@ -414,7 +414,7 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --num-steps 256 \
   --num-iterations 80 \
   --num-epochs 1 \
-  --minibatch-size 4096 \
+  --minibatch-size 1024 \
   --lr 0.000003 \
   --opponent expander \
   --learner-player mixed \
@@ -425,12 +425,18 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --top-advantage-fraction 0.25 \
   --ema-decay 0.999 \
   --eval-ema \
+  --value-heads per-size \
+  --init-value-heads shared \
+  --value-loss hl-gauss \
+  --init-value-loss mse \
+  --value-bins 128 \
+  --value-sigma 0.04 \
   --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
-  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-noarch-ckpts \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-hlgauss-ckpts \
   --checkpoint-every 10 \
   --keep-checkpoints 8 \
-  --model-path /tmp/generals-adaptive-ppo-v3-noarch.eqx \
-  --seed 66016
+  --model-path /tmp/generals-adaptive-ppo-v3-hlgauss.eqx \
+  --seed 67000
 ```
 
 Residual GRU 记忆 PPO：

@@ -471,3 +471,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop tuning the current no-architecture PPO recipe; implement HL-Gauss/by-size value targets or finish/draw auxiliary heads next, then rerun GPU triage.
 - **Context:** Local GPU is a 16GB RTX 5070 Ti, so 512 envs x 256 steps with minibatch 4096 OOMs in `train_minibatch_step`; 256 envs x 256 steps with minibatch 1024 runs around 88k SPS. Best v3 256-row result was terminal EMA at `min_win_rate = 69.53%` on seed 66030, only noise-level above the same-seed base control at 68.75% and below the prior 512-row 71.29% candidate.
+
+## [2026-06-16 21:51] Adaptive HL-Gauss Value Heads
+- **Changes:** Added HL-Gauss categorical value helpers, optional shared/per-size categorical value heads, PPO categorical value loss, train/eval CLI value-loss flags, scalar-to-categorical warm-start coverage, and README/manual/strategy docs for the v3-hlgauss route.
+- **Status:** Completed
+- **Next Steps:** Run the 256-env GPU v3-hlgauss triage from the 71.29% search-distill checkpoint and compare retained checkpoints with 256 games/row before any 512-row promotion.
+- **Context:** Verification passed with focused adaptive tests (`32 passed`), compileall, `git diff --check`, and full CPU pytest (`175 passed`). CUDA smoke used `CudaDevice(id=0)`, trained `/tmp/generals-adaptive-ppo-v3-hlgauss-smoke.eqx`, and confirmed the categorical checkpoint loads in the evaluator with matching `--value-loss hl-gauss`; the 16 games/row smoke is a loader/runtime check, not a strength result.

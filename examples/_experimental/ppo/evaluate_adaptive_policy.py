@@ -163,6 +163,11 @@ def parse_args():
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
+    parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--value-bins", type=int, default=128)
+    parser.add_argument("--value-min", type=float, default=-1.0)
+    parser.add_argument("--value-max", type=float, default=1.0)
+    parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -184,6 +189,13 @@ def parse_args():
         parser.error("city count must satisfy 2 <= min <= max")
     if args.city_army_min >= args.city_army_max:
         parser.error("city army range must satisfy min < max")
+    if args.value_loss == "hl-gauss":
+        if args.value_bins <= 1:
+            parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
+        if args.value_min >= args.value_max:
+            parser.error("--value-min must be less than --value-max")
+        if args.value_sigma <= 0.0:
+            parser.error("--value-sigma must be positive")
     if args.require_win_rate is not None and not (0.0 <= args.require_win_rate <= 1.0):
         parser.error("--require-win-rate must be between 0 and 1")
     return args
@@ -209,6 +221,10 @@ def main():
         pad_size=args.pad_to,
         init_model_path=args.model_path,
         channels=args.channels,
+        value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
+        value_min=args.value_min,
+        value_max=args.value_max,
+        value_sigma=args.value_sigma,
     )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -220,6 +236,12 @@ def main():
     print(f"Grid sizes:  {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Opponent:    {args.opponent}")
     print(f"Mode:        {args.policy_mode}")
+    if args.value_loss == "hl-gauss":
+        print(
+            "Value loss:  "
+            f"hl-gauss bins={args.value_bins} range=[{args.value_min:g},{args.value_max:g}] "
+            f"sigma={args.value_sigma:g}"
+        )
     print()
 
     for grid_size in args.grid_sizes:

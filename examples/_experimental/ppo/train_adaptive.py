@@ -21,6 +21,7 @@ import jax.random as jrandom
 import optax
 
 from adaptive_common import (
+    adaptive_action_to_index,
     adaptive_obs_to_array,
     compute_adaptive_valid_move_mask,
     make_adaptive_initial_states,
@@ -28,7 +29,7 @@ from adaptive_common import (
     parse_grid_size_weights,
     parse_grid_sizes,
 )
-from adaptive_network import load_or_create_adaptive_network
+from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_network
 from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
 from generals.core import game
 from generals.core.rewards import composite_reward_fn
@@ -274,11 +275,26 @@ def collect_mixed_rollout(
 @jax.jit
 def ppo_loss_terms(network, obs, mask, active, action, old_logprob, advantage, ret, clip=0.2):
     """Return per-sample PPO policy, value, and entropy terms."""
-    _, value, logprob, entropy = network(obs, mask, active, None, action)
+    logits, value, value_logits = network.logits_value_distribution(obs, mask, active)
+    action_index = adaptive_action_to_index(action, network.pad_size)
+    log_probs = jax.nn.log_softmax(logits)
+    logprob = log_probs[action_index]
+    probs = jax.nn.softmax(logits)
+    entropy = -jnp.sum(probs * log_probs)
     ratio = jnp.exp(logprob - old_logprob)
     clipped = jnp.clip(ratio, 1 - clip, 1 + clip) * advantage
     policy_loss = -jnp.minimum(ratio * advantage, clipped)
-    value_loss = 0.5 * (value - ret) ** 2
+    if network.value_bins > 0:
+        value_loss = hl_gauss_value_loss(
+            value_logits,
+            ret,
+            network.value_bins,
+            network.value_min,
+            network.value_max,
+            network.value_sigma,
+        )
+    else:
+        value_loss = 0.5 * (value - ret) ** 2
     return policy_loss, value_loss, entropy
 
 
@@ -393,6 +409,13 @@ def parse_args():
     parser.add_argument("--init-channels", default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--init-value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--value-bins", type=int, default=128)
+    parser.add_argument("--init-value-bins", type=int, default=None)
+    parser.add_argument("--value-min", type=float, default=-1.0)
+    parser.add_argument("--value-max", type=float, default=1.0)
+    parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="/tmp/generals-adaptive-ppo.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -449,6 +472,19 @@ def parse_args():
         parser.error("city count must satisfy 2 <= min <= max")
     if args.city_army_min >= args.city_army_max:
         parser.error("city army range must satisfy min < max")
+    if args.value_loss == "hl-gauss":
+        if args.value_bins <= 1:
+            parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
+        if args.value_min >= args.value_max:
+            parser.error("--value-min must be less than --value-max")
+        if args.value_sigma <= 0.0:
+            parser.error("--value-sigma must be positive")
+    if args.init_value_loss == "hl-gauss":
+        init_bins = args.value_bins if args.init_value_bins is None else args.init_value_bins
+        if init_bins <= 1:
+            parser.error("--init-value-bins must be greater than 1 for --init-value-loss hl-gauss")
+    elif args.init_value_bins is not None:
+        parser.error("--init-value-bins requires --init-value-loss hl-gauss")
     if args.checkpoint_every < 0:
         parser.error("--checkpoint-every cannot be negative")
     if args.keep_checkpoints < 0:
@@ -496,20 +532,37 @@ def main():
         print(f"Value heads:   {args.value_heads}")
         if args.init_model_path is not None:
             print(f"Init values:   {args.init_value_heads}")
+    if args.value_loss == "hl-gauss":
+        print(
+            "Value loss:    "
+            f"hl-gauss bins={args.value_bins} range=[{args.value_min:g},{args.value_max:g}] "
+            f"sigma={args.value_sigma:g}"
+        )
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
 
     key = jrandom.PRNGKey(args.seed)
     key, net_key, pool_key = jrandom.split(key, 3)
+    value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
+    init_value_bins = (
+        (args.value_bins if args.init_value_bins is None else args.init_value_bins)
+        if args.init_value_loss == "hl-gauss"
+        else 0
+    )
     network = load_or_create_adaptive_network(
         net_key,
         pad_size=args.pad_to,
         init_model_path=args.init_model_path,
         channels=args.channels,
         init_channels=args.init_channels,
-        value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else None,
-        init_value_head_sizes=args.grid_sizes if args.init_value_heads == "per-size" else None,
+        value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
+        init_value_head_sizes=args.grid_sizes if args.init_value_heads == "per-size" else (),
+        value_bins=value_bins,
+        init_value_bins=init_value_bins,
+        value_min=args.value_min,
+        value_max=args.value_max,
+        value_sigma=args.value_sigma,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))

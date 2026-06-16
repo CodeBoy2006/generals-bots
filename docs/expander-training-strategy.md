@@ -1785,6 +1785,92 @@ config: same as terminal EMA run, but without --eval-ema
 
 结论更新：v3-noarch infrastructure works on GPU, but this isolated recipe does not break the adaptive plateau. Against the same 256-row seed, terminal EMA is only noise-level above the base and below the earlier 512-row 71.29% candidate; composite and last-iterate controls also fail promotion. The next implementation step should be value-target quality, specifically HL-Gauss/by-size value or finish/draw auxiliary targets, rather than more reward/seat/CE weight tuning.
 
+### Adaptive HL-Gauss value upgrade
+
+2026-06-16 新增 adaptive categorical value path：
+
+- `AdaptivePolicyValueNetwork(..., value_bins=N)` 会保留原 scalar value heads，同时新增 shared/per-size categorical value logits。
+- `train_adaptive.py --value-loss hl-gauss` 使用 HL-Gauss target distribution 和 categorical cross-entropy 训练 value head；policy logits、old logprob 和 entropy 仍按原 PPO objective 更新。
+- `--value-heads per-size --init-value-heads shared` 可从旧 shared scalar checkpoint warm start 到 per-size categorical value heads；policy trunk/pass/policy logits 保持可迁移。
+- categorical checkpoint 评估时必须给 `evaluate_adaptive_policy.py` 传同样的 `--value-loss hl-gauss --value-bins ... --value-sigma ...`，否则 loader 会按 scalar 模板读 checkpoint。
+
+本地 16GB RTX 5070 Ti 上，512 envs x 256 steps x minibatch 4096 已确认 OOM；下一轮 GPU triage 使用 256 envs、256 rollout、minibatch 1024：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 256 \
+  --num-iterations 40 \
+  --num-epochs 1 \
+  --minibatch-size 1024 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --value-heads per-size \
+  --init-value-heads shared \
+  --value-loss hl-gauss \
+  --init-value-loss mse \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-hlgauss-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 4 \
+  --model-path /tmp/generals-adaptive-ppo-v3-hlgauss.eqx \
+  --seed 67000
+```
+
+256 games/row triage command:
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/generals-adaptive-ppo-v3-hlgauss.eqx \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-games 256 \
+  --max-steps 750 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator generated \
+  --value-loss hl-gauss \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --json-output /tmp/generals-adaptive-ppo-v3-hlgauss-eval256.json \
+  --seed 67030
+```
+
+GPU smoke result:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-hlgauss-smoke.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 64 envs, num_steps=32, num_iterations=2, minibatch_size=512,
+        reward_mode=terminal, gamma=1.0, gae_lambda=0.9, top_advantage_fraction=0.25,
+        ema_decay=0.999, eval_ema, value_heads=per-size, value_loss=hl-gauss, 128 bins
+train log:
+  iter 1: loss=13.1120, episodes=1, wins=1, draws=0, SPS=406
+  iter 2: loss=13.3373, episodes=1, wins=1, draws=0, SPS=28134
+16 games/row evaluator smoke, seed 67010:
+  8x8 p0 50.00%, 8x8 p1 62.50%, 12x12 p0 25.00%, 12x12 p1 68.75%,
+  16x16 p0 12.50%, 16x16 p1 0.00%, min_win_rate = 0.00%
+```
+
+The smoke only proves the categorical checkpoint can warm-start from the scalar search-distill checkpoint, train on CUDA, save EMA parameters, and be loaded by `evaluate_adaptive_policy.py` with the matching value-loss template. Its 16-row evaluation is intentionally too small and too short to judge strength.
+
+Promotion rule remains unchanged: only if the six-row `min_win_rate` clearly beats the current 71.29%/512-row candidate on 256-row triage should retained checkpoints be promoted to 512-row evaluation. If HL-Gauss still does not move the weak 8x8/16x16 rows, the next implementation step should be memory-stack/global-context inputs or finish/draw auxiliary heads, not another pure PPO hyperparameter sweep.
+
 ## 评估命令
 
 评估 player 0：
