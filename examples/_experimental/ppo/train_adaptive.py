@@ -44,6 +44,9 @@ from train import (
 
 REWARD_MODE_NAMES = ("composite", "terminal")
 REWARD_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(REWARD_MODE_NAMES)}
+OUTCOME_LOSS = 0
+OUTCOME_DRAW = 1
+OUTCOME_WIN = 2
 
 
 def apply_truncation_reward(rewards, truncated, scale):
@@ -69,6 +72,41 @@ def top_advantage_weights(advantages: jnp.ndarray, fraction: float) -> jnp.ndarr
     _, indices = jax.lax.top_k(flat, count)
     weights = jnp.zeros_like(flat, dtype=jnp.float32).at[indices].set(1.0)
     return weights.reshape(advantages.shape)
+
+
+def outcome_class_from_winner(winner: jnp.ndarray, learner_player: jnp.ndarray) -> jnp.ndarray:
+    """Map a winner id to loss/draw/win from each learner perspective."""
+    return jnp.where(
+        winner < 0,
+        OUTCOME_DRAW,
+        jnp.where(winner == learner_player, OUTCOME_WIN, OUTCOME_LOSS),
+    ).astype(jnp.int32)
+
+
+def rollout_outcome_targets(
+    winners: jnp.ndarray,
+    dones: jnp.ndarray,
+    learner_players: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Assign each rollout sample the next known episode outcome within the rollout."""
+    learner_players = jnp.broadcast_to(learner_players, winners.shape[1:])
+    default_targets = jnp.full(winners.shape[1:], OUTCOME_LOSS, dtype=jnp.int32)
+    default_weights = jnp.zeros(winners.shape[1:], dtype=jnp.float32)
+
+    def scan_step(carry, inputs):
+        next_targets, next_weights = carry
+        done, winner = inputs
+        current_targets = outcome_class_from_winner(winner, learner_players)
+        targets = jnp.where(done, current_targets, next_targets)
+        weights = jnp.where(done, 1.0, next_weights)
+        return (targets, weights), (targets, weights)
+
+    _, (targets_rev, weights_rev) = jax.lax.scan(
+        scan_step,
+        (default_targets, default_weights),
+        (dones[::-1], winners[::-1]),
+    )
+    return targets_rev[::-1], weights_rev[::-1]
 
 
 def update_ema_network(ema_network, network, decay: float):
@@ -299,6 +337,49 @@ def ppo_loss_terms(network, obs, mask, active, action, old_logprob, advantage, r
 
 
 @jax.jit
+def ppo_loss_terms_with_outcome(
+    network,
+    obs,
+    mask,
+    active,
+    action,
+    old_logprob,
+    advantage,
+    ret,
+    outcome_target,
+    outcome_weight,
+    clip=0.2,
+):
+    """Return PPO terms plus masked outcome auxiliary cross-entropy."""
+    logits, value, value_logits, outcome_logits = network.logits_value_auxiliary(obs, mask, active)
+    action_index = adaptive_action_to_index(action, network.pad_size)
+    log_probs = jax.nn.log_softmax(logits)
+    logprob = log_probs[action_index]
+    probs = jax.nn.softmax(logits)
+    entropy = -jnp.sum(probs * log_probs)
+    ratio = jnp.exp(logprob - old_logprob)
+    clipped = jnp.clip(ratio, 1 - clip, 1 + clip) * advantage
+    policy_loss = -jnp.minimum(ratio * advantage, clipped)
+    if network.value_bins > 0:
+        value_loss = hl_gauss_value_loss(
+            value_logits,
+            ret,
+            network.value_bins,
+            network.value_min,
+            network.value_max,
+            network.value_sigma,
+        )
+    else:
+        value_loss = 0.5 * (value - ret) ** 2
+    if network.outcome_head:
+        outcome_log_probs = jax.nn.log_softmax(outcome_logits)
+        outcome_loss = -outcome_log_probs[outcome_target] * outcome_weight
+    else:
+        outcome_loss = jnp.asarray(0.0, dtype=jnp.float32)
+    return policy_loss, value_loss, entropy, outcome_loss
+
+
+@jax.jit
 def ppo_loss(network, obs, mask, active, action, old_logprob, advantage, ret, clip=0.2):
     """PPO loss for one adaptive sample."""
     policy_loss, value_loss, entropy = ppo_loss_terms(network, obs, mask, active, action, old_logprob, advantage, ret, clip)
@@ -306,13 +387,35 @@ def ppo_loss(network, obs, mask, active, action, old_logprob, advantage, ret, cl
 
 
 @eqx.filter_jit
-def train_minibatch_step(network, opt_state, minibatch, optimizer):
+def train_minibatch_step(network, opt_state, minibatch, optimizer, outcome_aux_weight: float = 0.0):
     """Run one PPO update on a flattened adaptive minibatch."""
-    obs, masks, active, actions, old_logprobs, advantages, returns, policy_weights = minibatch
+    (
+        obs,
+        masks,
+        active,
+        actions,
+        old_logprobs,
+        advantages,
+        returns,
+        policy_weights,
+        outcome_targets,
+        outcome_weights,
+    ) = minibatch
 
     def loss_fn(net):
-        policy_losses, value_losses, entropies = jax.vmap(
-            lambda o, m, ac, a, olp, adv, r: ppo_loss_terms(net, o, m, ac, a, olp, adv, r)
+        policy_losses, value_losses, entropies, outcome_losses = jax.vmap(
+            lambda o, m, ac, a, olp, adv, r, ot, ow: ppo_loss_terms_with_outcome(
+                net,
+                o,
+                m,
+                ac,
+                a,
+                olp,
+                adv,
+                r,
+                ot,
+                ow,
+            )
         )(
             obs,
             masks,
@@ -321,12 +424,16 @@ def train_minibatch_step(network, opt_state, minibatch, optimizer):
             old_logprobs,
             advantages,
             returns,
+            outcome_targets,
+            outcome_weights,
         )
         policy_normalizer = jnp.maximum(jnp.sum(policy_weights), 1.0)
         policy_loss = jnp.sum(policy_losses * policy_weights) / policy_normalizer
         entropy_loss = -0.01 * jnp.sum(entropies * policy_weights) / policy_normalizer
         value_loss = jnp.mean(value_losses)
-        return policy_loss + value_loss + entropy_loss
+        outcome_normalizer = jnp.maximum(jnp.sum(outcome_weights), 1.0)
+        outcome_loss = jnp.sum(outcome_losses) / outcome_normalizer
+        return policy_loss + value_loss + entropy_loss + outcome_aux_weight * outcome_loss
 
     loss, grads = eqx.filter_value_and_grad(loss_fn)(network)
     params = eqx.filter(network, eqx.is_inexact_array)
@@ -336,7 +443,23 @@ def train_minibatch_step(network, opt_state, minibatch, optimizer):
 
 def flatten_training_batch(batch):
     """Flatten rollout time/environment axes into one sample axis."""
-    obs, masks, active, actions, old_logprobs, advantages, returns, policy_weights = batch
+    if len(batch) == 8:
+        obs, masks, active, actions, old_logprobs, advantages, returns, policy_weights = batch
+        outcome_targets = jnp.zeros_like(returns, dtype=jnp.int32)
+        outcome_weights = jnp.zeros_like(returns, dtype=jnp.float32)
+    else:
+        (
+            obs,
+            masks,
+            active,
+            actions,
+            old_logprobs,
+            advantages,
+            returns,
+            policy_weights,
+            outcome_targets,
+            outcome_weights,
+        ) = batch
     batch_size = obs.shape[0] * obs.shape[1]
     return (
         obs.reshape(batch_size, *obs.shape[2:]),
@@ -347,10 +470,12 @@ def flatten_training_batch(batch):
         advantages.reshape(batch_size),
         returns.reshape(batch_size),
         policy_weights.reshape(batch_size),
+        outcome_targets.reshape(batch_size),
+        outcome_weights.reshape(batch_size),
     )
 
 
-def train_epoch(network, opt_state, batch, optimizer, key, num_epochs=1, minibatch_size=None):
+def train_epoch(network, opt_state, batch, optimizer, key, num_epochs=1, minibatch_size=None, outcome_aux_weight=0.0):
     """Run adaptive PPO epochs with optional minibatching."""
     flat_batch = flatten_training_batch(batch)
     batch_size = flat_batch[0].shape[0]
@@ -367,7 +492,13 @@ def train_epoch(network, opt_state, batch, optimizer, key, num_epochs=1, minibat
             start = batch_idx * actual_minibatch_size
             end = start + actual_minibatch_size
             minibatch = tuple(x[start:end] for x in shuffled)
-            network, opt_state, loss = train_minibatch_step(network, opt_state, minibatch, optimizer)
+            network, opt_state, loss = train_minibatch_step(
+                network,
+                opt_state,
+                minibatch,
+                optimizer,
+                outcome_aux_weight,
+            )
             epoch_loss += loss
         avg_loss = epoch_loss / num_complete_batches
 
@@ -416,6 +547,8 @@ def parse_args():
     parser.add_argument("--value-min", type=float, default=-1.0)
     parser.add_argument("--value-max", type=float, default=1.0)
     parser.add_argument("--value-sigma", type=float, default=0.04)
+    parser.add_argument("--outcome-aux-weight", type=float, default=0.0)
+    parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="/tmp/generals-adaptive-ppo.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -485,6 +618,8 @@ def parse_args():
             parser.error("--init-value-bins must be greater than 1 for --init-value-loss hl-gauss")
     elif args.init_value_bins is not None:
         parser.error("--init-value-bins requires --init-value-loss hl-gauss")
+    if args.outcome_aux_weight < 0.0:
+        parser.error("--outcome-aux-weight must be non-negative")
     if args.checkpoint_every < 0:
         parser.error("--checkpoint-every cannot be negative")
     if args.keep_checkpoints < 0:
@@ -538,6 +673,8 @@ def main():
             f"hl-gauss bins={args.value_bins} range=[{args.value_min:g},{args.value_max:g}] "
             f"sigma={args.value_sigma:g}"
         )
+    if args.outcome_aux_weight > 0.0:
+        print(f"Outcome aux:   weight={args.outcome_aux_weight:g}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -563,6 +700,8 @@ def main():
         value_min=args.value_min,
         value_max=args.value_max,
         value_sigma=args.value_sigma,
+        outcome_head=args.outcome_aux_weight > 0.0,
+        init_outcome_head=args.init_outcome_head,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
@@ -696,7 +835,23 @@ def main():
         advantages, returns = compute_gae(rewards, values, dones, args.gamma, args.gae_lambda)
         policy_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         policy_weights = top_advantage_weights(policy_advantages, args.top_advantage_fraction)
-        batch = (obs, masks, active, actions, logprobs, policy_advantages, returns, policy_weights)
+        if mixed_learner:
+            learner_players_for_batch = learner_players_for_log
+        else:
+            learner_players_for_batch = jnp.full((args.num_envs,), iteration_learner_player, dtype=jnp.int32)
+        outcome_targets, outcome_weights = rollout_outcome_targets(infos.winner, dones, learner_players_for_batch)
+        batch = (
+            obs,
+            masks,
+            active,
+            actions,
+            logprobs,
+            policy_advantages,
+            returns,
+            policy_weights,
+            outcome_targets,
+            outcome_weights,
+        )
         key, train_key = jrandom.split(key)
         network, opt_state, loss, key = train_epoch(
             network,
@@ -706,6 +861,7 @@ def main():
             train_key,
             args.num_epochs,
             args.minibatch_size,
+            args.outcome_aux_weight,
         )
         jax.block_until_ready(network)
         if ema_network is not None:

@@ -551,9 +551,9 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
 ```
 
 `evaluate_adaptive_policy.py` 输出六行结果：3 个尺寸乘以 2 个座位。`min_win_rate` 是最弱一行的总胜率；draw 不计为 win。当前 adaptive checkpoint 使用 `AdaptivePolicyValueNetwork`，不兼容固定尺寸 GUI、`evaluate_policy.py` 或普通 `PolicyValueNetwork` checkpoint。
-adaptive BC 和 PPO 训练器都支持 `--channels` 指定网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；PPO 训练器还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 在同一 run 内按 iteration 交替训练两个座位；`--learner-player mixed` 会把总 `num_envs` 拆给 player 0 和 player 1，并把两侧轨迹放进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。`--value-loss hl-gauss --value-bins 128 --value-sigma 0.04` 会把 PPO value loss 从 scalar MSE 切换为 HL-Gauss categorical CE；如果 checkpoint 使用 categorical/per-size value head，评估时也要给 `evaluate_adaptive_policy.py` 传匹配的 `--value-heads` 和 value-loss 模板参数。
+adaptive BC 和 PPO 训练器都支持 `--channels` 指定网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；PPO 训练器还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 在同一 run 内按 iteration 交替训练两个座位；`--learner-player mixed` 会把总 `num_envs` 拆给 player 0 和 player 1，并把两侧轨迹放进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。`--value-loss hl-gauss --value-bins 128 --value-sigma 0.04` 会把 PPO value loss 从 scalar MSE 切换为 HL-Gauss categorical CE。`--outcome-aux-weight` 会启用 loss/draw/win 辅助头，只用同一 rollout 内已知结局的 episode segment 做监督；如果 checkpoint 使用 categorical/per-size value head 或 outcome head，评估时也要给 `evaluate_adaptive_policy.py` 传匹配的 `--value-heads`、value-loss 模板参数和 `--outcome-head`。
 
-下一轮 adaptive PPO v3-hlgauss continuation 建议用 GPU 从当前最强候选启动；本地 16GB GPU 已验证 512 envs x 256 steps 会 OOM，先用 256 envs 和 1024 minibatch 做 256 games/row triage：
+下一轮 adaptive PPO v3-outcome continuation 建议用 GPU 从当前最强候选启动；本地 16GB GPU 已验证 512 envs x 256 steps 会 OOM，先用 256 envs 和 1024 minibatch 做 256 games/row triage：
 
 ```bash
 JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -583,12 +583,13 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --init-value-loss mse \
   --value-bins 128 \
   --value-sigma 0.04 \
+  --outcome-aux-weight 0.05 \
   --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
-  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-hlgauss-ckpts \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-outcome-ckpts \
   --checkpoint-every 10 \
   --keep-checkpoints 8 \
-  --model-path /tmp/generals-adaptive-ppo-v3-hlgauss.eqx \
-  --seed 67000
+  --model-path /tmp/generals-adaptive-ppo-v3-outcome.eqx \
+  --seed 68000
 ```
 
 ### 7.8 批量评估 checkpoint

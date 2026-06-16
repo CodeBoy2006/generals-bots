@@ -169,6 +169,7 @@ def parse_args():
     parser.add_argument("--value-min", type=float, default=-1.0)
     parser.add_argument("--value-max", type=float, default=1.0)
     parser.add_argument("--value-sigma", type=float, default=0.04)
+    parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -227,6 +228,7 @@ def main():
         value_min=args.value_min,
         value_max=args.value_max,
         value_sigma=args.value_sigma,
+        outcome_head=args.outcome_head,
     )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -246,6 +248,8 @@ def main():
             f"hl-gauss bins={args.value_bins} range=[{args.value_min:g},{args.value_max:g}] "
             f"sigma={args.value_sigma:g}"
         )
+    if args.outcome_head:
+        print("Outcome:    auxiliary head loaded")
     print()
 
     for grid_size in args.grid_sizes:

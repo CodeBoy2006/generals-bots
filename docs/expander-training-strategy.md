@@ -1914,6 +1914,89 @@ HL-Gauss iter40/final:
 
 Promotion rule remains unchanged: only if the six-row `min_win_rate` clearly beats the current 71.29%/512-row candidate on 256-row triage should retained checkpoints be promoted to 512-row evaluation. If HL-Gauss still does not move the weak 8x8/16x16 rows, the next implementation step should be memory-stack/global-context inputs or finish/draw auxiliary heads, not another pure PPO hyperparameter sweep.
 
+### Adaptive outcome auxiliary head
+
+2026-06-16 新增 `train_adaptive.py --outcome-aux-weight`。它给 `AdaptivePolicyValueNetwork` 加一个 3-class auxiliary head，预测 learner 视角的 `loss/draw/win`。标签不是从未来猜测来的：trainer 对每个 rollout 逆向扫描，只给同一 rollout 内已经出现 terminal/truncated transition 的 episode segment 打标签；rollout 末尾仍未结束的 segment 权重为 0。这样 outcome auxiliary 提供 finish/draw 表征信号，但不改变 PPO reward，也不把未知未来硬塞进训练。
+
+新的 checkpoint 如果带 outcome head，评估时要传 `--outcome-head` 才能按正确 Equinox tree 加载。
+
+下一轮 GPU triage 从当前 71.29% search-distill candidate 启动，保留 HL-Gauss/per-size value，但额外加入 outcome auxiliary：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 256 \
+  --num-iterations 40 \
+  --num-epochs 1 \
+  --minibatch-size 1024 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --value-heads per-size \
+  --init-value-heads shared \
+  --value-loss hl-gauss \
+  --init-value-loss mse \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --outcome-aux-weight 0.05 \
+  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-outcome-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 4 \
+  --model-path /tmp/generals-adaptive-ppo-v3-outcome.eqx \
+  --seed 68000
+```
+
+256 games/row triage command:
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/generals-adaptive-ppo-v3-outcome.eqx \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-games 256 \
+  --max-steps 750 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator generated \
+  --value-heads per-size \
+  --value-loss hl-gauss \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --outcome-head \
+  --json-output /tmp/generals-adaptive-ppo-v3-outcome-eval256.json \
+  --seed 68030
+```
+
+GPU smoke result:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-outcome-smoke.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 64 envs, num_steps=32, num_iterations=2, minibatch_size=512,
+        value_heads=per-size, value_loss=hl-gauss, outcome_aux_weight=0.05
+train log:
+  iter 1: loss=16.3944, episodes=0, wins=0, draws=0, SPS=339
+  iter 2: loss=16.5487, episodes=3, wins=3, draws=0, SPS=16970
+16 games/row evaluator smoke, seed 68010:
+  8p0 56.25%, 8p1 75.00%, 12p0 31.25%, 12p1 50.00%, 16p0 6.25%, 16p1 31.25%
+  min_win_rate = 6.25%
+```
+
+The smoke only verifies that scalar checkpoints can warm-start into an outcome-head model, the CUDA trainer can update/save it, and `evaluate_adaptive_policy.py --outcome-head` can load it. Its 16-row evaluation is intentionally too small and truncated at 300 steps, so it is not a strength result.
+
 ## 评估命令
 
 评估 player 0：

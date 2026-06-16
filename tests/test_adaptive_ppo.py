@@ -159,6 +159,33 @@ def test_adaptive_network_can_expose_hl_gauss_value_logits():
     assert jnp.allclose(legacy_value, value)
 
 
+def test_adaptive_network_can_expose_outcome_auxiliary_logits():
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        outcome_head=True,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    logits, value, value_logits, outcome_logits = network.logits_value_auxiliary(obs_arr, mask, active)
+    legacy_logits, legacy_value = network.logits_value(obs_arr, mask, active)
+
+    assert logits.shape == (8 * 6 * 6 + 1,)
+    assert value_logits is None
+    assert outcome_logits.shape == (3,)
+    assert jnp.isfinite(value)
+    assert jnp.all(jnp.isfinite(outcome_logits))
+    assert jnp.allclose(legacy_logits, logits)
+    assert jnp.allclose(legacy_value, value)
+
+
 def test_load_or_create_adaptive_network_can_warm_start_hl_gauss_from_scalar_checkpoint(tmp_path):
     import equinox as eqx
 
@@ -194,6 +221,39 @@ def test_load_or_create_adaptive_network_can_warm_start_hl_gauss_from_scalar_che
     assert jnp.isfinite(value)
 
 
+def test_load_or_create_adaptive_network_can_warm_start_outcome_head_from_scalar_checkpoint(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
+    model_path = tmp_path / "adaptive-scalar.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=(16, 16, 16, 8),
+        init_channels=(16, 16, 16, 8),
+        outcome_head=True,
+        init_outcome_head=False,
+    )
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    expected_logits, expected_value = source.logits_value(obs_arr, mask, active)
+    actual_logits, actual_value, _, outcome_logits = loaded.logits_value_auxiliary(obs_arr, mask, active)
+
+    assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+    assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+    assert outcome_logits.shape == (3,)
+    assert jnp.all(jnp.isfinite(outcome_logits))
+
+
 def test_ppo_loss_terms_uses_hl_gauss_value_loss_when_available():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
@@ -226,6 +286,42 @@ def test_ppo_loss_terms_uses_hl_gauss_value_loss_when_available():
     assert jnp.isfinite(value_loss)
     assert jnp.isfinite(entropy)
     assert float(value_loss) > 0.0
+
+
+def test_ppo_loss_terms_with_outcome_auxiliary_is_finite():
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.train_adaptive import ppo_loss_terms_with_outcome
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        outcome_head=True,
+    )
+    obs = jnp.zeros((ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
+    mask = jnp.ones((6, 6, 4), dtype=bool)
+    active = jnp.ones((6, 6), dtype=bool)
+    action = jnp.array([1, 0, 0, 0, 0], dtype=jnp.int32)
+
+    policy_loss, value_loss, entropy, outcome_loss = ppo_loss_terms_with_outcome(
+        network,
+        obs,
+        mask,
+        active,
+        action,
+        old_logprob=jnp.asarray(0.0, dtype=jnp.float32),
+        advantage=jnp.asarray(1.0, dtype=jnp.float32),
+        ret=jnp.asarray(0.75, dtype=jnp.float32),
+        outcome_target=jnp.asarray(2, dtype=jnp.int32),
+        outcome_weight=jnp.asarray(1.0, dtype=jnp.float32),
+    )
+
+    assert jnp.isfinite(policy_loss)
+    assert jnp.isfinite(value_loss)
+    assert jnp.isfinite(entropy)
+    assert jnp.isfinite(outcome_loss)
+    assert float(outcome_loss) > 0.0
 
 
 def test_adaptive_network_samples_and_scores_action():
@@ -414,6 +510,45 @@ def test_split_mixed_env_counts_preserves_total_and_balances_seats():
 
     with pytest.raises(ValueError):
         split_mixed_env_counts(1)
+
+
+def test_rollout_outcome_targets_use_next_known_episode_result():
+    from examples._experimental.ppo.train_adaptive import (
+        OUTCOME_DRAW,
+        OUTCOME_LOSS,
+        OUTCOME_WIN,
+        rollout_outcome_targets,
+    )
+
+    winners = jnp.array(
+        [
+            [-1, -1, -1],
+            [0, -1, -1],
+            [-1, -1, 0],
+            [-1, -1, -1],
+        ],
+        dtype=jnp.int32,
+    )
+    dones = jnp.array(
+        [
+            [False, False, False],
+            [True, False, False],
+            [False, True, True],
+            [False, False, False],
+        ]
+    )
+    learner_players = jnp.array([0, 1, 1], dtype=jnp.int32)
+
+    targets, weights = rollout_outcome_targets(winners, dones, learner_players)
+
+    assert targets.shape == winners.shape
+    assert weights.shape == winners.shape
+    assert targets[:, 0].tolist() == [OUTCOME_WIN, OUTCOME_WIN, OUTCOME_LOSS, OUTCOME_LOSS]
+    assert weights[:, 0].tolist() == [1.0, 1.0, 0.0, 0.0]
+    assert targets[:, 1].tolist() == [OUTCOME_DRAW, OUTCOME_DRAW, OUTCOME_DRAW, OUTCOME_LOSS]
+    assert weights[:, 1].tolist() == [1.0, 1.0, 1.0, 0.0]
+    assert targets[:, 2].tolist() == [OUTCOME_LOSS, OUTCOME_LOSS, OUTCOME_LOSS, OUTCOME_LOSS]
+    assert weights[:, 2].tolist() == [1.0, 1.0, 1.0, 0.0]
 
 
 def test_collect_mixed_rollout_combines_both_learner_seats():
@@ -896,6 +1031,8 @@ def test_train_adaptive_cli_smoke(tmp_path):
         "8",
         "--value-sigma",
         "0.2",
+        "--outcome-aux-weight",
+        "0.1",
         "--checkpoint-dir",
         str(checkpoint_dir),
         "--checkpoint-every",
@@ -1016,6 +1153,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
             value_head_sizes=(4, 6),
             value_bins=8,
             value_sigma=0.2,
+            outcome_head=True,
         ),
     )
     env = os.environ.copy()
@@ -1042,6 +1180,7 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         "8",
         "--value-sigma",
         "0.2",
+        "--outcome-head",
         "--json-output",
         str(output_path),
         "--seed",

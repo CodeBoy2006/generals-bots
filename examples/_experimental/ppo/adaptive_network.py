@@ -85,6 +85,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_linear1: eqx.nn.Linear
     value_linear2: eqx.nn.Linear
     categorical_value_linear2: eqx.nn.Linear | None
+    outcome_linear2: eqx.nn.Linear | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
     size_value_linear2: tuple[eqx.nn.Linear, ...]
     size_categorical_value_linear2: tuple[eqx.nn.Linear, ...]
@@ -94,6 +95,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_min: float = eqx.field(static=True)
     value_max: float = eqx.field(static=True)
     value_sigma: float = eqx.field(static=True)
+    outcome_head: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -106,17 +108,20 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         value_min: float = -1.0,
         value_max: float = 1.0,
         value_sigma: float = 0.04,
+        outcome_head: bool = False,
     ):
         parsed_value_head_sizes = tuple(value_head_sizes or ())
         parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
-        keys = jrandom.split(key, 8 + 2 * len(parsed_value_head_sizes) + categorical_keys)
+        outcome_keys = 1 if outcome_head else 0
+        keys = jrandom.split(key, 8 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys)
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
         self.value_bins = parsed_value_bins
         self.value_min = value_min
         self.value_max = value_max
         self.value_sigma = value_sigma
+        self.outcome_head = bool(outcome_head)
         self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
         self.conv3 = eqx.nn.Conv2d(channels[1], channels[2], kernel_size=3, padding=1, key=keys[2])
@@ -141,6 +146,8 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             for index, _ in enumerate(parsed_value_head_sizes)
             if parsed_value_bins > 0
         )
+        outcome_offset = categorical_offset + categorical_keys
+        self.outcome_linear2 = eqx.nn.Linear(64, 3, key=keys[outcome_offset]) if outcome_head else None
 
     def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.conv1(obs))
@@ -166,6 +173,12 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             raise ValueError("categorical value head is not configured")
         value_hidden = jax.nn.relu(self.value_linear1(pooled))
         return self.categorical_value_linear2(value_hidden)
+
+    def _outcome_logits(self, pooled: jnp.ndarray) -> jnp.ndarray | None:
+        if self.outcome_linear2 is None:
+            return None
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        return self.outcome_linear2(value_hidden)
 
     def _size_value(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
         if not self.value_head_sizes:
@@ -218,6 +231,16 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         active: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None]:
         """Compute policy logits, scalar value, and optional categorical value logits."""
+        logits, value, value_logits, _ = self.logits_value_auxiliary(obs, mask, active)
+        return logits, value, value_logits
+
+    def logits_value_auxiliary(
+        self,
+        obs: jnp.ndarray,
+        mask: jnp.ndarray,
+        active: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
+        """Compute policy/value outputs plus optional auxiliary outcome logits."""
         x = self._features(obs)
         pooled = self._masked_pool(x, active)
 
@@ -228,8 +251,9 @@ class AdaptivePolicyValueNetwork(eqx.Module):
 
         pass_logit = self.pass_linear(pooled)
         value, value_logits = self._value_distribution(pooled, active)
+        outcome_logits = self._outcome_logits(pooled)
         logits = jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
-        return logits, value, value_logits
+        return logits, value, value_logits, outcome_logits
 
     def __call__(
         self,
@@ -273,6 +297,8 @@ def load_or_create_adaptive_network(
     init_value_min: float | None = None,
     init_value_max: float | None = None,
     init_value_sigma: float | None = None,
+    outcome_head: bool = False,
+    init_outcome_head: bool | None = None,
 ) -> AdaptivePolicyValueNetwork:
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
     parsed_channels = parse_policy_channels(channels)
@@ -288,6 +314,7 @@ def load_or_create_adaptive_network(
         value_min=value_min,
         value_max=value_max,
         value_sigma=value_sigma,
+        outcome_head=outcome_head,
     )
     if init_model_path is None:
         return network
@@ -310,6 +337,7 @@ def load_or_create_adaptive_network(
         parsed_init_value_max,
         parsed_init_value_sigma,
     )
+    parsed_init_outcome_head = outcome_head if init_outcome_head is None else bool(init_outcome_head)
     needs_expansion = (
         parsed_init_channels != parsed_channels
         or parsed_init_value_head_sizes != parsed_value_head_sizes
@@ -317,6 +345,7 @@ def load_or_create_adaptive_network(
         or parsed_init_value_min != value_min
         or parsed_init_value_max != value_max
         or parsed_init_value_sigma != value_sigma
+        or parsed_init_outcome_head != outcome_head
     )
     if needs_expansion:
         source_network = AdaptivePolicyValueNetwork(
@@ -329,6 +358,7 @@ def load_or_create_adaptive_network(
             value_min=parsed_init_value_min,
             value_max=parsed_init_value_max,
             value_sigma=parsed_init_value_sigma,
+            outcome_head=parsed_init_outcome_head,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
         return expand_adaptive_network_channels(network, source_network)
@@ -506,5 +536,11 @@ def expand_adaptive_network_channels(
             lambda net: net.size_categorical_value_linear2,
             target,
             tuple(target_size_categorical_linear2),
+        )
+    if target.outcome_linear2 is not None and source.outcome_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.outcome_linear2,
+            target,
+            _copy_linear_prefix(target.outcome_linear2, source.outcome_linear2),
         )
     return target

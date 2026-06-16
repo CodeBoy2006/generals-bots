@@ -483,3 +483,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the v3-hlgauss checkpoints; implement a representation/auxiliary-target change next, such as memory stack/global context, finish/draw auxiliary heads, or search-to-Q/intent distillation.
 - **Context:** The 40-iteration CUDA run saved `/tmp/generals-adaptive-ppo-v3-hlgauss.eqx` and iter 10/20/30/40 checkpoints. Best 256 games/row result was iter 30 at `min_win_rate = 69.92%`, only slightly above the same-seed scalar base at 69.14% and below the prior 71.29%/512-row candidate. Verification passed with focused adaptive tests (`32 passed`), compileall, `git diff --check`, and full CPU pytest (`175 passed`).
+
+## [2026-06-16 22:13] Adaptive Outcome Auxiliary Head
+- **Changes:** Added an optional loss/draw/win outcome auxiliary head to `AdaptivePolicyValueNetwork`, rollout-local outcome target assignment, masked auxiliary CE in adaptive PPO, train/eval CLI flags, tests, docs, and a design spec.
+- **Status:** Completed
+- **Next Steps:** Run the 256-env v3-outcome GPU triage from the 71.29% search-distill checkpoint and compare final/retained checkpoints with 256 games/row before any promotion.
+- **Context:** Verification passed with focused adaptive tests (`36 passed`), compileall, `git diff --check`, full CPU pytest (`179 passed`), and a CUDA smoke that trained `/tmp/generals-adaptive-ppo-v3-outcome-smoke.eqx` then loaded it with `evaluate_adaptive_policy.py --outcome-head`. The smoke evaluation used only 16 games/row at 300 steps and is not a strength result.
