@@ -459,3 +459,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop tuning the current search-CE family; next direction should be outcome/finish/draw auxiliary learning or an adaptive rollout-search evaluator to estimate teacher upper bound across 8/12/16.
 - **Context:** Mixed v1 reached 71.88% min over 256 games/row at iter 10 but fell to 68.95% over 512 games/row. Mixed v2 reached only 71.09% over 256 games/row. The best candidate remains `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx` at 71.29% over 512 games/row.
+
+## [2026-06-16 21:21] Adaptive PPO V3-Noarch Controls
+- **Changes:** Added adaptive PPO controls for `--reward-mode terminal`, configurable `--gamma`/`--gae-lambda`, top-advantage policy filtering, EMA parameter tracking/saving, and updated README/manual/training strategy docs. Preserved existing mixed-seat and per-size value-head work.
+- **Status:** Completed
+- **Next Steps:** Run the full GPU v3-noarch continuation from the 71.29% search-distill candidate for 80 iterations, then evaluate retained EMA checkpoints at 256 games/row before any 512-row promotion.
+- **Context:** Verification passed with `tests/test_adaptive_ppo.py` (28 passed), `compileall`, `git diff --check`, and full CPU pytest (171 passed). CUDA smoke used `CudaDevice(id=0)` and produced `/tmp/generals-adaptive-ppo-v3-noarch-gpu-smoke.eqx`; 64 games/row eval had `min_win_rate = 67.19%`, which validates the GPU/EMA/evaluator path but is too small to judge model strength.

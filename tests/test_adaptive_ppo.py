@@ -167,6 +167,38 @@ def test_load_or_create_adaptive_network_expands_channels_without_changing_outpu
     assert jnp.allclose(expanded.policy_conv.weight[:, source_channels[3] :], 0.0)
 
 
+def test_load_or_create_adaptive_network_copies_shared_value_into_per_size_heads(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
+    model_path = tmp_path / "adaptive-shared-value.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=(16, 16, 16, 8),
+        init_channels=(16, 16, 16, 8),
+        value_head_sizes=(4, 6),
+        init_value_head_sizes=(),
+    )
+
+    for size in (4, 6):
+        state = make_padded_state(size=size, pad_to=6)
+        obs = game.get_observation(state, 0)
+        obs_arr, active = adaptive_obs_to_array(obs, effective_size=size, pad_size=6)
+        mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, size, pad_size=6)
+        expected_logits, expected_value = source.logits_value(obs_arr, mask, active)
+        actual_logits, actual_value = loaded.logits_value(obs_arr, mask, active)
+
+        assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+        assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+
+
 def test_make_adaptive_state_pool_balances_sizes():
     from examples._experimental.ppo.adaptive_common import make_adaptive_state_pool
 
@@ -215,6 +247,110 @@ def test_apply_truncation_reward_penalizes_only_truncated_rows():
 
     assert jnp.allclose(shaped, jnp.array([0.5, 0.5, -0.75], dtype=jnp.float32))
     assert jnp.allclose(apply_truncation_reward(rewards, truncated, 0.0), rewards)
+
+
+def test_apply_reward_mode_can_disable_dense_composite_rewards():
+    from examples._experimental.ppo.train_adaptive import REWARD_MODE_NAME_TO_ID, apply_reward_mode
+
+    dense = jnp.array([0.25, -0.5, 1.0], dtype=jnp.float32)
+
+    assert jnp.allclose(apply_reward_mode(dense, REWARD_MODE_NAME_TO_ID["composite"]), dense)
+    assert jnp.allclose(apply_reward_mode(dense, REWARD_MODE_NAME_TO_ID["terminal"]), jnp.zeros_like(dense))
+
+
+def test_top_advantage_weights_selects_highest_fraction():
+    from examples._experimental.ppo.train_adaptive import top_advantage_weights
+
+    advantages = jnp.array([-2.0, 0.5, 3.0, 1.0, -0.25, 2.0], dtype=jnp.float32)
+
+    weights = top_advantage_weights(advantages, 0.25)
+
+    assert weights.dtype == jnp.float32
+    assert jnp.allclose(weights, jnp.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0], dtype=jnp.float32))
+    assert jnp.allclose(top_advantage_weights(advantages, 1.0), jnp.ones_like(advantages))
+
+
+def test_update_ema_network_averages_trainable_arrays():
+    import jax.tree_util as jtu
+
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.train_adaptive import update_ema_network
+
+    ema_source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
+    current = AdaptivePolicyValueNetwork(jrandom.PRNGKey(1), pad_size=6, channels=(16, 16, 16, 8))
+
+    updated = update_ema_network(ema_source, current, 0.25)
+
+    source_arrays = jtu.tree_leaves(jax.tree.map(lambda x: x, ema_source, is_leaf=lambda x: isinstance(x, jnp.ndarray)))
+    current_arrays = jtu.tree_leaves(jax.tree.map(lambda x: x, current, is_leaf=lambda x: isinstance(x, jnp.ndarray)))
+    updated_arrays = jtu.tree_leaves(jax.tree.map(lambda x: x, updated, is_leaf=lambda x: isinstance(x, jnp.ndarray)))
+
+    for before, now, actual in zip(source_arrays, current_arrays, updated_arrays, strict=True):
+        if isinstance(before, jnp.ndarray) and jnp.issubdtype(before.dtype, jnp.inexact):
+            assert jnp.allclose(actual, before * 0.25 + now * 0.75)
+
+
+def test_split_mixed_env_counts_preserves_total_and_balances_seats():
+    import pytest
+
+    from examples._experimental.ppo.train_adaptive import split_mixed_env_counts
+
+    assert split_mixed_env_counts(2) == (1, 1)
+    assert split_mixed_env_counts(5) == (2, 3)
+
+    with pytest.raises(ValueError):
+        split_mixed_env_counts(1)
+
+
+def test_collect_mixed_rollout_combines_both_learner_seats():
+    from examples._experimental.ppo.adaptive_common import make_adaptive_initial_states, make_adaptive_state_pool
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.common import OPPONENT_NAME_TO_ID
+    from examples._experimental.ppo.train_adaptive import REWARD_MODE_NAME_TO_ID, collect_mixed_rollout
+
+    pad_size = 6
+    pool = make_adaptive_state_pool(
+        jrandom.PRNGKey(0),
+        pool_size=4,
+        grid_sizes=(4, 6),
+        pad_size=pad_size,
+        map_generator="simple",
+        mountain_density_range=(0.0, 0.0),
+        num_cities_range=(2, 2),
+        max_generals_distance=None,
+        castle_val_range=(10, 11),
+    )
+    states_p0, sizes_p0 = make_adaptive_initial_states(pool, 1)
+    states_p1, sizes_p1 = make_adaptive_initial_states(pool, 1)
+    network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(1), pad_size=pad_size, channels=(16, 16, 16, 8))
+
+    _, _, _, _, batch, _ = collect_mixed_rollout(
+        states_p0,
+        sizes_p0,
+        states_p1,
+        sizes_p1,
+        pool,
+        network,
+        jrandom.PRNGKey(2),
+        num_steps=1,
+        truncation=20,
+        opponent_id=OPPONENT_NAME_TO_ID["random"],
+        reward_mode_id=REWARD_MODE_NAME_TO_ID["composite"],
+        terminal_reward_scale=0.0,
+        truncation_reward_scale=0.0,
+        pad_size=pad_size,
+    )
+
+    obs, masks, active, actions, logprobs, values, rewards, dones, infos = batch
+    assert obs.shape[:2] == (1, 2)
+    assert masks.shape == (1, 2, pad_size, pad_size, 4)
+    assert active.shape == (1, 2, pad_size, pad_size)
+    assert actions.shape == (1, 2, 5)
+    assert logprobs.shape == (1, 2)
+    assert values.shape == (1, 2)
+    assert rewards.shape == (1, 2)
+    assert dones.shape == (1, 2)
+    assert infos.winner.shape == (1, 2)
 
 
 def test_adaptive_expander_target_probs_has_single_pass_slot():
@@ -606,8 +742,19 @@ def test_train_adaptive_cli_smoke(tmp_path):
         "2",
         "--truncation-reward-scale",
         "0.25",
+        "--reward-mode",
+        "terminal",
+        "--gamma",
+        "1.0",
+        "--gae-lambda",
+        "0.9",
+        "--top-advantage-fraction",
+        "0.5",
+        "--ema-decay",
+        "0.5",
+        "--eval-ema",
         "--learner-player",
-        "alternate",
+        "mixed",
         "--channels",
         "16,16,16,8",
         "--init-channels",

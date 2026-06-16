@@ -523,7 +523,7 @@ uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
-  --learner-player alternate \
+  --learner-player mixed \
   --terminal-reward-scale 1.0 \
   --truncation-reward-scale 0.5 \
   --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
@@ -551,7 +551,39 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
 ```
 
 `evaluate_adaptive_policy.py` 输出六行结果：3 个尺寸乘以 2 个座位。`min_win_rate` 是最弱一行的总胜率；draw 不计为 win。当前 adaptive checkpoint 使用 `AdaptivePolicyValueNetwork`，不兼容固定尺寸 GUI、`evaluate_policy.py` 或普通 `PolicyValueNetwork` checkpoint。
-adaptive BC 和 PPO 训练器都支持 `--channels` 指定网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；PPO 训练器还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start，`--learner-player alternate` 在同一 run 内按 iteration 交替训练两个座位，`--truncation-reward-scale` 对非终局截断加入负奖励，避免模型用大量 draw 维持表面稳定。
+adaptive BC 和 PPO 训练器都支持 `--channels` 指定网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；PPO 训练器还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 在同一 run 内按 iteration 交替训练两个座位；`--learner-player mixed` 会把总 `num_envs` 拆给 player 0 和 player 1，并把两侧轨迹放进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。
+
+下一轮 adaptive PPO v3-noarch continuation 建议用 GPU 从当前最强候选启动：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 512 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 256 \
+  --num-iterations 80 \
+  --num-epochs 1 \
+  --minibatch-size 4096 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-noarch-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 8 \
+  --model-path /tmp/generals-adaptive-ppo-v3-noarch.eqx \
+  --seed 66016
+```
 
 ### 7.8 批量评估 checkpoint
 

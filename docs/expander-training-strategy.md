@@ -1256,7 +1256,7 @@ uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
-  --learner-player alternate \
+  --learner-player mixed \
   --terminal-reward-scale 1.0 \
   --truncation-reward-scale 0.5 \
   --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
@@ -1284,7 +1284,7 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
   --seed 47200
 ```
 
-当前状态：adaptive 训练、BC、PPO 和评估基础设施已可运行并有 CPU smoke coverage。CUDA PPO 已把当前 best checkpoint 推到 70.31% 的六行最小胜率，但还没有任何 checkpoint 证明六个 size-seat pair 都超过 90%。后续训练应继续用 `--checkpoint-every` 保存 PPO 候选，并优先评估中间 checkpoint 的 `min_win_rate`，避免只看训练 rollout 胜率。
+当前状态：adaptive 训练、BC、PPO 和评估基础设施已可运行并有 CPU smoke coverage。CUDA PPO 已把当前 best checkpoint 推到 70.31% 的六行最小胜率，后续 search-distill 候选把 512-row minimum 小幅推到 71.29%，但还没有任何 checkpoint 证明六个 size-seat pair 都超过 90%。后续训练应继续用 `--checkpoint-every` 保存 PPO 候选，并优先评估中间 checkpoint 的 `min_win_rate`，避免只看训练 rollout 胜率。
 
 ### CPU medium baseline
 
@@ -1429,6 +1429,7 @@ Negative follow-ups:
 
 - `--grid-size-weights 8:1.5,12:1,16:2`：在 adaptive reset pool 中按权重分配有效尺寸，避免困难的 16x16 样本不足。
 - `--learner-player alternate`：按 training iteration 在 player 0 和 player 1 之间交替 learner seat，降低单座位 fine-tune 造成的遗忘。
+- `--learner-player mixed`：把总 `num_envs` 拆成 player 0 和 player 1 两半，分别收集 learner 轨迹后在同一个 PPO batch 中拼接更新，避免 iteration 级交替带来的座位跷跷板。
 - `--truncation-reward-scale 0.5`：对达到 truncation 且非 decisive terminal 的 transition 给 learner 负奖励，直接压低 16x16 高 draw 率。
 
 下一条建议从当前 best checkpoint 继续：
@@ -1447,7 +1448,7 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
-  --learner-player alternate \
+  --learner-player mixed \
   --terminal-reward-scale 1.0 \
   --truncation-reward-scale 0.5 \
   --init-model-path /tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx \
@@ -1652,6 +1653,71 @@ active soft + improvement extra, extra_weight=0.005, min_margin=0.2:
 ```
 
 结论更新：额外 improvement CE 没有解决 16x16 draw/finish bottleneck，还会使 8p1 或 16p1 在更大样本下掉队。继续在同一 search-CE family 内调权重的价值很低；下一步应改成 outcome/finish 辅助信号，或直接让 adaptive rollout-search evaluator 证明 search teacher 在 8/12/16 上是否有足够上限。
+
+### Adaptive PPO v3-noarch controls
+
+2026-06-16 新增 `train_adaptive.py` 的 v3-noarch 训练控制项：
+
+- `--reward-mode terminal`：关闭 dense `composite_reward_fn`，只保留 decisive terminal win/loss reward，避免继续强化局部 material/path 代理目标。
+- `--gamma` 和 `--gae-lambda`：允许从旧的 `0.99/0.95` 切到更长时序的 `1.0/0.9`。
+- `--top-advantage-fraction`：每个 PPO batch 只用最高 advantage 分位的 transition 更新 policy/entropy，value loss 仍使用完整 batch。
+- `--ema-decay` 和 `--eval-ema`：维护参数 EMA；开启 `--eval-ema` 时 periodic checkpoint 和 final model 保存 EMA 参数，便于直接用现有 evaluator 比较 EMA。
+
+下一条 GPU continuation 从当前最强的 71.29%/512-row search-distill candidate 启动，先看 256 games/row triage，再决定是否 promotion 到 512-row：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 512 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 256 \
+  --num-iterations 80 \
+  --num-epochs 1 \
+  --minibatch-size 4096 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-noarch-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 8 \
+  --model-path /tmp/generals-adaptive-ppo-v3-noarch.eqx \
+  --seed 66016
+```
+
+如果 v3-noarch 仍不能把 512-row minimum 明显推过 75%，下一步不应再调 learning rate 或 search CE 权重，而应实现 HL-Gauss by-size value head 或 memory-stack adaptive network。
+
+GPU smoke result:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-noarch-gpu-smoke.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 128 envs, num_steps=64, num_iterations=5, reward_mode=terminal, gamma=1.0, gae_lambda=0.9,
+        top_advantage_fraction=0.25, ema_decay=0.999, eval_ema, learner_player=mixed
+train log:
+  iter 1: loss=-0.8462, episodes=6, wins=6, draws=0, SPS=1595
+  iter 5: loss=-0.6967, episodes=23, wins=16, draws=0, SPS=58571
+64 games/row eval:
+  8x8 p0: 49/15/0, win rate 76.56%
+  8x8 p1: 51/13/0, win rate 79.69%
+  12x12 p0: 48/14/2, win rate 75.00%
+  12x12 p1: 48/15/1, win rate 75.00%
+  16x16 p0: 48/7/9, win rate 75.00%
+  16x16 p1: 43/6/15, win rate 67.19%
+  min_win_rate = 67.19%
+```
+
+结论：GPU v3-noarch smoke 证明 CUDA training、EMA checkpoint 保存和 evaluator 加载链路可用；5 iteration/64-row 样本太小，不能作为棋力结论。下一步要跑上面的 80-iteration GPU continuation，并用 256 games/row triage 判断是否值得升到 512-row。
 
 ## 评估命令
 
