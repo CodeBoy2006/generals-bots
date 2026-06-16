@@ -11,6 +11,7 @@ from pathlib import Path
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import jax.random as jrandom
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -27,12 +28,16 @@ from common import (
     POLICY_MODE_NAME_TO_ID,
     POLICY_MODE_NAMES,
     make_grids,
+    opponent_action,
     policy_input_default_channels,
+    policy_state_action,
 )
 from evaluate_policy import evaluate_batch, evaluate_policy_opponent_batch, summarize_policy_results
 from generals.agents.ppo_policy_agent import parse_policy_channels
 from generals.core import game
 from network import PolicyValueNetwork
+from search_policy import rollout_search_action
+from train import random_action
 
 REQUIRED_HEURISTIC_OPPONENTS = tuple(HEURISTIC_NAMES)
 
@@ -229,6 +234,214 @@ def evaluate_checkpoint_rows(args, network, states, key, checkpoint_specs):
     return rows
 
 
+@eqx.filter_jit
+def evaluate_search_heuristic_batch(
+    network,
+    states,
+    key,
+    max_steps,
+    search_player,
+    opponent_id,
+    opponent_policy_mode,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    army_weight,
+    land_weight,
+    prior_weight,
+):
+    """Evaluate rollout-search policy against one random/heuristic opponent."""
+    num_envs = states.armies.shape[0]
+
+    def body(carry, _):
+        states, key = carry
+        key, search_key, opponent_key = jrandom.split(key, 3)
+        search_keys = jrandom.split(search_key, num_envs)
+        opponent_keys = jrandom.split(opponent_key, num_envs)
+        search_actions = jax.vmap(
+            lambda state, action_key: rollout_search_action(
+                network,
+                state,
+                action_key,
+                search_player,
+                top_k,
+                rollout_steps,
+                rollouts_per_action,
+                opponent_policy_mode,
+                army_weight,
+                land_weight,
+                prior_weight,
+            )
+        )(states, search_keys)
+
+        opponent_player = 1 - search_player
+        opponent_obs = jax.vmap(lambda state: game.get_observation(state, opponent_player))(states)
+        opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
+            opponent_keys,
+            opponent_obs,
+        )
+        actions = jax.lax.cond(
+            search_player == 0,
+            lambda _: jnp.stack([search_actions, opponent_actions], axis=1),
+            lambda _: jnp.stack([opponent_actions, search_actions], axis=1),
+            None,
+        )
+
+        next_states, infos = jax.vmap(game.step)(states, actions)
+        already_done = jax.vmap(game.get_info)(states).is_done
+        final_states = jax.tree.map(
+            lambda old, new: jnp.where(already_done.reshape(num_envs, *([1] * (old.ndim - 1))), old, new),
+            states,
+            next_states,
+        )
+        return (final_states, key), infos
+
+    (states, key), _ = jax.lax.scan(body, (states, key), None, length=max_steps)
+    return jax.vmap(game.get_info)(states)
+
+
+@eqx.filter_jit
+def evaluate_search_policy_opponent_batch(
+    network,
+    opponent_network,
+    states,
+    key,
+    max_steps,
+    search_player,
+    opponent_policy_mode,
+    opponent_policy_input,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    army_weight,
+    land_weight,
+    prior_weight,
+):
+    """Evaluate rollout-search policy against one frozen ordinary policy opponent."""
+    num_envs = states.armies.shape[0]
+
+    def body(carry, _):
+        states, key = carry
+        key, search_key, opponent_key = jrandom.split(key, 3)
+        search_keys = jrandom.split(search_key, num_envs)
+        opponent_keys = jrandom.split(opponent_key, num_envs)
+        search_actions = jax.vmap(
+            lambda state, action_key: rollout_search_action(
+                network,
+                state,
+                action_key,
+                search_player,
+                top_k,
+                rollout_steps,
+                rollouts_per_action,
+                opponent_policy_mode,
+                army_weight,
+                land_weight,
+                prior_weight,
+            )
+        )(states, search_keys)
+
+        opponent_player = 1 - search_player
+        opponent_obs = jax.vmap(lambda state: game.get_observation(state, opponent_player))(states)
+        opponent_actions = jax.vmap(
+            lambda state, action_key, obs: policy_state_action(
+                opponent_network,
+                action_key,
+                state,
+                obs,
+                opponent_player,
+                opponent_policy_mode,
+                opponent_policy_input,
+            )
+        )(
+            states,
+            opponent_keys,
+            opponent_obs,
+        )
+        actions = jax.lax.cond(
+            search_player == 0,
+            lambda _: jnp.stack([search_actions, opponent_actions], axis=1),
+            lambda _: jnp.stack([opponent_actions, search_actions], axis=1),
+            None,
+        )
+
+        next_states, infos = jax.vmap(game.step)(states, actions)
+        already_done = jax.vmap(game.get_info)(states).is_done
+        final_states = jax.tree.map(
+            lambda old, new: jnp.where(already_done.reshape(num_envs, *([1] * (old.ndim - 1))), old, new),
+            states,
+            next_states,
+        )
+        return (final_states, key), infos
+
+    (states, key), _ = jax.lax.scan(body, (states, key), None, length=max_steps)
+    return jax.vmap(game.get_info)(states)
+
+
+def evaluate_search_heuristic_rows(args, network, states, key):
+    """Evaluate rollout-search policy against configured heuristic opponents."""
+    rows = []
+    opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
+    for opponent_name in args.heuristic:
+        required = opponent_name in REQUIRED_HEURISTIC_OPPONENTS
+        for policy_player in (0, 1):
+            key, eval_key = jrandom.split(key)
+            info = evaluate_search_heuristic_batch(
+                network,
+                states,
+                eval_key,
+                args.max_steps,
+                policy_player,
+                OPPONENT_NAME_TO_ID[opponent_name],
+                opponent_policy_mode,
+                args.top_k,
+                args.rollout_steps,
+                args.rollouts_per_action,
+                args.army_weight,
+                args.land_weight,
+                args.prior_weight,
+            )
+            jax.block_until_ready(info.winner)
+            rows.append(row_from_info("heuristic", opponent_name, policy_player, info, args.num_games, required))
+    return rows
+
+
+def evaluate_search_checkpoint_rows(args, network, states, key, checkpoint_specs):
+    """Evaluate rollout-search policy against configured frozen checkpoint opponents."""
+    rows = []
+    opponent_policy_input = POLICY_INPUT_NAME_TO_ID["observation"]
+    for index, (opponent_name, opponent_path, opponent_mode_name) in enumerate(checkpoint_specs):
+        opponent_network = load_policy_network(
+            opponent_path,
+            jrandom.fold_in(key, 1000 + index),
+            args.grid_size,
+            args.opponent_channels,
+            args.opponent_input_channels,
+        )
+        opponent_mode = POLICY_MODE_NAME_TO_ID[opponent_mode_name]
+        for policy_player in (0, 1):
+            key, eval_key = jrandom.split(key)
+            info = evaluate_search_policy_opponent_batch(
+                network,
+                opponent_network,
+                states,
+                eval_key,
+                args.max_steps,
+                policy_player,
+                opponent_mode,
+                opponent_policy_input,
+                args.top_k,
+                args.rollout_steps,
+                args.rollouts_per_action,
+                args.army_weight,
+                args.land_weight,
+                args.prior_weight,
+            )
+            jax.block_until_ready(info.winner)
+            rows.append(row_from_info("checkpoint", opponent_name, policy_player, info, args.num_games, True))
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a checkpoint against a policy league.")
     parser.add_argument("candidate_path")
@@ -241,6 +454,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--policy-input", choices=POLICY_INPUT_NAMES, default="observation")
+    parser.add_argument("--search-policy", action="store_true", help="Evaluate rollout-search actions around the checkpoint.")
+    parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--top-k", type=int, default=4)
+    parser.add_argument("--rollout-steps", type=int, default=16)
+    parser.add_argument("--rollouts-per-action", type=int, default=4)
+    parser.add_argument("--army-weight", type=float, default=12.0)
+    parser.add_argument("--land-weight", type=float, default=8.0)
+    parser.add_argument("--prior-weight", type=float, default=0.01)
     parser.add_argument(
         "--channels",
         default=None,
@@ -275,6 +496,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--num-games must be positive")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    if args.top_k <= 0:
+        parser.error("--top-k must be positive")
+    if args.rollout_steps <= 0:
+        parser.error("--rollout-steps must be positive")
+    if args.rollouts_per_action <= 0:
+        parser.error("--rollouts-per-action must be positive")
     try:
         args.channels = parse_policy_channels(args.channels)
         args.opponent_channels = parse_policy_channels(args.opponent_channels or args.channels)
@@ -298,11 +525,18 @@ def main() -> None:
     )
     states = make_eval_states(args, map_key)
     t0 = time.time()
-    rows = evaluate_heuristic_rows(args, network, states, key)
-    rows.extend(evaluate_checkpoint_rows(args, network, states, key, checkpoint_specs))
+    if args.search_policy:
+        rows = evaluate_search_heuristic_rows(args, network, states, key)
+        rows.extend(evaluate_search_checkpoint_rows(args, network, states, key, checkpoint_specs))
+        policy_kind = "rollout-search"
+    else:
+        rows = evaluate_heuristic_rows(args, network, states, key)
+        rows.extend(evaluate_checkpoint_rows(args, network, states, key, checkpoint_specs))
+        policy_kind = "checkpoint"
     summary = compute_league_summary(rows, args.threshold)
     result = {
         "candidate_path": args.candidate_path,
+        "policy_kind": policy_kind,
         "threshold": args.threshold,
         "elapsed_seconds": time.time() - t0,
         "rows": [row_to_dict(row, args.threshold) for row in rows],

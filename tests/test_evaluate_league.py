@@ -83,3 +83,44 @@ def test_evaluate_league_cli_writes_heuristic_rows(tmp_path):
     assert data["summary"]["required_pairs"] == 2
     assert len(data["rows"]) == 2
     assert {row["policy_player"] for row in data["rows"]} == {0, 1}
+
+
+def test_evaluate_league_cli_writes_search_heuristic_rows(tmp_path):
+    model_path = tmp_path / "policy.eqx"
+    output_path = tmp_path / "search-league.json"
+    network = PolicyValueNetwork(jrandom.PRNGKey(0), grid_size=8)
+    eqx.tree_serialise_leaves(model_path, network)
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/evaluate_league.py",
+        str(model_path),
+        "--search-policy",
+        "--heuristic",
+        "expander",
+        "--num-games",
+        "2",
+        "--max-steps",
+        "4",
+        "--grid-size",
+        "8",
+        "--map-generator",
+        "simple",
+        "--top-k",
+        "2",
+        "--rollout-steps",
+        "2",
+        "--rollouts-per-action",
+        "1",
+        "--json-output",
+        str(output_path),
+    ]
+    completed = subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+    data = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert "rollout-search" in completed.stdout
+    assert data["policy_kind"] == "rollout-search"
+    assert data["summary"]["required_pairs"] == 2
+    assert len(data["rows"]) == 2
