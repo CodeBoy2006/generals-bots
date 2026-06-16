@@ -1618,6 +1618,23 @@ low-lr alternate PPO follow-up from p1 r8 iter40:
 
 结论更新：简单连续换座位 distillation、单纯加长 rollout search budget、以及常规 alternate PPO follow-up 都会重新引入 size/seat tradeoff。当前最好的 adaptive 候选仍是 p1 r8 iter40 的 512-row `71.29%` minimum。下一步更应该改训练目标本身，例如只训练高置信 search 改进样本、加入 draw/finish auxiliary target，或做双座位同批 KL/CE，避免单座位更新把另一个座位压下去。
 
+随后新增 `--soft-weight-mode active|improvement`，让 soft target 可以只对 margin-selected search improvements 赋权，而不是对所有 active 样本赋权。两组 high-confidence p1 probe 没有超过 active-soft p1 r8 iter40：
+
+```text
+improvement mode, min_margin=1, margin_scale=4:
+  /tmp/generals-adaptive-search-distill-p1-improve-v1-ckpts/...-iter-000010.eqx: 256-row min = 64.45%
+  /tmp/generals-adaptive-search-distill-p1-improve-v1-ckpts/...-iter-000020.eqx: 256-row min = 69.14%
+  /tmp/generals-adaptive-search-distill-p1-improve-v1-ckpts/...-iter-000030.eqx: 256-row min = 67.58%
+  /tmp/generals-adaptive-search-distill-p1-improve-v1-ckpts/...-iter-000040.eqx: 256-row min = 71.09%
+
+improvement mode, min_margin=0.2, margin_scale=1:
+  /tmp/generals-adaptive-search-distill-p1-improve-v2-m02-ckpts/...-iter-000010.eqx: 256-row min = 69.92%
+  /tmp/generals-adaptive-search-distill-p1-improve-v2-m02-ckpts/...-iter-000020.eqx: 256-row min = 66.80%
+  /tmp/generals-adaptive-search-distill-p1-improve-v2-m02-ckpts/...-iter-000030.eqx: 256-row min = 69.14%
+```
+
+结论更新：纯 improvement-only weighting 选择样本太少，且会放大不稳定 seat/size 迁移；它不是 active-soft 目标的直接替代。更合理的下一步是混合目标：保留 all-active soft/KL 稳定项，同时给 high-margin improvement 样本增加额外 loss，或者直接预测 finish/draw/Q-value 辅助目标。
+
 ## 评估命令
 
 评估 player 0：

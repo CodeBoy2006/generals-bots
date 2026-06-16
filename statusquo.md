@@ -441,3 +441,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a high-confidence adaptive distillation probe with `--soft-weight-mode improvement`, tuned `--min-margin`, and retained checkpoints.
 - **Context:** Verified with `tests/test_adaptive_ppo.py`, compileall, `git diff --check`, and full `pytest` (`164 passed`). This is intended to reduce noisy all-sample soft distillation; it has not yet been evaluated for win rate.
+
+## [2026-06-16 17:16] Adaptive Improvement-Weighted Probe
+- **Changes:** Ran and documented two `--soft-weight-mode improvement` p1 probes in `docs/expander-training-strategy.md`: `min_margin=1, margin_scale=4` and `min_margin=0.2, margin_scale=1`.
+- **Status:** Completed
+- **Next Steps:** Do not use pure improvement-only weighting as a replacement for active soft targets; implement a mixed objective or finish/draw/Q auxiliary target next.
+- **Context:** Improvement-only probes did not beat the active-soft p1 r8 iter40 candidate at 71.29%/512. Best 256-row minimums were 71.09% for margin 1 and 69.92% for margin 0.2.
