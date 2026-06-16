@@ -429,3 +429,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx` as the next low-bar candidate, then test stronger search-budget distillation or a low-learning-rate PPO fine-tune; do not promote to 2048-row final validation until the minimum row moves much closer to 90%.
 - **Context:** iter 40 reached 512 games/row win rates: 8p0 71.68%, 8p1 74.61%, 12p0 82.81%, 12p1 83.40%, 16p0 71.68%, 16p1 71.29%, min 71.29%. This is above the prior 70.31% baseline but far below the >90% target.
+
+## [2026-06-16 17:05] Adaptive Search Distillation Follow-ups
+- **Changes:** Ran and documented three follow-ups in `docs/expander-training-strategy.md`: p1-to-p0 sequential search distillation, p1 distillation with `rollout_steps=16`, and low-lr alternate PPO from the p1 r8 iter40 candidate.
+- **Status:** Completed
+- **Next Steps:** Stop repeating simple seat swaps, rollout-budget bumps, or standard alternate PPO follow-ups; next implementation should change the objective, such as high-confidence search-improvement filtering, finish/draw auxiliary targets, or true dual-seat same-batch KL/CE.
+- **Context:** Follow-up 256-row minimums did not beat the p1 r8 iter40 71.29%/512 candidate: p1->p0 reached at best 68.36%, r16 reached at best 69.92%, and PPO follow-up reached at best 69.53%.

@@ -1595,6 +1595,29 @@ min_win_rate = 71.29%
 
 结论：adaptive search distillation 首轮小幅超过当前 70.31% best，但没有接近 90%。该 checkpoint 可作为新的低门槛候选，但不能宣布目标完成，也不值得直接升到 2048 games/row。下一轮应尝试更强 search budget 或按两个 learner seat 分开蒸馏后再做低学习率 PPO fine-tune，重点观察 8x8 与 16x16 行是否同时提升。
 
+后续三个 follow-up 都没有超过 p1 r8 iter40：
+
+```text
+p1 -> p0 sequential search distill, same budget:
+  /tmp/generals-adaptive-search-distill-p1p0-v1-ckpts/...-iter-000010.eqx: 256-row min = 68.36%
+  /tmp/generals-adaptive-search-distill-p1p0-v1-ckpts/...-iter-000020.eqx: 256-row min = 67.19%
+  /tmp/generals-adaptive-search-distill-p1p0-v1-ckpts/...-iter-000030.eqx: 256-row min = 65.62%
+  /tmp/generals-adaptive-search-distill-p1p0-v1-ckpts/...-iter-000040.eqx: 256-row min = 65.23%
+
+p1 search distill with rollout_steps=16:
+  /tmp/generals-adaptive-search-distill-p1-v2-r16-ckpts/...-iter-000010.eqx: 256-row min = 69.92%
+  /tmp/generals-adaptive-search-distill-p1-v2-r16-ckpts/...-iter-000020.eqx: 256-row min = 67.58%
+  /tmp/generals-adaptive-search-distill-p1-v2-r16-ckpts/...-iter-000030.eqx: 256-row min = 67.97%
+
+low-lr alternate PPO follow-up from p1 r8 iter40:
+  /tmp/generals-adaptive-search-distill-p1-v1-ppo-alt-v1-ckpts/...-iter-000030.eqx: 256-row min = 67.97%
+  /tmp/generals-adaptive-search-distill-p1-v1-ppo-alt-v1-ckpts/...-iter-000060.eqx: 256-row min = 69.53%
+  /tmp/generals-adaptive-search-distill-p1-v1-ppo-alt-v1-ckpts/...-iter-000090.eqx: 256-row min = 68.36%
+  /tmp/generals-adaptive-search-distill-p1-v1-ppo-alt-v1-ckpts/...-iter-000120.eqx: 256-row min = 68.75%
+```
+
+结论更新：简单连续换座位 distillation、单纯加长 rollout search budget、以及常规 alternate PPO follow-up 都会重新引入 size/seat tradeoff。当前最好的 adaptive 候选仍是 p1 r8 iter40 的 512-row `71.29%` minimum。下一步更应该改训练目标本身，例如只训练高置信 search 改进样本、加入 draw/finish auxiliary target，或做双座位同批 KL/CE，避免单座位更新把另一个座位压下去。
+
 ## 评估命令
 
 评估 player 0：
