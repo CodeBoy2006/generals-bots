@@ -375,3 +375,9 @@
 - **Status:** Completed
 - **Next Steps:** Review the spec, then implement the trainer controls with TDD before launching the next CUDA PPO run.
 - **Context:** This is a design-only step. The 90% adaptive Expander target remains open; the current best verified minimum row is still 70.31% over 512 games/row.
+
+## [2026-06-16 15:14] Adaptive Trainer V2 Plan
+- **Changes:** Added `docs/superpowers/plans/2026-06-16-adaptive-trainer-v2.md` with TDD tasks for weighted size sampling, truncation reward shaping, alternating learner seats, documentation, verification, and commit/push.
+- **Status:** Completed
+- **Next Steps:** Execute the plan inline with red-green tests, then run the trainer-v2 CUDA continuation.
+- **Context:** This is still pre-training infrastructure work. The adaptive 90% Expander target remains open.
