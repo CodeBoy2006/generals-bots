@@ -512,6 +512,7 @@ uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
 uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1.5,12:1,16:2 \
   --pad-to 16 \
   --map-generator generated \
   --pool-size 16384 \
@@ -521,7 +522,9 @@ uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
+  --learner-player alternate \
   --terminal-reward-scale 1.0 \
+  --truncation-reward-scale 0.5 \
   --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
   --checkpoint-dir /tmp/generals-adaptive-ppo-checkpoints \
   --checkpoint-every 50 \
@@ -546,6 +549,7 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
 ```
 
 `evaluate_adaptive_policy.py` 输出六行结果：3 个尺寸乘以 2 个座位。`min_win_rate` 是最弱一行的总胜率；draw 不计为 win。当前 adaptive checkpoint 使用 `AdaptivePolicyValueNetwork`，不兼容固定尺寸 GUI、`evaluate_policy.py` 或普通 `PolicyValueNetwork` checkpoint。
+adaptive BC 和 PPO 训练器都支持 `--grid-size-weights` 对困难尺寸过采样；PPO 训练器还支持 `--learner-player alternate` 在同一 run 内按 iteration 交替训练两个座位，`--truncation-reward-scale` 对非终局截断加入负奖励，避免模型用大量 draw 维持表面稳定。
 
 ### 7.8 批量评估 checkpoint
 

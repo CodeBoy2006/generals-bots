@@ -28,6 +28,7 @@ from adaptive_common import (
     compute_adaptive_valid_move_mask,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
+    parse_grid_size_weights,
     parse_grid_sizes,
 )
 from adaptive_network import load_or_create_adaptive_network
@@ -130,6 +131,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Behavior-clone an adaptive multisize PPO policy.")
     parser.add_argument("num_envs", nargs="?", type=int, default=512)
     parser.add_argument("--grid-sizes", default="8,12,16")
+    parser.add_argument("--grid-size-weights", default=None)
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--teacher", choices=TEACHER_NAMES, default="expander-soft")
@@ -155,6 +157,10 @@ def parse_args():
 
     try:
         args.grid_sizes = parse_grid_sizes(args.grid_sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.grid_size_weights = parse_grid_size_weights(args.grid_size_weights, args.grid_sizes)
     except ValueError as exc:
         parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
@@ -192,6 +198,11 @@ def main():
     print(f"Teacher:       {args.teacher}")
     print(f"Environments:  {args.num_envs}")
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
+    if args.grid_size_weights is not None:
+        weights_label = ",".join(
+            f"{size}:{weight:g}" for size, weight in zip(args.grid_sizes, args.grid_size_weights, strict=True)
+        )
+        print(f"Size weights:  {weights_label}")
     print(f"Iterations:    {args.num_iterations} x {args.num_steps} steps")
     print(f"Reset pool:    {args.pool_size}")
     if args.init_model_path is not None:
@@ -220,6 +231,7 @@ def main():
         (args.num_cities_min, args.num_cities_max),
         args.max_generals_distance,
         (args.city_army_min, args.city_army_max),
+        args.grid_size_weights,
     )
     jax.block_until_ready(pool.states.armies)
     states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)

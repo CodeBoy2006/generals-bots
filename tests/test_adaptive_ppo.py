@@ -23,6 +23,19 @@ def test_parse_grid_sizes_and_auto_distances():
     assert min_distance_for_size(16) == 9
 
 
+def test_parse_grid_size_weights_requires_matching_positive_sizes():
+    import pytest
+
+    from examples._experimental.ppo.adaptive_common import parse_grid_size_weights
+
+    assert parse_grid_size_weights("8:1,12:1.5,16:2", (8, 12, 16)) == (1.0, 1.5, 2.0)
+    assert parse_grid_size_weights(None, (8, 12, 16)) is None
+
+    for value in ("8:1,12:1", "8:1,12:1,16:0", "8:1,12:1,20:2", "8:1,8:2,16:1"):
+        with pytest.raises(ValueError):
+            parse_grid_size_weights(value, (8, 12, 16))
+
+
 def test_adaptive_obs_to_array_marks_padding_separately_from_real_mountain():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS, adaptive_obs_to_array
 
@@ -138,6 +151,37 @@ def test_make_adaptive_state_pool_balances_sizes():
     assert sorted(pool.effective_sizes.tolist()) == [4, 4, 6, 6, 6]
 
 
+def test_make_adaptive_state_pool_uses_grid_size_weights():
+    from examples._experimental.ppo.adaptive_common import make_adaptive_state_pool
+
+    pool = make_adaptive_state_pool(
+        jrandom.PRNGKey(2),
+        pool_size=8,
+        grid_sizes=(4, 6, 8),
+        pad_size=8,
+        map_generator="simple",
+        mountain_density_range=(0.0, 0.0),
+        num_cities_range=(2, 2),
+        max_generals_distance=None,
+        castle_val_range=(10, 11),
+        grid_size_weights=(1.0, 1.0, 2.0),
+    )
+
+    assert sorted(pool.effective_sizes.tolist()) == [4, 4, 6, 6, 8, 8, 8, 8]
+
+
+def test_apply_truncation_reward_penalizes_only_truncated_rows():
+    from examples._experimental.ppo.train_adaptive import apply_truncation_reward
+
+    rewards = jnp.array([1.0, 0.5, -0.25], dtype=jnp.float32)
+    truncated = jnp.array([True, False, True])
+
+    shaped = apply_truncation_reward(rewards, truncated, 0.5)
+
+    assert jnp.allclose(shaped, jnp.array([0.5, 0.5, -0.75], dtype=jnp.float32))
+    assert jnp.allclose(apply_truncation_reward(rewards, truncated, 0.0), rewards)
+
+
 def test_adaptive_expander_target_probs_has_single_pass_slot():
     from examples._experimental.ppo.adaptive_common import adaptive_expander_target_probs
 
@@ -163,6 +207,8 @@ def test_behavior_clone_adaptive_cli_smoke(tmp_path):
         "2",
         "--grid-sizes",
         "4,6",
+        "--grid-size-weights",
+        "4:1,6:2",
         "--pad-to",
         "6",
         "--map-generator",
@@ -199,6 +245,8 @@ def test_behavior_clone_adaptive_saves_and_prunes_checkpoints(tmp_path):
         "2",
         "--grid-sizes",
         "4,6",
+        "--grid-size-weights",
+        "4:1,6:2",
         "--pad-to",
         "6",
         "--map-generator",
@@ -259,6 +307,10 @@ def test_train_adaptive_cli_smoke(tmp_path):
         "1",
         "--minibatch-size",
         "2",
+        "--truncation-reward-scale",
+        "0.25",
+        "--learner-player",
+        "alternate",
         "--checkpoint-dir",
         str(checkpoint_dir),
         "--checkpoint-every",

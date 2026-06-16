@@ -381,3 +381,9 @@
 - **Status:** Completed
 - **Next Steps:** Execute the plan inline with red-green tests, then run the trainer-v2 CUDA continuation.
 - **Context:** This is still pre-training infrastructure work. The adaptive 90% Expander target remains open.
+
+## [2026-06-16 15:24] Adaptive Trainer V2 Controls
+- **Changes:** Added weighted adaptive reset-pool sampling, `--grid-size-weights` support in adaptive BC/PPO, PPO truncation reward shaping, `--learner-player alternate`, tests, and docs for the next Expander PPO continuation.
+- **Status:** Completed
+- **Next Steps:** Run the CUDA trainer-v2 continuation from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx`, then evaluate retained checkpoints across all 8/12/16 size-seat rows.
+- **Context:** Verification passed with focused adaptive tests, compileall, `git diff --check`, and full CPU pytest. This implements training controls only; the 90% Expander target remains unproven until an independently evaluated checkpoint clears every required row.

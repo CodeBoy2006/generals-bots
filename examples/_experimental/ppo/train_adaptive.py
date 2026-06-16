@@ -24,6 +24,7 @@ from adaptive_common import (
     compute_adaptive_valid_move_mask,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
+    parse_grid_size_weights,
     parse_grid_sizes,
 )
 from adaptive_network import load_or_create_adaptive_network
@@ -40,6 +41,18 @@ from train import (
 )
 
 
+def apply_truncation_reward(rewards, truncated, scale):
+    """Penalize non-terminal timeout rows without changing decisive games."""
+    return rewards - jnp.where(truncated, scale, 0.0)
+
+
+def resolve_learner_player(value: str, iteration: int) -> int:
+    """Resolve fixed or alternating learner seat for one training iteration."""
+    if value == "alternate":
+        return (iteration - 1) % 2
+    return int(value)
+
+
 @eqx.filter_jit
 def rollout_step(
     states,
@@ -51,6 +64,7 @@ def rollout_step(
     opponent_id,
     learner_player,
     terminal_reward_scale,
+    truncation_reward_scale,
     pad_size,
 ):
     """Collect one vectorized adaptive PPO rollout step."""
@@ -98,11 +112,12 @@ def rollout_step(
     obs_p1_new = jax.vmap(lambda s: game.get_observation(s, 1))(new_states)
     learner_obs_new = jax.lax.cond(learner_player == 0, lambda _: obs_p0_new, lambda _: obs_p1_new, None)
     rewards = jax.vmap(composite_reward_fn)(learner_obs_prior, learner_actions, learner_obs_new)
-    rewards = apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale)
 
     terminated = infos.is_done
     truncated = (new_states.time >= truncation) & ~terminated
     dones = terminated | truncated
+    rewards = apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale)
+    rewards = apply_truncation_reward(rewards, truncated, truncation_reward_scale)
 
     pool_size = pool.states.armies.shape[0]
     reset_indices = new_states.pool_idx % pool_size
@@ -131,6 +146,7 @@ def collect_rollout(
     opponent_id,
     learner_player,
     terminal_reward_scale,
+    truncation_reward_scale,
     pad_size,
 ):
     """Collect a Python-loop rollout, stacking step data on axis 0."""
@@ -146,6 +162,7 @@ def collect_rollout(
             opponent_id,
             learner_player,
             terminal_reward_scale,
+            truncation_reward_scale,
             pad_size,
         )
         step_data.append(data)
@@ -240,8 +257,10 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=4096)
     parser.add_argument("--truncation", type=int, default=750)
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="random")
-    parser.add_argument("--learner-player", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--learner-player", choices=("0", "1", "alternate"), default="0")
     parser.add_argument("--terminal-reward-scale", type=float, default=0.0)
+    parser.add_argument("--truncation-reward-scale", type=float, default=0.0)
+    parser.add_argument("--grid-size-weights", default=None)
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
@@ -261,6 +280,10 @@ def parse_args():
 
     try:
         args.grid_sizes = parse_grid_sizes(args.grid_sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.grid_size_weights = parse_grid_size_weights(args.grid_size_weights, args.grid_sizes)
     except ValueError as exc:
         parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
@@ -283,6 +306,8 @@ def parse_args():
         parser.error("--truncation must be positive")
     if args.terminal_reward_scale < 0.0:
         parser.error("--terminal-reward-scale must be non-negative")
+    if args.truncation_reward_scale < 0.0:
+        parser.error("--truncation-reward-scale must be non-negative")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
         parser.error("mountain density must satisfy 0 <= min <= max <= 1")
     if not (2 <= args.num_cities_min <= args.num_cities_max):
@@ -302,11 +327,19 @@ def main():
     print("Adaptive JAX PPO")
     print(f"Device:        {jax.devices()[0]}")
     print(f"Environments:  {args.num_envs}")
-    print(f"Learner:       player {args.learner_player}")
+    learner_label = "alternate players 0/1" if args.learner_player == "alternate" else f"player {args.learner_player}"
+    print(f"Learner:       {learner_label}")
     print(f"Opponent:      {args.opponent}")
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
+    if args.grid_size_weights is not None:
+        weights_label = ",".join(
+            f"{size}:{weight:g}" for size, weight in zip(args.grid_sizes, args.grid_size_weights, strict=True)
+        )
+        print(f"Size weights:  {weights_label}")
     print(f"Iterations:    {args.num_iterations} x {args.num_steps} steps")
     print(f"PPO updates:   epochs={args.num_epochs}, minibatch={args.minibatch_size or args.num_envs * args.num_steps}")
+    if args.truncation_reward_scale > 0.0:
+        print(f"Timeout reward: -{args.truncation_reward_scale:g}")
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
@@ -335,11 +368,13 @@ def main():
         (args.num_cities_min, args.num_cities_max),
         args.max_generals_distance,
         (args.city_army_min, args.city_army_max),
+        args.grid_size_weights,
     )
     jax.block_until_ready(pool.states.armies)
     states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
 
     print("Warming up...")
+    warmup_learner_player = resolve_learner_player(args.learner_player, 1)
     states, effective_sizes, _, key = rollout_step(
         states,
         effective_sizes,
@@ -348,8 +383,9 @@ def main():
         key,
         args.truncation,
         opponent_id,
-        args.learner_player,
+        warmup_learner_player,
         args.terminal_reward_scale,
+        args.truncation_reward_scale,
         args.pad_to,
     )
     jax.block_until_ready(states)
@@ -358,6 +394,7 @@ def main():
     model_stem = Path(args.model_path).stem
     for iteration in range(1, args.num_iterations + 1):
         t0 = time.time()
+        iteration_learner_player = resolve_learner_player(args.learner_player, iteration)
         states, effective_sizes, rollout_data, key = collect_rollout(
             states,
             effective_sizes,
@@ -367,8 +404,9 @@ def main():
             args.num_steps,
             args.truncation,
             opponent_id,
-            args.learner_player,
+            iteration_learner_player,
             args.terminal_reward_scale,
+            args.truncation_reward_scale,
             args.pad_to,
         )
         jax.block_until_ready(states)
@@ -398,7 +436,7 @@ def main():
         if iteration % 10 == 0 or iteration == 1 or iteration == args.num_iterations:
             elapsed = time.time() - t0
             episodes = int(jnp.sum(dones))
-            wins = int(jnp.sum(dones & (infos.winner == args.learner_player)))
+            wins = int(jnp.sum(dones & (infos.winner == iteration_learner_player)))
             draws = int(jnp.sum(dones & (infos.winner < 0)))
             samples = args.num_envs * args.num_steps
             print(

@@ -35,6 +35,30 @@ def parse_grid_sizes(value: str) -> tuple[int, ...]:
     return sizes
 
 
+def parse_grid_size_weights(value: str | None, grid_sizes: tuple[int, ...]) -> tuple[float, ...] | None:
+    """Parse size:weight pairs aligned to configured adaptive grid sizes."""
+    if value is None or not value.strip():
+        return None
+    parsed: dict[int, float] = {}
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError("--grid-size-weights entries must use size:weight")
+        size_text, weight_text = part.split(":", 1)
+        size = int(size_text.strip())
+        weight = float(weight_text.strip())
+        if size in parsed:
+            raise ValueError("--grid-size-weights cannot repeat a grid size")
+        if weight <= 0.0:
+            raise ValueError("--grid-size-weights values must be positive")
+        parsed[size] = weight
+    if set(parsed) != set(grid_sizes):
+        raise ValueError("--grid-size-weights must specify exactly the same sizes as --grid-sizes")
+    return tuple(parsed[size] for size in grid_sizes)
+
+
 def min_distance_for_size(size: int) -> int:
     """Return the default generated-map general spacing for one effective size."""
     return {8: 5, 12: 7, 16: 9}.get(size, max(3, size // 2))
@@ -156,6 +180,35 @@ def _pool_counts(pool_size: int, grid_sizes: tuple[int, ...]) -> tuple[int, ...]
     return tuple(counts)
 
 
+def _weighted_pool_counts(pool_size: int, grid_sizes: tuple[int, ...], weights: tuple[float, ...]) -> tuple[int, ...]:
+    """Split pool slots proportionally, assigning ties to larger sizes."""
+    if len(weights) != len(grid_sizes):
+        raise ValueError("grid size weights must align with grid sizes")
+    if any(weight <= 0.0 for weight in weights):
+        raise ValueError("grid size weights must be positive")
+
+    if pool_size >= len(grid_sizes):
+        counts = [1] * len(grid_sizes)
+        remaining = pool_size - len(grid_sizes)
+    else:
+        counts = [0] * len(grid_sizes)
+        remaining = pool_size
+
+    total_weight = sum(weights)
+    quotas = [remaining * weight / total_weight for weight in weights]
+    floors = [int(quota) for quota in quotas]
+    counts = [count + floor for count, floor in zip(counts, floors, strict=True)]
+    remainder = remaining - sum(floors)
+    order = sorted(
+        range(len(grid_sizes)),
+        key=lambda index: (quotas[index] - floors[index], grid_sizes[index]),
+        reverse=True,
+    )
+    for index in order[:remainder]:
+        counts[index] += 1
+    return tuple(counts)
+
+
 def make_adaptive_state_pool(
     key,
     pool_size: int,
@@ -166,6 +219,7 @@ def make_adaptive_state_pool(
     num_cities_range: tuple[int, int],
     max_generals_distance: int | None,
     castle_val_range: tuple[int, int],
+    grid_size_weights: tuple[float, ...] | None = None,
 ) -> AdaptiveStatePool:
     """Generate a size-balanced padded state pool for adaptive rollouts."""
     keys = jrandom.split(key, pool_size + 1)
@@ -173,7 +227,12 @@ def make_adaptive_state_pool(
     offset = 1
     pools = []
     sizes = []
-    for grid_size, count in zip(grid_sizes, _pool_counts(pool_size, grid_sizes), strict=True):
+    counts = (
+        _pool_counts(pool_size, grid_sizes)
+        if grid_size_weights is None
+        else _weighted_pool_counts(pool_size, grid_sizes, grid_size_weights)
+    )
+    for grid_size, count in zip(grid_sizes, counts, strict=True):
         combo_keys = keys[offset : offset + count]
         offset += count
         if map_generator == "simple":

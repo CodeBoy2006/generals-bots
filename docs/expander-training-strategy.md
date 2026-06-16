@@ -1218,7 +1218,7 @@ KL near interrupt: about 0.03
 - 输入通道在标准 fogged observation 外追加 active-cell、padding、坐标和尺寸比例信息。
 - 动作空间固定为 `8 * pad_to * pad_to + 1`，最后一个 logit 是全局 pass。
 - value head 只在 active cells 上池化，避免 padding 区域污染不同尺寸的价值估计。
-- reset pool 按 `--grid-sizes` 做尺寸均衡采样，generated 地图按有效尺寸自动设置默认 minimum general distance。
+- reset pool 默认按 `--grid-sizes` 做尺寸均衡采样，也可用 `--grid-size-weights` 对困难尺寸过采样；generated 地图按有效尺寸自动设置默认 minimum general distance。
 
 推荐先训练 adaptive Expander-soft warm start：
 
@@ -1245,6 +1245,7 @@ uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
 uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1.5,12:1,16:2 \
   --pad-to 16 \
   --map-generator generated \
   --pool-size 16384 \
@@ -1254,7 +1255,9 @@ uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
+  --learner-player alternate \
   --terminal-reward-scale 1.0 \
+  --truncation-reward-scale 0.5 \
   --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
   --checkpoint-dir /tmp/generals-adaptive-ppo-checkpoints \
   --checkpoint-every 50 \
@@ -1280,7 +1283,7 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
   --seed 47200
 ```
 
-当前状态：adaptive 训练、BC 和评估基础设施已可运行并有 CPU smoke coverage，但还没有任何 checkpoint 证明六个 size-seat pair 都超过 90%。下一步应先跑完整 BC，再用 `--checkpoint-every` 保存 PPO 候选，并优先评估中间 checkpoint 的 `min_win_rate`，避免只看训练 rollout 胜率。
+当前状态：adaptive 训练、BC、PPO 和评估基础设施已可运行并有 CPU smoke coverage。CUDA PPO 已把当前 best checkpoint 推到 70.31% 的六行最小胜率，但还没有任何 checkpoint 证明六个 size-seat pair 都超过 90%。后续训练应继续用 `--checkpoint-every` 保存 PPO 候选，并优先评估中间 checkpoint 的 `min_win_rate`，避免只看训练 rollout 胜率。
 
 ### CPU medium baseline
 
@@ -1418,6 +1421,43 @@ Negative follow-ups:
 - Raising `--terminal-reward-scale` to `2.0` for all-size p1 (`/tmp/generals-adaptive-ppo-gpu-term2-p1-v1.eqx`) reached only 69.92% over 256 games/row.
 
 结论：GPU 训练把 adaptive checkpoint 从 CPU baseline 的 0% 推到 70% min win rate，证明 adaptive architecture 和 alternating/curriculum PPO 方向有效；但距离六行都超过 90% 仍有明显差距。现有单座位续训、8x16 课程和单纯提高终局奖励已经进入平台期。下一轮优先方向应是引入新的训练信号来降低 16x16 draw rate 与提升 8x8 decisive strength，而不是继续盲目 low-lr fine-tune。可尝试：显式 draw/timeout 惩罚、按尺寸加权采样、真正的双座位同批训练，或把 rollout-search/target-assignment 信号接入 adaptive trainer。
+
+### Adaptive trainer v2 controls
+
+2026-06-16 新增 trainer-v2 控制项：
+
+- `--grid-size-weights 8:1.5,12:1,16:2`：在 adaptive reset pool 中按权重分配有效尺寸，避免困难的 16x16 样本不足。
+- `--learner-player alternate`：按 training iteration 在 player 0 和 player 1 之间交替 learner seat，降低单座位 fine-tune 造成的遗忘。
+- `--truncation-reward-scale 0.5`：对达到 truncation 且非 decisive terminal 的 transition 给 learner 负奖励，直接压低 16x16 高 draw 率。
+
+下一条建议从当前 best checkpoint 继续：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1.5,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 8192 \
+  --num-steps 64 \
+  --num-iterations 300 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --opponent expander \
+  --learner-player alternate \
+  --terminal-reward-scale 1.0 \
+  --truncation-reward-scale 0.5 \
+  --init-model-path /tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-gpu-v2-checkpoints \
+  --checkpoint-every 50 \
+  --keep-checkpoints 6 \
+  --model-path /tmp/generals-adaptive-ppo-gpu-v2.eqx \
+  --seed 62016
+```
+
+评估顺序：先对 final 和保留的 checkpoint 做 256 games/row triage；若 `min_win_rate` 高于 70.31%，再升到 512 games/row 或 2048 games/row。只有六个 size-seat pair 的总胜率都超过 90%，才可替换当前 best。
 
 ## 评估命令
 
