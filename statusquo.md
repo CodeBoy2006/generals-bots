@@ -369,3 +369,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop repeating single-seat low-lr continuations; implement or design a new training signal such as draw/timeout reward shaping, size weighting, or dual-seat batch training.
 - **Context:** None of the probes beat the current best `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` at `min_win_rate = 70.31%` over 512 games/row. The best rejected follow-up was terminal-reward-scale 2.0 at 69.92% over 256 games/row.
+
+## [2026-06-16 15:12] Adaptive Trainer V2 Design
+- **Changes:** Added `docs/superpowers/specs/2026-06-16-adaptive-trainer-v2-design.md` describing weighted reset pools, truncation reward shaping, alternating learner seats, tests, and the first GPU continuation recipe from the current best checkpoint.
+- **Status:** Completed
+- **Next Steps:** Review the spec, then implement the trainer controls with TDD before launching the next CUDA PPO run.
+- **Context:** This is a design-only step. The 90% adaptive Expander target remains open; the current best verified minimum row is still 70.31% over 512 games/row.
