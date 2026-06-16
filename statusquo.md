@@ -321,3 +321,9 @@
 - **Status:** Completed
 - **Next Steps:** Add adaptive policy evaluation across configured sizes and seats.
 - **Context:** Task 5 followed TDD: trainer smoke first failed on missing script, then passed after implementation. The trainer keeps the existing fixed-size PPO scripts untouched and writes periodic checkpoints using the existing checkpoint helper.
+
+## [2026-06-16 13:49] Adaptive Policy Evaluator
+- **Changes:** Added `examples/_experimental/ppo/evaluate_adaptive_policy.py` for adaptive size/seat matrix evaluation, JSON output, sample/greedy policy modes, optional win-rate threshold, and CLI smoke coverage.
+- **Status:** Completed
+- **Next Steps:** Update README, Chinese manual, expander training strategy, then run broader verification.
+- **Context:** Task 6 followed TDD: evaluator smoke first failed on missing script, then passed after implementation. A JAX concretization error in `lax.scan(length=max_steps)` was fixed by switching evaluator JIT wrappers to `eqx.filter_jit` so scalar config stays static.

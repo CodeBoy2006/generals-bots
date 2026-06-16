@@ -227,3 +227,47 @@ def test_train_adaptive_cli_smoke(tmp_path):
 
     assert model_path.exists()
     assert (checkpoint_dir / "adaptive-ppo-iter-000001.eqx").exists()
+
+
+def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    model_path = tmp_path / "adaptive.eqx"
+    output_path = tmp_path / "adaptive-eval.json"
+    eqx.tree_serialise_leaves(model_path, AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6))
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/evaluate_adaptive_policy.py",
+        str(model_path),
+        "--grid-sizes",
+        "4,6",
+        "--pad-to",
+        "6",
+        "--num-games",
+        "2",
+        "--max-steps",
+        "4",
+        "--map-generator",
+        "simple",
+        "--json-output",
+        str(output_path),
+        "--seed",
+        "43000",
+    ]
+
+    completed = subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+    data = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert "adaptive policy evaluation" in completed.stdout.lower()
+    assert len(data["rows"]) == 4
+    assert {row["grid_size"] for row in data["rows"]} == {4, 6}
+    assert {row["policy_player"] for row in data["rows"]} == {0, 1}
