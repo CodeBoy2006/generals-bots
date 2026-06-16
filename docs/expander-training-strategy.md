@@ -1553,6 +1553,48 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
 
 结论：扩容 warm start 本身可用，且能保持源 checkpoint 初始行为；但当前 PPO objective 仍会在尺寸/座位之间迁移强度，未突破 70.31% best。下一轮不应继续只改 `lr`、weights 或 seat schedule。更有希望的方向是把 rollout-search、target-assignment 或更强 teacher 信号接入 adaptive 训练，先用监督/蒸馏提高 tactical finish rate，再做 PPO fine-tune。
 
+### Adaptive search distillation
+
+2026-06-16 新增 `examples/_experimental/ppo/adaptive_search_distill.py`，把固定尺寸 conservative search distillation 搬到 adaptive action space：冻结 `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` 作为 search prior、KL anchor 和 rollout/opponent policy，用 top-k 短 rollout 分数做 soft target。
+
+首轮窄模型 p1 distillation 配置：
+
+```text
+model: /tmp/generals-adaptive-search-distill-p1-v1.eqx
+base: /tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx
+channels: 32,32,32,16
+grid_size_weights: 8:1,12:1,16:2
+target_mode: soft
+learner_player: 1
+num_envs=256, num_steps=8, num_iterations=40
+top_k=4, rollout_steps=8, rollouts_per_action=2
+lr=1e-6, kl_weight=1.0, improve_weight=0.05
+```
+
+Retained checkpoint triage at 256 games/row:
+
+```text
+iter 10: min_win_rate = 70.70% (8p0 72.66, 8p1 73.44, 12p0 83.59, 12p1 85.16, 16p0 70.70, 16p1 74.22)
+iter 20: min_win_rate = 67.58% (16p1 bottleneck)
+iter 30: min_win_rate = 63.28% (16p0 bottleneck)
+iter 40: min_win_rate = 70.70% (8p0 72.66, 8p1 75.00, 12p0 82.81, 12p1 82.42, 16p0 72.27, 16p1 70.70)
+```
+
+iter 40 promoted to 512 games/row:
+
+```text
+/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+8x8 p0: 367/142/3, win rate 71.68%
+8x8 p1: 382/130/0, win rate 74.61%
+12x12 p0: 424/73/15, win rate 82.81%
+12x12 p1: 427/73/12, win rate 83.40%
+16x16 p0: 367/48/97, win rate 71.68%
+16x16 p1: 365/60/87, win rate 71.29%
+min_win_rate = 71.29%
+```
+
+结论：adaptive search distillation 首轮小幅超过当前 70.31% best，但没有接近 90%。该 checkpoint 可作为新的低门槛候选，但不能宣布目标完成，也不值得直接升到 2048 games/row。下一轮应尝试更强 search budget 或按两个 learner seat 分开蒸馏后再做低学习率 PPO fine-tune，重点观察 8x8 与 16x16 行是否同时提升。
+
 ## 评估命令
 
 评估 player 0：

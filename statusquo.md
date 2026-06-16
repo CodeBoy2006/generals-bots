@@ -423,3 +423,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a small CUDA narrow distillation from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx`, evaluate retained checkpoints at 128 or 256 games per size-seat row, and only promote checkpoints above the current 70.31% minimum row to 512-game evaluation.
 - **Context:** This implements the stronger-teacher step; it does not prove the 90% target. The best verified checkpoint remains `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` until a new evaluation beats it.
+
+## [2026-06-16 16:55] Adaptive Search Distillation Probe
+- **Changes:** Ran p1 narrow adaptive search distillation from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` to `/tmp/generals-adaptive-search-distill-p1-v1.eqx`, evaluated retained iter 10/20/30/40 checkpoints, and documented results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Treat `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx` as the next low-bar candidate, then test stronger search-budget distillation or a low-learning-rate PPO fine-tune; do not promote to 2048-row final validation until the minimum row moves much closer to 90%.
+- **Context:** iter 40 reached 512 games/row win rates: 8p0 71.68%, 8p1 74.61%, 12p0 82.81%, 12p1 83.40%, 16p0 71.68%, 16p1 71.29%, min 71.29%. This is above the prior 70.31% baseline but far below the >90% target.
