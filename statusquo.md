@@ -291,3 +291,9 @@
 - **Status:** Completed
 - **Next Steps:** Execute Task 1 first using TDD: adaptive parsing, active-cell input encoding, valid masks, and single-pass action encoding.
 - **Context:** The plan keeps fixed-size PPO paths intact and adds adaptive scripts beside them. It does not yet prove the 90% target; it defines the infrastructure path toward producing and verifying one 8/12/16 checkpoint.
+
+## [2026-06-16 13:33] Adaptive Common Helpers
+- **Changes:** Added `examples/_experimental/ppo/adaptive_common.py` with adaptive grid-size parsing, active-cell/padding input channels, adaptive valid-move masks, and single-pass action encoding; added `tests/test_adaptive_ppo.py` coverage for those primitives.
+- **Status:** Completed
+- **Next Steps:** Implement `AdaptivePolicyValueNetwork` with fixed adaptive action space and active-cell value pooling.
+- **Context:** Task 1 follows TDD: tests first failed on missing adaptive module, then passed after implementation. Padding is distinguished through explicit adaptive channels because fogged observations may report padded mountains as structures-in-fog rather than visible mountains.
