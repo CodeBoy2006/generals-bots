@@ -405,3 +405,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop repeating basic PPO continuations; design an adaptive distillation or stronger-teacher step that can improve finish rate before PPO fine-tuning.
 - **Context:** None of the expanded PPO probes beat the current best 70.31% minimum row. Expanded-v1 reached 68.75% over 256 games/row, its iter-100 checkpoint reached 67.58% over 512 games/row, expanded-v2 reached 68.36% over 256 games/row, and expanded 16p1 reached 68.75% over 256 games/row.
+
+## [2026-06-16 16:26] Adaptive Search Distillation Design
+- **Changes:** Added `docs/superpowers/specs/2026-06-16-adaptive-search-distillation-design.md` for an adaptive conservative rollout-search distillation step that reuses the fixed-size KL/search-target pattern with adaptive encoders, action space, and reset pools.
+- **Status:** Completed
+- **Next Steps:** Write the implementation plan, then implement the adaptive search-distillation script with TDD.
+- **Context:** This is a design-only step. The current best remains `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` at 70.31% minimum win rate over 512 games/row; the 90% target remains open.
