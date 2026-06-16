@@ -501,3 +501,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the 256-env CUDA global-context triage from `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx`, then evaluate retained checkpoints at 256 games/row before any 512-row promotion.
 - **Context:** Verification passed with focused adaptive tests (`39 passed`), compileall, `git diff --check`, full CPU pytest (`182 passed`), and CUDA train/eval smoke on `cuda:0`. The smoke only validates training/saving/loading with `--global-context`; it is not a strength result.
+
+## [2026-06-16 22:40] Adaptive Global Context GPU Triage
+- **Changes:** Ran the 256-env CUDA global-context triage and documented retained checkpoint evaluations in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote the global-context checkpoints; next try should add scoreboard history/memory channels, search-to-Q/intent targets, or a lower-risk distillation objective for the new global branch.
+- **Context:** Best retained global checkpoint was iter 10 at `69.14%` min over 256 games/row on seed 69040. It improved same-seed source 16p1 but remained below the existing 512-row `71.29%` search-distill candidate; iter 20/30/40 continued the PPO drift pattern.

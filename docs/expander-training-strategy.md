@@ -2108,6 +2108,33 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --seed 69030
 ```
 
+GPU triage result, 256 games/row, seed 69040:
+
+```text
+source:
+  checkpoint = /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+  rows = 8p0 74.22%, 8p1 73.05%, 12p0 84.77%, 12p1 82.81%, 16p0 73.83%, 16p1 64.45%
+  min = 64.45%
+
+global iter10:
+  rows = 8p0 72.27%, 8p1 74.61%, 12p0 84.38%, 12p1 80.86%, 16p0 75.39%, 16p1 69.14%
+  min = 69.14%
+
+global iter20:
+  rows = 8p0 68.36%, 8p1 73.83%, 12p0 84.77%, 12p1 77.34%, 16p0 74.22%, 16p1 64.06%
+  min = 64.06%
+
+global iter30:
+  rows = 8p0 68.36%, 8p1 72.27%, 12p0 85.16%, 12p1 79.30%, 16p0 73.83%, 16p1 65.62%
+  min = 65.62%
+
+global iter40/final:
+  rows = 8p0 71.48%, 8p1 69.92%, 12p0 83.20%, 12p1 77.73%, 16p0 73.05%, 16p1 68.36%
+  min = 68.36%
+```
+
+结论更新：global-context branch is trainable and improves the same-seed 16p1 weak row versus the source checkpoint, but it does not beat the existing 512-row `71.29%` search-distill candidate and should not be promoted. The later PPO checkpoints again show drift: value loss falls while 8x8 and 16x16 seat balance degrades. The next useful step should preserve this representation path but add either scoreboard history/memory channels, search-to-Q/intent targets, or a lower-risk distillation objective that can train the global branch without destabilizing the old policy.
+
 ## 评估命令
 
 评估 player 0：
