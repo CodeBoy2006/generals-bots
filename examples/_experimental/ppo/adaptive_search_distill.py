@@ -44,6 +44,8 @@ from conservative_search_distill import (
 from train import checkpoint_path_for_iteration, prune_old_checkpoints, stack_learner_actions
 
 TARGET_MODE_NAMES = ("hard", "soft")
+SOFT_WEIGHT_MODE_NAMES = ("active", "improvement")
+SOFT_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(SOFT_WEIGHT_MODE_NAMES)}
 
 
 def compute_adaptive_conservative_loss(
@@ -178,6 +180,31 @@ def compute_adaptive_soft_conservative_loss(
         "target_entropy": jnp.sum(target_entropy * search_weights) / search_normalizer,
     }
     return loss, metrics
+
+
+def soft_search_weights(
+    candidate_indices,
+    search_scores,
+    active_weights,
+    soft_weight_mode,
+    min_margin: float,
+    margin_scale: float,
+    max_weight: float,
+):
+    """Return soft-target sample weights from active rows or confident search improvements."""
+    _, improve_weights, _ = select_search_improvements(
+        candidate_indices,
+        search_scores,
+        min_margin,
+        margin_scale,
+        max_weight,
+    )
+    return jax.lax.cond(
+        soft_weight_mode == SOFT_WEIGHT_MODE_NAME_TO_ID["active"],
+        lambda _: active_weights,
+        lambda _: improve_weights * active_weights,
+        None,
+    ).astype(jnp.float32)
 
 
 def adaptive_score_observation(
@@ -762,6 +789,10 @@ def collect_adaptive_soft_batch(
     land_weight,
     prior_weight,
     terminal_score,
+    soft_weight_mode,
+    min_margin,
+    margin_scale,
+    max_weight,
     score_temperature,
     pad_size,
 ):
@@ -816,6 +847,15 @@ def collect_adaptive_soft_batch(
         )(states, effective_sizes, search_keys)
         target_probs = search_score_target_probs(search_scores, score_temperature)
         active_weights = is_active.astype(jnp.float32)
+        search_weights = soft_search_weights(
+            candidate_indices,
+            search_scores,
+            active_weights,
+            soft_weight_mode,
+            min_margin,
+            margin_scale,
+            max_weight,
+        )
 
         learner_keys = jrandom.split(learner_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
@@ -855,7 +895,7 @@ def collect_adaptive_soft_batch(
             base_active,
             candidate_indices,
             target_probs,
-            active_weights,
+            search_weights,
             active_weights,
         )
 
@@ -879,6 +919,7 @@ def parse_args():
     parser.add_argument("--base-channels", default=None)
     parser.add_argument("--init-channels", default=None)
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
+    parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--learner-player", type=int, choices=(0, 1), default=0)
@@ -959,6 +1000,7 @@ def parse_args():
         args.init_channels = parse_policy_channels(args.init_channels) if args.init_channels is not None else None
     except ValueError as exc:
         parser.error(str(exc))
+    args.soft_weight_mode_id = SOFT_WEIGHT_MODE_NAME_TO_ID[args.soft_weight_mode]
     return args
 
 
@@ -987,7 +1029,7 @@ def main():
     print(
         "Objective:     "
         f"kl={args.kl_weight:g}, improve={args.improve_weight:g}, "
-        f"mode={args.target_mode}, score_temp={args.score_temperature:g}"
+        f"mode={args.target_mode}, soft_weight={args.soft_weight_mode}, score_temp={args.score_temperature:g}"
     )
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
@@ -1088,6 +1130,10 @@ def main():
                 args.land_weight,
                 args.prior_weight,
                 args.terminal_score,
+                args.soft_weight_mode_id,
+                args.min_margin,
+                args.margin_scale,
+                args.max_improve_weight,
                 args.score_temperature,
                 args.pad_to,
             )

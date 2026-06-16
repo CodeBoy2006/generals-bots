@@ -435,3 +435,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop repeating simple seat swaps, rollout-budget bumps, or standard alternate PPO follow-ups; next implementation should change the objective, such as high-confidence search-improvement filtering, finish/draw auxiliary targets, or true dual-seat same-batch KL/CE.
 - **Context:** Follow-up 256-row minimums did not beat the p1 r8 iter40 71.29%/512 candidate: p1->p0 reached at best 68.36%, r16 reached at best 69.92%, and PPO follow-up reached at best 69.53%.
+
+## [2026-06-16 17:10] Adaptive Soft Search Weight Mode
+- **Changes:** Added `--soft-weight-mode active|improvement` to `examples/_experimental/ppo/adaptive_search_distill.py`; improvement mode reuses margin-based search-improvement weights for soft targets instead of weighting every active sample. Added focused tests in `tests/test_adaptive_ppo.py`.
+- **Status:** Completed
+- **Next Steps:** Run a high-confidence adaptive distillation probe with `--soft-weight-mode improvement`, tuned `--min-margin`, and retained checkpoints.
+- **Context:** Verified with `tests/test_adaptive_ppo.py`, compileall, `git diff --check`, and full `pytest` (`164 passed`). This is intended to reduce noisy all-sample soft distillation; it has not yet been evaluated for win rate.

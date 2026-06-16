@@ -270,6 +270,53 @@ def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
     assert jnp.allclose(jnp.sum(target_probs, axis=1), jnp.ones((2,), dtype=jnp.float32))
 
 
+def test_soft_search_weights_can_select_only_search_improvements():
+    from examples._experimental.ppo.adaptive_search_distill import (
+        SOFT_WEIGHT_MODE_NAME_TO_ID,
+        soft_search_weights,
+    )
+
+    candidate_indices = jnp.array(
+        [
+            [10, 11, 12],
+            [20, 21, 22],
+            [30, 31, 32],
+        ],
+        dtype=jnp.int32,
+    )
+    search_scores = jnp.array(
+        [
+            [5.0, 8.5, 7.0],
+            [9.0, 8.0, 7.0],
+            [1.0, 2.2, 2.0],
+        ],
+        dtype=jnp.float32,
+    )
+    active_weights = jnp.array([1.0, 1.0, 0.0], dtype=jnp.float32)
+
+    active = soft_search_weights(
+        candidate_indices,
+        search_scores,
+        active_weights,
+        SOFT_WEIGHT_MODE_NAME_TO_ID["active"],
+        min_margin=2.0,
+        margin_scale=4.0,
+        max_weight=1.0,
+    )
+    improvement = soft_search_weights(
+        candidate_indices,
+        search_scores,
+        active_weights,
+        SOFT_WEIGHT_MODE_NAME_TO_ID["improvement"],
+        min_margin=2.0,
+        margin_scale=4.0,
+        max_weight=1.0,
+    )
+
+    assert jnp.allclose(active, active_weights)
+    assert jnp.allclose(improvement, jnp.array([0.375, 0.0, 0.0], dtype=jnp.float32))
+
+
 def test_adaptive_rollout_search_candidates_respects_effective_size():
     from examples._experimental.ppo.adaptive_common import adaptive_action_space_size
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
@@ -341,6 +388,10 @@ def test_collect_adaptive_soft_batch_returns_expected_shapes():
         land_weight=8.0,
         prior_weight=0.01,
         terminal_score=1000.0,
+        soft_weight_mode=0,
+        min_margin=2.0,
+        margin_scale=4.0,
+        max_weight=1.0,
         score_temperature=1.0,
         pad_size=pad_size,
     )
@@ -538,6 +589,8 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
         str(model_path),
         "--target-mode",
         "soft",
+        "--soft-weight-mode",
+        "improvement",
         "--learner-player",
         "1",
         "--num-steps",
