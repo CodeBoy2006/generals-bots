@@ -567,3 +567,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a mixed-seat scoreboard-history CUDA probe with search outcome supervision and evaluate retained checkpoints with `--outcome-head`.
 - **Context:** Verification stayed focused: RED test failed on missing outcome loss API, then passed after implementation; related loss/collector/search tests and CPU CLI smoke passed; CUDA smoke with `--search-outcome-weight 0.1` saved `/tmp/generals-adaptive-search-outcome-smoke.eqx`.
+
+## [2026-06-17 00:05] Adaptive Outcome and PPO V3 GPU Triage
+- **Changes:** Documented CUDA outcome-distillation results, PPO v3-noarch reruns, OOM boundaries, same-seed source controls, and checkpoint-structure findings in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop plain noarch PPO reward/value sweeps; implement true seat x size stratified PPO batches or gradient-conflict mitigation before spending more GPU time on this CNN trainer.
+- **Context:** Outcome distillation failed promotion (`70.31%` over 256 games/row dropped to `65.82%` over 512). PPO v3 reruns improved some weak seeds but moved the bottleneck to another seat/size; best new 256-row min was `69.92%`, below the current `71.29%`/512 search-distill candidate.

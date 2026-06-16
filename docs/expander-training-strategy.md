@@ -2382,6 +2382,81 @@ value-first mixed history, search_value_weight=0.2, scale=20, improve_weight=0.0
 
 结论更新：search-value supervision is learnable and improves the weak 16p1 row in one configuration, but it still shifts the bottleneck to 16p0/16p1 rather than raising the six-row floor. No search-value checkpoint beats the current `71.29%`/512 candidate. The next implementation should use an explicit finish/draw/outcome target from actual rollout terminal status, because the remaining 16x16 problem is dominated by high draw rate and failure to convert decisive positions before timeout.
 
+Search-outcome distillation follow-up:
+
+```text
+mixed history, search_value_weight=0.1, search_outcome_weight=0.1, lr=1e-6:
+  train: outcome loss stayed high around 2.8-3.0 and KL stayed <= 0.00015.
+  iter10 rows = 8p0 72.27%, 8p1 76.56%, 12p0 78.52%, 12p1 81.64%, 16p0 67.58%, 16p1 61.33%
+  iter10 min = 61.33%
+  iter20 rows = 8p0 75.78%, 8p1 72.27%, 12p0 79.69%, 12p1 81.25%, 16p0 68.36%, 16p1 65.23%
+  iter20 min = 65.23%
+
+mixed history, freeze legacy, search_value_weight=0.1, search_outcome_weight=0.1, lr=1e-4:
+  train: outcome loss fell from 0.3183 to 0.0795 and KL stayed <= 0.00003.
+  iter10 rows = 8p0 70.70%, 8p1 75.78%, 12p0 82.42%, 12p1 84.77%, 16p0 70.70%, 16p1 70.31%
+  iter10 min = 70.31% over 256 games/row
+  iter10 512-row promotion check = 8p0 72.46%, 8p1 74.80%, 12p0 81.05%, 12p1 82.81%, 16p0 65.82%, 16p1 66.60%
+  iter10 512-row min = 65.82%
+  iter20 min = 66.41%
+
+mixed history, freeze legacy, search_value_weight=0.1, search_outcome_weight=0.02, lr=1e-4:
+  train: outcome loss fell from 0.6184 to 0.3536 and KL stayed <= 0.00004.
+  iter10 rows = 8p0 73.05%, 8p1 69.53%, 12p0 80.47%, 12p1 84.38%, 16p0 70.31%, 16p1 68.36%
+  iter10 min = 68.36%
+```
+
+结论更新：search-outcome CE is learnable only when the legacy trunk is frozen, but the 256-row `70.31%` candidate collapsed to `65.82%` on the 512-row promotion check. The current target also treats "not terminal inside the short search horizon" as draw/unfinished, so the label is dominated by horizon artifacts rather than true strategic outcome. Do not promote outcome-distill checkpoints. If this line is revisited, prefer a binary finish head or terminal-only weighted outcome labels over the current three-class best-candidate CE.
+
+PPO v3-noarch GPU rerun after the 2026 Generals.io review:
+
+```text
+checkpoint structure probe:
+  /tmp/generals-adaptive-search-distill-p1-v1-iter-000040.eqx loads as 15 input channels with no global branch.
+  It fails as 30-channel global because no global_linear1/global_linear2 leaves exist.
+  Therefore PPO v3 history runs are 15-channel source -> 30-channel history/global warm starts, not pure same-architecture continuations.
+
+source control, seed 71140, 256 games/row:
+  rows = 8p0 73.05%, 8p1 71.88%, 12p0 82.03%, 12p1 80.47%, 16p0 70.31%, 16p1 64.84%
+  min = 64.84%
+
+source controls already on disk:
+  seed 68130 min = 70.31%
+  seed 69040 min = 64.45%
+
+terminal-only PPO, HL-Gauss per-size value, 256 env x 128 steps, EMA saved, lr=1e-5:
+  train: loss fell 13.46 -> 3.19, but rollout wins fell after iter10.
+  iter10 min = 64.06%
+  final min = 64.45%
+
+terminal-only PPO, shared MSE value, 128 env x 256 steps, EMA saved, lr=3e-6:
+  256 env x 256 steps OOMed during batch flatten/shuffle even with minibatch 512 on the 16GB RTX 5070 Ti.
+  128 env x 256 steps ran around 49k SPS.
+  final seed71140 min = 64.84%
+  final seed68130 min = 70.31%
+
+terminal-only PPO, shared MSE value, 128 env x 256 steps, last iterate saved, lr=3e-6:
+  seed71140 rows = 8p0 72.27%, 8p1 69.92%, 12p0 80.47%, 12p1 82.42%, 16p0 66.80%, 16p1 69.14%
+  seed71140 min = 66.80%
+  seed68130 rows = 8p0 75.39%, 8p1 69.92%, 12p0 83.59%, 12p1 82.03%, 16p0 68.36%, 16p1 71.48%
+  seed68130 min = 68.36%
+
+composite+terminal PPO, shared MSE value, 128 env x 256 steps, last iterate saved, lr=3e-6:
+  seed71140 rows = 8p0 74.22%, 8p1 76.17%, 12p0 82.03%, 12p1 83.20%, 16p0 72.27%, 16p1 66.80%
+  seed71140 min = 66.80%
+  seed68130 rows = 8p0 72.66%, 8p1 71.09%, 12p0 82.42%, 12p1 87.50%, 16p0 68.75%, 16p1 76.17%
+  seed68130 min = 68.75%
+  seed69040 rows = 8p0 72.27%, 8p1 69.92%, 12p0 85.16%, 12p1 76.95%, 16p0 72.27%, 16p1 72.66%
+  seed69040 min = 69.92%
+
+balanced composite PPO, size weights 8:2,12:1,16:2, top_advantage_fraction=0.5:
+  seed71140 min = 69.14%
+  seed68130 min = 67.58%
+  seed69040 min = 66.41%
+```
+
+结论更新：PPO v3-noarch 的机制已经可用，但在当前小 CNN 上继续调 reward/value/EMA 只是在迁移 weak row。Composite+terminal can repair weak 16 rows on some seeds, especially seed69040 (`64.45% -> 69.92%`), but it creates new 8p1/12p1 or 8p0 bottlenecks and never beats the current `71.29%`/512 candidate. `ema_decay=0.999` is too slow for 20-30 iteration probes; short triage should save both last iterate and EMA or use lower decay. The next useful implementation is true seat x size stratified PPO batches or gradient-conflict mitigation, followed by memory/Transformer architecture work. Do not spend more GPU time on plain noarch PPO reward sweeps unless the batch construction changes.
+
 ## 评估命令
 
 评估 player 0：
