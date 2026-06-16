@@ -334,3 +334,530 @@ def adaptive_rollout_search_action(
         pad_size,
     )
     return candidate_actions[jnp.argmax(scores)]
+
+
+@eqx.filter_jit
+def train_adaptive_conservative_minibatch(
+    student_network,
+    base_network,
+    opt_state,
+    minibatch,
+    optimizer,
+    kl_weight,
+    improve_weight,
+    temperature,
+):
+    """Train one adaptive hard-target distillation minibatch."""
+    obs, masks, active, base_obs, base_masks, base_active, target_indices, improve_weights, kl_weights = minibatch
+
+    def loss_fn(net):
+        return compute_adaptive_conservative_loss(
+            net,
+            base_network,
+            obs,
+            masks,
+            active,
+            base_obs,
+            base_masks,
+            base_active,
+            target_indices,
+            improve_weights,
+            kl_weights,
+            kl_weight,
+            improve_weight,
+            temperature,
+        )
+
+    (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
+    params = eqx.filter(student_network, eqx.is_inexact_array)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    student_network = eqx.apply_updates(student_network, updates)
+    return student_network, opt_state, loss, metrics
+
+
+@eqx.filter_jit
+def train_adaptive_soft_minibatch(
+    student_network,
+    base_network,
+    opt_state,
+    minibatch,
+    optimizer,
+    kl_weight,
+    improve_weight,
+    temperature,
+):
+    """Train one adaptive soft-target distillation minibatch."""
+    obs, masks, active, base_obs, base_masks, base_active, candidate_indices, target_probs, search_weights, kl_weights = (
+        minibatch
+    )
+
+    def loss_fn(net):
+        return compute_adaptive_soft_conservative_loss(
+            net,
+            base_network,
+            obs,
+            masks,
+            active,
+            base_obs,
+            base_masks,
+            base_active,
+            candidate_indices,
+            target_probs,
+            search_weights,
+            kl_weights,
+            kl_weight,
+            improve_weight,
+            temperature,
+        )
+
+    (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
+    params = eqx.filter(student_network, eqx.is_inexact_array)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    student_network = eqx.apply_updates(student_network, updates)
+    return student_network, opt_state, loss, metrics
+
+
+def flatten_adaptive_conservative_batch(
+    obs,
+    masks,
+    active,
+    base_obs,
+    base_masks,
+    base_active,
+    target_indices,
+    improve_weights,
+    kl_weights,
+    margins,
+):
+    """Flatten time/environment axes for adaptive hard-target distillation."""
+    batch_size = obs.shape[0] * obs.shape[1]
+    return (
+        obs.reshape(batch_size, *obs.shape[2:]),
+        masks.reshape(batch_size, *masks.shape[2:]),
+        active.reshape(batch_size, *active.shape[2:]),
+        base_obs.reshape(batch_size, *base_obs.shape[2:]),
+        base_masks.reshape(batch_size, *base_masks.shape[2:]),
+        base_active.reshape(batch_size, *base_active.shape[2:]),
+        target_indices.reshape(batch_size),
+        improve_weights.reshape(batch_size),
+        kl_weights.reshape(batch_size),
+        margins.reshape(batch_size),
+    )
+
+
+def flatten_adaptive_soft_batch(
+    obs,
+    masks,
+    active,
+    base_obs,
+    base_masks,
+    base_active,
+    candidate_indices,
+    target_probs,
+    search_weights,
+    kl_weights,
+):
+    """Flatten time/environment axes for adaptive soft-target distillation."""
+    batch_size = obs.shape[0] * obs.shape[1]
+    return (
+        obs.reshape(batch_size, *obs.shape[2:]),
+        masks.reshape(batch_size, *masks.shape[2:]),
+        active.reshape(batch_size, *active.shape[2:]),
+        base_obs.reshape(batch_size, *base_obs.shape[2:]),
+        base_masks.reshape(batch_size, *base_masks.shape[2:]),
+        base_active.reshape(batch_size, *base_active.shape[2:]),
+        candidate_indices.reshape(batch_size, *candidate_indices.shape[2:]),
+        target_probs.reshape(batch_size, *target_probs.shape[2:]),
+        search_weights.reshape(batch_size),
+        kl_weights.reshape(batch_size),
+    )
+
+
+def train_adaptive_conservative_epoch(
+    student_network,
+    base_network,
+    opt_state,
+    flat_batch,
+    optimizer,
+    key,
+    num_epochs,
+    minibatch_size,
+    kl_weight,
+    improve_weight,
+    temperature,
+):
+    """Run adaptive hard-target distillation over shuffled minibatches."""
+    obs, masks, active, base_obs, base_masks, base_active, target_indices, improve_weights, kl_weights, margins = (
+        flat_batch
+    )
+    batch_size = obs.shape[0]
+    actual_minibatch_size = min(minibatch_size, batch_size)
+    num_complete_batches = max(batch_size // actual_minibatch_size, 1)
+    avg_loss = 0.0
+    avg_metrics = None
+
+    for _ in range(num_epochs):
+        key, permutation_key = jrandom.split(key)
+        permutation = jrandom.permutation(permutation_key, batch_size)
+        shuffled = (
+            obs[permutation],
+            masks[permutation],
+            active[permutation],
+            base_obs[permutation],
+            base_masks[permutation],
+            base_active[permutation],
+            target_indices[permutation],
+            improve_weights[permutation],
+            kl_weights[permutation],
+        )
+        epoch_loss = 0.0
+        epoch_metrics = None
+
+        for batch_idx in range(num_complete_batches):
+            start = batch_idx * actual_minibatch_size
+            end = start + actual_minibatch_size
+            minibatch = tuple(x[start:end] for x in shuffled)
+            student_network, opt_state, loss, metrics = train_adaptive_conservative_minibatch(
+                student_network,
+                base_network,
+                opt_state,
+                minibatch,
+                optimizer,
+                kl_weight,
+                improve_weight,
+                temperature,
+            )
+            epoch_loss += loss
+            if epoch_metrics is None:
+                epoch_metrics = metrics
+            else:
+                epoch_metrics = jax.tree.map(lambda a, b: a + b, epoch_metrics, metrics)
+
+        avg_loss = epoch_loss / num_complete_batches
+        avg_metrics = jax.tree.map(lambda x: x / num_complete_batches, epoch_metrics)
+
+    selected_margins = jnp.where(improve_weights > 0.0, margins, 0.0)
+    selected_count = jnp.maximum(jnp.sum((improve_weights > 0.0).astype(jnp.float32)), 1.0)
+    avg_metrics = dict(avg_metrics)
+    avg_metrics["mean_selected_margin"] = jnp.sum(selected_margins) / selected_count
+    avg_metrics["selected_samples"] = jnp.sum((improve_weights > 0.0).astype(jnp.float32))
+    return student_network, opt_state, avg_loss, avg_metrics, key
+
+
+def train_adaptive_soft_epoch(
+    student_network,
+    base_network,
+    opt_state,
+    flat_batch,
+    optimizer,
+    key,
+    num_epochs,
+    minibatch_size,
+    kl_weight,
+    improve_weight,
+    temperature,
+):
+    """Run adaptive soft-target distillation over shuffled minibatches."""
+    obs, masks, active, base_obs, base_masks, base_active, candidate_indices, target_probs, search_weights, kl_weights = (
+        flat_batch
+    )
+    batch_size = obs.shape[0]
+    actual_minibatch_size = min(minibatch_size, batch_size)
+    num_complete_batches = max(batch_size // actual_minibatch_size, 1)
+    avg_loss = 0.0
+    avg_metrics = None
+
+    for _ in range(num_epochs):
+        key, permutation_key = jrandom.split(key)
+        permutation = jrandom.permutation(permutation_key, batch_size)
+        shuffled = (
+            obs[permutation],
+            masks[permutation],
+            active[permutation],
+            base_obs[permutation],
+            base_masks[permutation],
+            base_active[permutation],
+            candidate_indices[permutation],
+            target_probs[permutation],
+            search_weights[permutation],
+            kl_weights[permutation],
+        )
+        epoch_loss = 0.0
+        epoch_metrics = None
+
+        for batch_idx in range(num_complete_batches):
+            start = batch_idx * actual_minibatch_size
+            end = start + actual_minibatch_size
+            minibatch = tuple(x[start:end] for x in shuffled)
+            student_network, opt_state, loss, metrics = train_adaptive_soft_minibatch(
+                student_network,
+                base_network,
+                opt_state,
+                minibatch,
+                optimizer,
+                kl_weight,
+                improve_weight,
+                temperature,
+            )
+            epoch_loss += loss
+            if epoch_metrics is None:
+                epoch_metrics = metrics
+            else:
+                epoch_metrics = jax.tree.map(lambda a, b: a + b, epoch_metrics, metrics)
+
+        avg_loss = epoch_loss / num_complete_batches
+        avg_metrics = jax.tree.map(lambda x: x / num_complete_batches, epoch_metrics)
+
+    avg_metrics = dict(avg_metrics)
+    avg_metrics["selected_samples"] = jnp.sum((search_weights > 0.0).astype(jnp.float32))
+    avg_metrics["mean_selected_margin"] = 0.0
+    return student_network, opt_state, avg_loss, avg_metrics, key
+
+
+@eqx.filter_jit
+def collect_adaptive_conservative_batch(
+    student_network,
+    base_network,
+    opponent_network,
+    states,
+    effective_sizes,
+    key,
+    num_steps,
+    policy_mode,
+    opponent_policy_mode,
+    learner_player,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    army_weight,
+    land_weight,
+    prior_weight,
+    terminal_score,
+    min_margin,
+    margin_scale,
+    max_weight,
+    pad_size,
+):
+    """Collect adaptive learner states labeled by hard search improvements."""
+    num_envs = states.armies.shape[0]
+
+    def body(carry, _):
+        states, key = carry
+        prior_info = jax.vmap(game.get_info)(states)
+        is_active = ~prior_info.is_done
+
+        obs_p0 = jax.vmap(lambda state: game.get_observation(state, 0))(states)
+        obs_p1 = jax.vmap(lambda state: game.get_observation(state, 1))(states)
+        learner_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
+        opponent_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
+        learner_obs_arr, active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
+            learner_obs,
+            effective_sizes,
+        )
+        masks = jax.vmap(
+            lambda obs, size: compute_adaptive_valid_move_mask(
+                obs.armies,
+                obs.owned_cells,
+                obs.mountains,
+                size,
+                pad_size,
+            )
+        )(learner_obs, effective_sizes)
+        base_obs_arr = learner_obs_arr
+        base_masks = masks
+        base_active = active
+
+        key, search_key, learner_key, opponent_key = jrandom.split(key, 4)
+        search_keys = jrandom.split(search_key, num_envs)
+        _, candidate_indices, _, search_scores = jax.vmap(
+            lambda state, size, sample_key: adaptive_rollout_search_candidates(
+                base_network,
+                state,
+                size,
+                sample_key,
+                learner_player,
+                top_k,
+                rollout_steps,
+                rollouts_per_action,
+                opponent_policy_mode,
+                army_weight,
+                land_weight,
+                prior_weight,
+                terminal_score,
+                pad_size,
+            )
+        )(states, effective_sizes, search_keys)
+        target_indices, improve_weights, margins = select_search_improvements(
+            candidate_indices,
+            search_scores,
+            min_margin,
+            margin_scale,
+            max_weight,
+        )
+        active_weights = is_active.astype(jnp.float32)
+        improve_weights = improve_weights * active_weights
+
+        learner_keys = jrandom.split(learner_key, num_envs)
+        opponent_keys = jrandom.split(opponent_key, num_envs)
+        learner_actions = jax.vmap(
+            lambda obs, size, sample_key: adaptive_policy_action(
+                student_network,
+                obs,
+                size,
+                sample_key,
+                policy_mode,
+                pad_size,
+            )
+        )(learner_obs, effective_sizes, learner_keys)
+        opponent_actions = jax.vmap(
+            lambda obs, size, sample_key: adaptive_policy_action(
+                opponent_network,
+                obs,
+                size,
+                sample_key,
+                opponent_policy_mode,
+                pad_size,
+            )
+        )(opponent_obs, effective_sizes, opponent_keys)
+        actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
+        next_states, _ = jax.vmap(game.step)(states, actions)
+        final_states = jax.tree.map(
+            lambda old, new: jnp.where(is_active.reshape(num_envs, *([1] * (old.ndim - 1))), new, old),
+            states,
+            next_states,
+        )
+        return (final_states, key), (
+            learner_obs_arr,
+            masks,
+            active,
+            base_obs_arr,
+            base_masks,
+            base_active,
+            target_indices,
+            improve_weights,
+            active_weights,
+            margins,
+        )
+
+    (states, key), batch = jax.lax.scan(body, (states, key), None, length=num_steps)
+    return states, batch, key
+
+
+@eqx.filter_jit
+def collect_adaptive_soft_batch(
+    student_network,
+    base_network,
+    opponent_network,
+    states,
+    effective_sizes,
+    key,
+    num_steps,
+    policy_mode,
+    opponent_policy_mode,
+    learner_player,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    army_weight,
+    land_weight,
+    prior_weight,
+    terminal_score,
+    score_temperature,
+    pad_size,
+):
+    """Collect adaptive learner states labeled by soft search-score targets."""
+    num_envs = states.armies.shape[0]
+
+    def body(carry, _):
+        states, key = carry
+        prior_info = jax.vmap(game.get_info)(states)
+        is_active = ~prior_info.is_done
+
+        obs_p0 = jax.vmap(lambda state: game.get_observation(state, 0))(states)
+        obs_p1 = jax.vmap(lambda state: game.get_observation(state, 1))(states)
+        learner_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
+        opponent_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
+        learner_obs_arr, active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
+            learner_obs,
+            effective_sizes,
+        )
+        masks = jax.vmap(
+            lambda obs, size: compute_adaptive_valid_move_mask(
+                obs.armies,
+                obs.owned_cells,
+                obs.mountains,
+                size,
+                pad_size,
+            )
+        )(learner_obs, effective_sizes)
+        base_obs_arr = learner_obs_arr
+        base_masks = masks
+        base_active = active
+
+        key, search_key, learner_key, opponent_key = jrandom.split(key, 4)
+        search_keys = jrandom.split(search_key, num_envs)
+        _, candidate_indices, _, search_scores = jax.vmap(
+            lambda state, size, sample_key: adaptive_rollout_search_candidates(
+                base_network,
+                state,
+                size,
+                sample_key,
+                learner_player,
+                top_k,
+                rollout_steps,
+                rollouts_per_action,
+                opponent_policy_mode,
+                army_weight,
+                land_weight,
+                prior_weight,
+                terminal_score,
+                pad_size,
+            )
+        )(states, effective_sizes, search_keys)
+        target_probs = search_score_target_probs(search_scores, score_temperature)
+        active_weights = is_active.astype(jnp.float32)
+
+        learner_keys = jrandom.split(learner_key, num_envs)
+        opponent_keys = jrandom.split(opponent_key, num_envs)
+        learner_actions = jax.vmap(
+            lambda obs, size, sample_key: adaptive_policy_action(
+                student_network,
+                obs,
+                size,
+                sample_key,
+                policy_mode,
+                pad_size,
+            )
+        )(learner_obs, effective_sizes, learner_keys)
+        opponent_actions = jax.vmap(
+            lambda obs, size, sample_key: adaptive_policy_action(
+                opponent_network,
+                obs,
+                size,
+                sample_key,
+                opponent_policy_mode,
+                pad_size,
+            )
+        )(opponent_obs, effective_sizes, opponent_keys)
+        actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
+        next_states, _ = jax.vmap(game.step)(states, actions)
+        final_states = jax.tree.map(
+            lambda old, new: jnp.where(is_active.reshape(num_envs, *([1] * (old.ndim - 1))), new, old),
+            states,
+            next_states,
+        )
+        return (final_states, key), (
+            learner_obs_arr,
+            masks,
+            active,
+            base_obs_arr,
+            base_masks,
+            base_active,
+            candidate_indices,
+            target_probs,
+            active_weights,
+            active_weights,
+        )
+
+    (states, key), batch = jax.lax.scan(body, (states, key), None, length=num_steps)
+    return states, batch, key

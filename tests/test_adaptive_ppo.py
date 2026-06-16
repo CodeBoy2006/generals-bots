@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
@@ -306,6 +307,56 @@ def test_adaptive_rollout_search_candidates_respects_effective_size():
     assert jnp.all((candidate_actions[:, 1] < effective_size) | ~non_pass)
     assert jnp.all((candidate_actions[:, 2] < effective_size) | ~non_pass)
     assert jnp.all(jnp.isfinite(search_scores))
+
+
+def test_collect_adaptive_soft_batch_returns_expected_shapes():
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import collect_adaptive_soft_batch
+
+    pad_size = 6
+    num_envs = 2
+    network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=pad_size, channels=(16, 16, 16, 8))
+    states = jax.tree.map(
+        lambda *xs: jnp.stack(xs),
+        make_padded_state(size=4, pad_to=pad_size),
+        make_padded_state(size=6, pad_to=pad_size),
+    )
+    effective_sizes = jnp.array([4, 6], dtype=jnp.int32)
+
+    _, batch, _ = collect_adaptive_soft_batch(
+        network,
+        network,
+        network,
+        states,
+        effective_sizes,
+        jrandom.PRNGKey(2),
+        num_steps=1,
+        policy_mode=0,
+        opponent_policy_mode=0,
+        learner_player=0,
+        top_k=2,
+        rollout_steps=1,
+        rollouts_per_action=1,
+        army_weight=12.0,
+        land_weight=8.0,
+        prior_weight=0.01,
+        terminal_score=1000.0,
+        score_temperature=1.0,
+        pad_size=pad_size,
+    )
+
+    obs, masks, active, base_obs, base_masks, base_active, candidate_indices, target_probs, search_weights, kl_weights = batch
+    assert obs.shape[:2] == (1, num_envs)
+    assert masks.shape == (1, num_envs, pad_size, pad_size, 4)
+    assert active.shape == (1, num_envs, pad_size, pad_size)
+    assert base_obs.shape == obs.shape
+    assert base_masks.shape == masks.shape
+    assert base_active.shape == active.shape
+    assert candidate_indices.shape == (1, num_envs, 2)
+    assert target_probs.shape == (1, num_envs, 2)
+    assert search_weights.shape == (1, num_envs)
+    assert kl_weights.shape == (1, num_envs)
+    assert jnp.allclose(jnp.sum(target_probs, axis=-1), jnp.ones((1, num_envs), dtype=jnp.float32))
 
 
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
