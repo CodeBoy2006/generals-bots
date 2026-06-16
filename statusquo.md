@@ -357,3 +357,9 @@
 - **Status:** Completed
 - **Next Steps:** Design dual-seat or alternating-seat adaptive PPO before spending longer PPO runs on a single learner seat.
 - **Context:** Player-1 short PPO from the same soft BC checkpoint improved a few rows locally but still had `min_win_rate = 0.00%`, with 12x12 player 1 and both 16x16 seats at 0% wins.
+
+## [2026-06-16 14:51] Adaptive GPU PPO V1
+- **Changes:** Documented the first CUDA adaptive BC/PPO run in `docs/expander-training-strategy.md`, including `/tmp/generals-adaptive-bc-gpu-v1.eqx`, alternating PPO checkpoints, 16x16-only curriculum, and the current best `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx`.
+- **Status:** Completed
+- **Next Steps:** Continue from the 70.31% min-win checkpoint with a targeted plan for 16x16 draw reduction and 8x8 decisive strength, likely requiring draw/timeout reward shaping, size weighting, or dual-seat batch training.
+- **Context:** CUDA JAX is available through `uv run --extra dev --extra cuda13`. The best adaptive checkpoint reached `min_win_rate = 70.31%` over 512 games/row at 750 steps, not the required >90% on all 8x8/12x12/16x16 seats.

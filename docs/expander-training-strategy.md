@@ -1356,6 +1356,66 @@ min_win_rate = 0.00%
 
 结论：短 CPU 训练量远远不足以产生可用 adaptive checkpoint；它只证明基础设施能跑、checkpoint 能保留、评估能输出完整矩阵。hard Expander teacher 在这个训练量下没有明显优于 soft target，且仍有多个 size-seat pair 为 0%。单独训练 player 1 能带来一点局部变化，但不能解决 12x12/16x16 的弱项。下一轮有意义的实验应使用 CUDA JAX 跑完整 BC 配方，或先设计并实现双座位/交替座位 adaptive PPO 训练，避免只针对一个 `learner_player` 更新。
 
+### GPU adaptive run v1
+
+2026-06-16 启用 `uv run --extra dev --extra cuda13` 后，JAX 可使用 `CudaDevice(id=0)`。先跑 adaptive BC warm start：
+
+```text
+model: /tmp/generals-adaptive-bc-gpu-v1.eqx
+effective training: 512 envs, 32 steps, about 1000 total BC iterations
+pool_size=12288, grid_sizes=8,12,16, pad_to=16
+final BC log: loss around 2.54, accuracy around 23%
+```
+
+该 BC checkpoint 的 256 games/row、750 step 评估：
+
+```text
+8x8 p0: 35.55%
+8x8 p1: 36.72%
+12x12 p0: 35.94%
+12x12 p1: 33.98%
+16x16 p0: 21.09%
+16x16 p1: 21.09%
+min_win_rate = 21.09%
+```
+
+随后从 BC 进行一系列 PPO probe：
+
+```text
+p0 all-size PPO -> /tmp/generals-adaptive-ppo-gpu-p0-v1.eqx
+  256 games/row min_win_rate = 28.52%
+
+p0 -> p1 all-size PPO -> /tmp/generals-adaptive-ppo-gpu-p0p1-v1.eqx
+  256 games/row min_win_rate = 56.25%
+
+p0 -> p1 -> p0 all-size PPO, iter-100 early stop
+  /tmp/generals-adaptive-ppo-gpu-alt6-p0-v1-checkpoints/generals-adaptive-ppo-gpu-alt6-p0-v1-iter-000100.eqx
+  256 games/row min_win_rate = 63.28%
+
+16x16-only p1 then 16x16-only p0 curriculum
+  /tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx
+  512 games/row min_win_rate = 70.31%
+```
+
+当前 best adaptive checkpoint 是 `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx`。512 games/row、750 step、sample policy 对 Expander 的矩阵：
+
+```text
+8x8 p0:  375/136/1, win rate 73.24%
+8x8 p1:  380/130/2, win rate 74.22%
+12x12 p0: 409/78/25, win rate 79.88%
+12x12 p1: 408/84/20, win rate 79.69%
+16x16 p0: 370/48/94, win rate 72.27%
+16x16 p1: 360/59/93, win rate 70.31%
+min_win_rate = 70.31%
+```
+
+Negative follow-ups:
+
+- Continuing all-size p1 from the 16-only best (`/tmp/generals-adaptive-ppo-gpu-alt8-p1-v1.eqx`) reduced the 256-row `min_win_rate` to 66.41%.
+- 8x8-only p0 training from the 16-only best (`/tmp/generals-adaptive-ppo-gpu-8p0-v1.eqx`) reduced the 256-row `min_win_rate` to 64.06%, mostly by hurting 16x16.
+
+结论：GPU 训练把 adaptive checkpoint 从 CPU baseline 的 0% 推到 70% min win rate，证明 adaptive architecture 和 alternating/curriculum PPO 方向有效；但距离六行都超过 90% 仍有明显差距。下一轮优先方向应是降低 16x16 draw rate 与提升 8x8 decisive strength，而不是继续盲目 all-size low-lr fine-tune。可尝试：更长 16-only curriculum、显式 draw/timeout 惩罚、按尺寸加权采样，或实现真正的双座位同批训练以减少顺序 fine-tune 的遗忘。
+
 ## 评估命令
 
 评估 player 0：
