@@ -561,3 +561,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote search-value checkpoints; implement explicit finish/draw/outcome supervision from actual rollout terminal status.
 - **Context:** Best retained search-value checkpoint was `/tmp/generals-adaptive-search-value-mixed-v1-ckpts/generals-adaptive-search-value-mixed-v1-iter-000020.eqx` at `68.36%` min over 256 games/row on seed 71140. It improved 16p1 to `71.48%` but left 16p0 at `68.36%`, below the current `71.29%`/512 best.
+
+## [2026-06-16 23:41] Adaptive Search Outcome Distillation
+- **Changes:** Added `--search-outcome-weight` to `adaptive_search_distill.py`, deriving loss/draw-or-unfinished/win labels from the best rollout-search candidate and training the existing outcome head with weighted CE. Updated focused tests and docs.
+- **Status:** Completed
+- **Next Steps:** Run a mixed-seat scoreboard-history CUDA probe with search outcome supervision and evaluate retained checkpoints with `--outcome-head`.
+- **Context:** Verification stayed focused: RED test failed on missing outcome loss API, then passed after implementation; related loss/collector/search tests and CPU CLI smoke passed; CUDA smoke with `--search-outcome-weight 0.1` saved `/tmp/generals-adaptive-search-outcome-smoke.eqx`.

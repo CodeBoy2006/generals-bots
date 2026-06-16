@@ -52,6 +52,9 @@ from train import checkpoint_path_for_iteration, prune_old_checkpoints, stack_le
 TARGET_MODE_NAMES = ("hard", "soft")
 SOFT_WEIGHT_MODE_NAMES = ("active", "improvement")
 SOFT_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(SOFT_WEIGHT_MODE_NAMES)}
+OUTCOME_LOSS = 0
+OUTCOME_DRAW = 1
+OUTCOME_WIN = 2
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -77,6 +80,15 @@ def search_value_targets(search_scores: jnp.ndarray, score_scale: float) -> jnp.
     return jnp.tanh(jnp.max(search_scores, axis=-1) / score_scale).astype(jnp.float32)
 
 
+def outcome_class_from_winner(winner: jnp.ndarray, player: jnp.ndarray) -> jnp.ndarray:
+    """Map a winner id to loss/draw/win from one learner perspective."""
+    return jnp.where(
+        winner < 0,
+        OUTCOME_DRAW,
+        jnp.where(winner == player, OUTCOME_WIN, OUTCOME_LOSS),
+    ).astype(jnp.int32)
+
+
 def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS):
     """Keep gradients only for newly added adaptive input paths."""
     masked = jax.tree.map(lambda leaf: jnp.zeros_like(leaf) if eqx.is_inexact_array(leaf) else leaf, grads)
@@ -92,6 +104,8 @@ def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT
         masked = eqx.tree_at(lambda net: net.global_linear1, masked, grads.global_linear1)
     if grads.global_linear2 is not None:
         masked = eqx.tree_at(lambda net: net.global_linear2, masked, grads.global_linear2)
+    if grads.outcome_linear2 is not None:
+        masked = eqx.tree_at(lambda net: net.outcome_linear2, masked, grads.outcome_linear2)
     return masked
 
 
@@ -177,11 +191,14 @@ def compute_adaptive_soft_conservative_loss(
     improvement_extra_weights,
     search_value_targets,
     search_value_weights,
+    search_outcome_targets,
+    search_outcome_weights,
     kl_weights,
     kl_weight: float,
     improve_weight: float,
     improvement_extra_weight: float,
     search_value_weight: float,
+    search_outcome_weight: float,
     temperature: float,
 ):
     """Return adaptive KL-to-base plus weighted soft top-k search-target loss."""
@@ -234,11 +251,31 @@ def compute_adaptive_soft_conservative_loss(
     value_normalizer = jnp.maximum(jnp.sum(search_value_weights), 1.0)
     search_value_errors = (student_values - search_value_targets) ** 2
     search_value_loss = jnp.sum(search_value_errors * search_value_weights) / value_normalizer
+    if student_network.outcome_head:
+        outcome_logits = jax.vmap(
+            lambda sample_obs, sample_mask, sample_active: student_network.logits_value_auxiliary(
+                sample_obs,
+                sample_mask,
+                sample_active,
+            )[3]
+        )(obs, masks, active)
+        outcome_log_probs = jax.nn.log_softmax(outcome_logits, axis=-1)
+        outcome_losses = -jnp.take_along_axis(outcome_log_probs, search_outcome_targets[:, None], axis=1)[:, 0]
+        outcome_predictions = jnp.argmax(outcome_logits, axis=-1)
+    else:
+        outcome_losses = jnp.zeros_like(search_outcome_weights)
+        outcome_predictions = jnp.zeros_like(search_outcome_targets)
+    outcome_normalizer = jnp.maximum(jnp.sum(search_outcome_weights), 1.0)
+    search_outcome_loss = jnp.sum(outcome_losses * search_outcome_weights) / outcome_normalizer
+    search_outcome_accuracy = (
+        jnp.sum((outcome_predictions == search_outcome_targets) * search_outcome_weights) / outcome_normalizer
+    )
     loss = (
         kl_weight * kl_loss
         + improve_weight * search_loss
         + improvement_extra_weight * improvement_extra_loss
         + search_value_weight * search_value_loss
+        + search_outcome_weight * search_outcome_loss
     )
 
     best_targets = jnp.take_along_axis(candidate_indices, jnp.argmax(target_probs, axis=-1)[:, None], axis=1)[:, 0]
@@ -254,6 +291,8 @@ def compute_adaptive_soft_conservative_loss(
         "improve_loss": search_loss,
         "improvement_extra_loss": jnp.where(improvement_extra_weight > 0.0, improvement_extra_loss, 0.0),
         "search_value_loss": jnp.where(search_value_weight > 0.0, search_value_loss, 0.0),
+        "search_outcome_loss": jnp.where(search_outcome_weight > 0.0, search_outcome_loss, 0.0),
+        "search_outcome_accuracy": jnp.where(search_outcome_weight > 0.0, search_outcome_accuracy, 0.0),
         "mean_search_value_target": jnp.sum(search_value_targets * search_value_weights) / value_normalizer,
         "selected_fraction": jnp.sum(search_weights) / kl_normalizer,
         "improvement_extra_fraction": jnp.sum(improvement_extra_weights) / kl_normalizer,
@@ -383,7 +422,7 @@ def adaptive_rollout_search_candidates(
         pad_size,
     )
 
-    def rollout_score(initial_state, rollout_key):
+    def rollout_result(initial_state, rollout_key):
         def body(carry, _):
             rollout_state, step_key = carry
             step_key, k0, k1 = jrandom.split(step_key, 3)
@@ -399,7 +438,12 @@ def adaptive_rollout_search_candidates(
         (final_state, _), _ = jax.lax.scan(body, (initial_state, rollout_key), None, length=rollout_steps)
         final_info = game.get_info(final_state)
         final_obs = game.get_observation(final_state, player)
-        return adaptive_score_observation(final_info, final_obs, player, army_weight, land_weight, terminal_score)
+        score = adaptive_score_observation(final_info, final_obs, player, army_weight, land_weight, terminal_score)
+        outcome = outcome_class_from_winner(
+            jnp.where(final_info.is_done, final_info.winner, -1),
+            player,
+        )
+        return score, outcome
 
     def candidate_score(action, prior_score, candidate_key):
         first_actions = jax.lax.cond(
@@ -410,17 +454,22 @@ def adaptive_rollout_search_candidates(
         )
         next_state, first_info = game.step(state, first_actions)
         rollout_keys = jrandom.split(candidate_key, rollouts_per_action)
-        scores = jax.vmap(lambda rollout_key: rollout_score(next_state, rollout_key))(rollout_keys)
+        scores, outcomes = jax.vmap(lambda rollout_key: rollout_result(next_state, rollout_key))(rollout_keys)
+        best_rollout = jnp.argmax(scores)
+        rollout_outcome = outcomes[best_rollout]
+        first_outcome = outcome_class_from_winner(first_info.winner, player)
         first_terminal = jnp.where(
             first_info.winner == player,
             terminal_score,
             jnp.where(first_info.winner == opponent_player, -terminal_score, 0.0),
         )
-        return first_terminal + jnp.mean(scores) + prior_weight * prior_score
+        candidate_score = first_terminal + jnp.mean(scores) + prior_weight * prior_score
+        candidate_outcome = jnp.where(first_info.is_done, first_outcome, rollout_outcome)
+        return candidate_score, candidate_outcome
 
     candidate_keys = jrandom.split(key, top_k)
-    scores = jax.vmap(candidate_score)(candidate_actions, prior_scores, candidate_keys)
-    return candidate_actions, candidate_indices, prior_scores, scores
+    scores, outcomes = jax.vmap(candidate_score)(candidate_actions, prior_scores, candidate_keys)
+    return candidate_actions, candidate_indices, prior_scores, scores, outcomes
 
 
 @eqx.filter_jit
@@ -441,7 +490,7 @@ def adaptive_rollout_search_action(
     pad_size,
 ):
     """Choose one adaptive action by scoring top-k prior actions with short rollouts."""
-    candidate_actions, _, _, scores = adaptive_rollout_search_candidates(
+    candidate_actions, _, _, scores, _ = adaptive_rollout_search_candidates(
         network,
         state,
         effective_size,
@@ -514,6 +563,7 @@ def train_adaptive_soft_minibatch(
     improve_weight,
     improvement_extra_weight,
     search_value_weight,
+    search_outcome_weight,
     temperature,
     freeze_legacy_weights=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
@@ -532,6 +582,8 @@ def train_adaptive_soft_minibatch(
         improvement_extra_weights,
         search_value_targets,
         search_value_weights,
+        search_outcome_targets,
+        search_outcome_weights,
         kl_weights,
     ) = minibatch
 
@@ -551,11 +603,14 @@ def train_adaptive_soft_minibatch(
             improvement_extra_weights,
             search_value_targets,
             search_value_weights,
+            search_outcome_targets,
+            search_outcome_weights,
             kl_weights,
             kl_weight,
             improve_weight,
             improvement_extra_weight,
             search_value_weight,
+            search_outcome_weight,
             temperature,
         )
 
@@ -609,6 +664,8 @@ def flatten_adaptive_soft_batch(
     improvement_extra_weights,
     search_value_targets,
     search_value_weights,
+    search_outcome_targets,
+    search_outcome_weights,
     kl_weights,
 ):
     """Flatten time/environment axes for adaptive soft-target distillation."""
@@ -626,6 +683,8 @@ def flatten_adaptive_soft_batch(
         improvement_extra_weights.reshape(batch_size),
         search_value_targets.reshape(batch_size),
         search_value_weights.reshape(batch_size),
+        search_outcome_targets.reshape(batch_size),
+        search_outcome_weights.reshape(batch_size),
         kl_weights.reshape(batch_size),
     )
 
@@ -718,6 +777,7 @@ def train_adaptive_soft_epoch(
     improve_weight,
     improvement_extra_weight,
     search_value_weight,
+    search_outcome_weight,
     temperature,
     freeze_legacy_weights=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
@@ -736,6 +796,8 @@ def train_adaptive_soft_epoch(
         improvement_extra_weights,
         search_value_targets,
         search_value_weights,
+        search_outcome_targets,
+        search_outcome_weights,
         kl_weights,
     ) = flat_batch
     batch_size = obs.shape[0]
@@ -760,6 +822,8 @@ def train_adaptive_soft_epoch(
             improvement_extra_weights[permutation],
             search_value_targets[permutation],
             search_value_weights[permutation],
+            search_outcome_targets[permutation],
+            search_outcome_weights[permutation],
             kl_weights[permutation],
         )
         epoch_loss = 0.0
@@ -779,6 +843,7 @@ def train_adaptive_soft_epoch(
                 improve_weight,
                 improvement_extra_weight,
                 search_value_weight,
+                search_outcome_weight,
                 temperature,
                 freeze_legacy_weights,
                 legacy_input_channels,
@@ -797,6 +862,7 @@ def train_adaptive_soft_epoch(
     avg_metrics["improvement_extra_samples"] = jnp.sum((improvement_extra_weights > 0.0).astype(jnp.float32))
     avg_metrics["mean_selected_margin"] = 0.0
     avg_metrics["search_value_samples"] = jnp.sum((search_value_weights > 0.0).astype(jnp.float32))
+    avg_metrics["search_outcome_samples"] = jnp.sum((search_outcome_weights > 0.0).astype(jnp.float32))
     return student_network, opt_state, avg_loss, avg_metrics, key
 
 
@@ -892,7 +958,7 @@ def collect_adaptive_conservative_batch(
 
         key, search_key, learner_key, opponent_key = jrandom.split(key, 4)
         search_keys = jrandom.split(search_key, num_envs)
-        _, candidate_indices, _, search_scores = jax.vmap(
+        _, candidate_indices, _, search_scores, _ = jax.vmap(
             lambda state, size, sample_key: adaptive_rollout_search_candidates(
                 base_network,
                 state,
@@ -1078,7 +1144,7 @@ def collect_adaptive_soft_batch(
 
         key, search_key, learner_key, opponent_key = jrandom.split(key, 4)
         search_keys = jrandom.split(search_key, num_envs)
-        _, candidate_indices, _, search_scores = jax.vmap(
+        _, candidate_indices, _, search_scores, candidate_outcomes = jax.vmap(
             lambda state, size, sample_key: adaptive_rollout_search_candidates(
                 base_network,
                 state,
@@ -1098,6 +1164,8 @@ def collect_adaptive_soft_batch(
         )(states, effective_sizes, search_keys)
         target_probs = search_score_target_probs(search_scores, score_temperature)
         value_targets = search_value_targets(search_scores, search_value_scale)
+        best_candidate = jnp.argmax(search_scores, axis=-1)
+        outcome_targets = jnp.take_along_axis(candidate_outcomes, best_candidate[:, None], axis=1)[:, 0]
         active_weights = is_active.astype(jnp.float32)
         search_weights = soft_search_weights(
             candidate_indices,
@@ -1176,6 +1244,8 @@ def collect_adaptive_soft_batch(
             improvement_extra_weights,
             value_targets,
             active_weights,
+            outcome_targets,
+            active_weights,
             active_weights,
         )
 
@@ -1202,6 +1272,7 @@ def parse_args():
     parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
+    parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--freeze-legacy-weights", action="store_true")
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
@@ -1218,6 +1289,7 @@ def parse_args():
     parser.add_argument("--soft-improvement-extra-weight", type=float, default=0.0)
     parser.add_argument("--search-value-weight", type=float, default=0.0)
     parser.add_argument("--search-value-scale", type=float, default=100.0)
+    parser.add_argument("--search-outcome-weight", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--score-temperature", type=float, default=1.0)
     parser.add_argument("--min-margin", type=float, default=25.0)
@@ -1271,10 +1343,11 @@ def parse_args():
         or args.improve_weight < 0.0
         or args.soft_improvement_extra_weight < 0.0
         or args.search_value_weight < 0.0
+        or args.search_outcome_weight < 0.0
     ):
         parser.error(
             "--kl-weight, --improve-weight, --soft-improvement-extra-weight, "
-            "and --search-value-weight must be non-negative"
+            "--search-value-weight, and --search-outcome-weight must be non-negative"
         )
     if args.search_value_scale <= 0.0:
         parser.error("--search-value-scale must be positive")
@@ -1363,10 +1436,13 @@ def main():
         f"kl={args.kl_weight:g}, improve={args.improve_weight:g}, "
         f"mode={args.target_mode}, soft_weight={args.soft_weight_mode}, "
         f"soft_extra={args.soft_improvement_extra_weight:g}, value={args.search_value_weight:g}, "
+        f"outcome={args.search_outcome_weight:g}, "
         f"score_temp={args.score_temperature:g}"
     )
     if args.search_value_weight > 0.0:
         print(f"Search value:  scale={args.search_value_scale:g}")
+    if args.search_outcome_weight > 0.0:
+        print("Search outcome: enabled")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -1381,6 +1457,8 @@ def main():
         init_channels=args.init_channels,
         input_channels=input_channels,
         init_input_channels=init_input_channels,
+        outcome_head=args.search_outcome_weight > 0.0,
+        init_outcome_head=args.init_outcome_head,
         global_context=network_global_context,
         init_global_context=args.init_global_context,
     )
@@ -1624,6 +1702,7 @@ def main():
                 args.improve_weight,
                 args.soft_improvement_extra_weight,
                 args.search_value_weight,
+                args.search_outcome_weight,
                 args.temperature,
                 args.freeze_legacy_weights,
                 ADAPTIVE_INPUT_CHANNELS,
@@ -1645,6 +1724,7 @@ def main():
                 f"KL: {float(metrics['kl_loss']):.5f} | "
                 f"Improve: {float(metrics['improve_loss']):.4f} | "
                 f"Value: {float(metrics.get('search_value_loss', 0.0)):.4f} | "
+                f"Outcome: {float(metrics.get('search_outcome_loss', 0.0)):.4f} | "
                 f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
                 f"({float(metrics['selected_fraction']) * 100:4.1f}%) | "
                 f"Margin: {float(metrics['mean_selected_margin']):6.1f} | "

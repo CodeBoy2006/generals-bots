@@ -2284,6 +2284,8 @@ Single-seat p0/p1 probes improved the weak same-seed 16p1 row slightly but still
 
 2026-06-16 follow-up added `--search-value-weight` and `--search-value-scale`. The teacher target is `tanh(max_topk_search_score / scale)`, weighted on active samples. This is a first Q/value-style teacher signal: rollout search can now supervise the scalar value/shared representation instead of only a single-step action distribution. Default weight is `0.0`, preserving previous action-CE distillation runs.
 
+2026-06-16 follow-up added `--search-outcome-weight`. The trainer now tracks the outcome class from the best rollout-search candidate: terminal win/loss is mapped from the learner perspective, and non-terminal within the rollout horizon is mapped to the draw/unfinished class. This uses the existing adaptive outcome head and gives search a direct finish/draw teaching channel. New checkpoints trained with this flag need `evaluate_adaptive_policy.py --outcome-head` when evaluated.
+
 Next fast GPU probe:
 
 ```bash
@@ -2301,6 +2303,7 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_sea
   --soft-improvement-extra-weight 0.02 \
   --search-value-weight 0.1 \
   --search-value-scale 100 \
+  --search-outcome-weight 0.1 \
   --learner-player mixed \
   --num-steps 8 \
   --num-iterations 20 \
