@@ -340,6 +340,58 @@ uv run python examples/_experimental/ppo/train.py 256 \
 
 `--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 或 `--opponent-policy-pool` 同时使用。`--opponent-policy-pool a.eqx,b.eqx` 会让普通 PPO 从多个同架构 frozen checkpoint 中采样对手，适合 checkpoint league best-response；可用 `--opponent-policy-pool-modes sample,greedy` 指定各自执行模式。`--checkpoint-dir`、`--checkpoint-every` 和 `--keep-checkpoints` 可周期保存并保留中间模型，便于后续 league 评估选模。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。`--general-target-reward-scale` 会用完整状态奖励强兵靠近敌方 general 的势能变化，可配合 `--general-target-min-army` 和 `--general-target-max-distance` 控制触发条件。`--path-assignment-reward-scale` 会在 reward 内缓存 passable shortest-path 距离场，并把强兵分配到敌方 general、非己方城市或前线目标，可用 `--path-assignment-*-weight` 控制目标优先级。`--policy-input augmented-full-state` 可让 PPO learner 使用 18 通道输入，通常与 `--init-input-channels 9` 一起从 v5 这类 9 通道 checkpoint 扩展。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
 
+自适应多尺寸 PPO：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 12288 \
+  --num-steps 32 \
+  --num-iterations 2000 \
+  --lr 0.0007 \
+  --model-path /tmp/generals-adaptive-bc-8-12-16.eqx
+```
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 700 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --opponent expander \
+  --terminal-reward-scale 1.0 \
+  --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-checkpoints \
+  --checkpoint-every 50 \
+  --keep-checkpoints 10 \
+  --model-path /tmp/generals-adaptive-ppo-8-12-16.eqx
+```
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/generals-adaptive-ppo-8-12-16.eqx \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-games 2048 \
+  --max-steps 750 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator generated \
+  --json-output /tmp/generals-adaptive-ppo-8-12-16-eval.json \
+  --require-win-rate 0.90
+```
+
+`behavior_clone_adaptive.py`、`train_adaptive.py` 和 `evaluate_adaptive_policy.py` 使用固定 `--pad-to` 画布保存一个 checkpoint，并通过 `--grid-sizes` 在 8x8、12x12、16x16 等有效棋盘之间切换。评估器会自动跑每个尺寸的 player 0 和 player 1 两个座位，`--require-win-rate 0.90` 会在任一尺寸或座位未达标时返回非零退出码。当前 GUI 和固定尺寸 `evaluate_policy.py` 仍只支持普通 `PolicyValueNetwork` checkpoint，不能直接加载 adaptive checkpoint。
+
 Residual GRU 记忆 PPO：
 
 ```bash

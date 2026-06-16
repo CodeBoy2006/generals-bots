@@ -327,3 +327,9 @@
 - **Status:** Completed
 - **Next Steps:** Update README, Chinese manual, expander training strategy, then run broader verification.
 - **Context:** Task 6 followed TDD: evaluator smoke first failed on missing script, then passed after implementation. A JAX concretization error in `lax.scan(length=max_steps)` was fixed by switching evaluator JIT wrappers to `eqx.filter_jit` so scalar config stays static.
+
+## [2026-06-16 13:55] Adaptive Multisize Documentation
+- **Changes:** Documented the adaptive 8/12/16 BC, PPO, and evaluation workflow in `README.md`, `docs/zh-manual.md`, and `docs/expander-training-strategy.md`, including the six-row size/seat 90% acceptance gate.
+- **Status:** Completed
+- **Next Steps:** Start a full adaptive BC warm start, then run adaptive PPO with periodic checkpoints and evaluate candidate `min_win_rate` across all required sizes and seats.
+- **Context:** Verification passed after the docs update: adaptive focused tests, full CPU pytest, compileall, and `git diff --check`. This proves the infrastructure and docs, not the 90% target checkpoint.

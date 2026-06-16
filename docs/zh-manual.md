@@ -319,6 +319,9 @@ examples/_experimental/ppo/
 - `train2.py`：基于 `GeneralsEnv` 包装的 PPO 训练路径。
 - `behavior_clone.py`：从 Expander teacher 做行为克隆。
 - `evaluate_policy.py`：批量评估保存的 `.eqx` 策略。
+- `behavior_clone_adaptive.py`：训练固定 padding 画布的自适应多尺寸行为克隆 warm start。
+- `train_adaptive.py`：训练一个可在多个有效棋盘尺寸上运行的 adaptive PPO checkpoint。
+- `evaluate_adaptive_policy.py`：按尺寸和座位矩阵评估 adaptive checkpoint。
 - `network.py`：Equinox 策略价值网络。
 - `common.py`：地图生成、动作编码、策略动作选择等共享工具。
 
@@ -481,7 +484,67 @@ uv run python examples/_experimental/ppo/train.py 256 \
 
 Residual GRU 记忆 PPO 可用 `train_recurrent.py` 训练。它在 CNN policy 上叠加 GRU hidden state 和 residual logits/value delta；`--freeze-base` 会冻结 warm-start 的 CNN，只训练记忆适配器，适合保护 v5 或行为克隆基线。对应评估入口是 `examples/_experimental/ppo/evaluate_recurrent_policy.py`。
 
-### 7.7 批量评估 checkpoint
+### 7.7 单 checkpoint 自适应多尺寸 PPO
+
+如果目标是一个 checkpoint 同时覆盖 8x8、12x12 和 16x16，可以使用 adaptive PPO 路径。它把所有局面 pad 到固定 `--pad-to` 画布，并额外输入 active-cell、padding 和尺寸坐标通道；动作空间使用同一个 `8 * pad_to * pad_to + 1` 展平空间，最后一个 logit 是全局 pass。
+
+先做 Expander-soft warm start：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 12288 \
+  --num-steps 32 \
+  --num-iterations 2000 \
+  --lr 0.0007 \
+  --model-path /tmp/generals-adaptive-bc-8-12-16.eqx
+```
+
+再对 Expander 做 PPO fine-tune，并周期保存候选：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 700 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --opponent expander \
+  --terminal-reward-scale 1.0 \
+  --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-checkpoints \
+  --checkpoint-every 50 \
+  --keep-checkpoints 10 \
+  --model-path /tmp/generals-adaptive-ppo-8-12-16.eqx
+```
+
+验收时必须同时测每个尺寸和两个座位：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/generals-adaptive-ppo-8-12-16.eqx \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-games 2048 \
+  --max-steps 750 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator generated \
+  --json-output /tmp/generals-adaptive-ppo-8-12-16-eval.json \
+  --require-win-rate 0.90
+```
+
+`evaluate_adaptive_policy.py` 输出六行结果：3 个尺寸乘以 2 个座位。`min_win_rate` 是最弱一行的总胜率；draw 不计为 win。当前 adaptive checkpoint 使用 `AdaptivePolicyValueNetwork`，不兼容固定尺寸 GUI、`evaluate_policy.py` 或普通 `PolicyValueNetwork` checkpoint。
+
+### 7.8 批量评估 checkpoint
 
 评估行为克隆或 PPO checkpoint：
 
@@ -522,7 +585,7 @@ uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-ca
   --policy-player 0
 ```
 
-### 7.8 可视化训练好的策略
+### 7.9 可视化训练好的策略
 
 可视化 `.eqx` 模型：
 
@@ -539,7 +602,7 @@ uv run python examples/_experimental/visualize_policy.py /tmp/generals-ppo-8x8-g
 
 可视化时应保持 `--grid-size` 和地图生成参数与训练 checkpoint 兼容，否则网络尺寸或输入分布可能不匹配。
 
-### 7.9 玩家对战训练好的策略
+### 7.10 玩家对战训练好的策略
 
 可以用本地 pygame 窗口和 `.eqx` PPO checkpoint 对战：
 

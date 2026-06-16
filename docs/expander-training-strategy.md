@@ -10,6 +10,8 @@
 
 该 checkpoint 在 sampled policy 模式下，对 randomized Expander 的独立 2048 局评估超过 90% 总胜率。`.eqx` 是实验产物，应保存在 `/tmp` 或实验目录，不提交进 Git。
 
+当前新增目标是训练一个 adaptive checkpoint，在 8x8、12x12 和 16x16 generated 地图上都对 Expander 超过 90% 总胜率。它比现有 v5 结果更严格：同一个模型文件必须覆盖三个有效棋盘尺寸，并且每个尺寸都要测 player 0 和 player 1。
+
 ## 目标与判定标准
 
 训练目标要用独立评估确认，不能只看训练过程中的 rollout 胜率。
@@ -29,6 +31,20 @@
 - 目标胜率按总局数计算，draw 不是 win
 
 不要只报告 decisive win rate。decisive win rate 可以辅助分析，但如果 draw 很多，总胜率仍然不足。
+
+adaptive 多尺寸目标的验收标准：
+
+- checkpoint：同一个 `AdaptivePolicyValueNetwork` `.eqx` 文件
+- 有效尺寸：8x8、12x12、16x16
+- padding：`--pad-to 16`
+- 地图：generated
+- opponent：`expander`
+- policy mode：`sample`
+- max steps：建议 750，避免 12x12/16x16 因截断过早变成 draw
+- 每个尺寸和座位至少 2048 局
+- 达标条件：六个 size-seat pair 的总胜率都超过 90%
+
+使用 `evaluate_adaptive_policy.py --require-win-rate 0.90` 可以把该门槛变成 CI/脚本可读的非零退出条件。
 
 ## 环境准备
 
@@ -1193,6 +1209,75 @@ KL near interrupt: about 0.03
 ```
 
 这说明“简单扩宽 + search-label 交叉熵”仍不足以压缩 search teacher。后续若继续走纯 checkpoint 路线，应优先尝试混合目标：保持 v5 行为的 KL/BC 权重更强、只在高置信 search 改进样本上更新、或使用价值/优势回归而不是强制动作分类。
+
+## 阶段七：adaptive 8/12/16 多尺寸训练
+
+固定尺寸 v5 只解决 8x8。要推进“8x8、12x12、16x16 都超过 Expander 90%”的新目标，当前新增了一条单 checkpoint adaptive 训练路径：
+
+- `AdaptivePolicyValueNetwork` 固定使用 `pad_to=16` 的输入画布。
+- 输入通道在标准 fogged observation 外追加 active-cell、padding、坐标和尺寸比例信息。
+- 动作空间固定为 `8 * pad_to * pad_to + 1`，最后一个 logit 是全局 pass。
+- value head 只在 active cells 上池化，避免 padding 区域污染不同尺寸的价值估计。
+- reset pool 按 `--grid-sizes` 做尺寸均衡采样，generated 地图按有效尺寸自动设置默认 minimum general distance。
+
+推荐先训练 adaptive Expander-soft warm start：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 12288 \
+  --num-steps 32 \
+  --num-iterations 2000 \
+  --lr 0.0007 \
+  --model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
+  --seed 47000
+```
+
+再从 BC checkpoint 对 Expander 做 PPO：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 700 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --opponent expander \
+  --terminal-reward-scale 1.0 \
+  --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
+  --checkpoint-dir /tmp/generals-adaptive-ppo-checkpoints \
+  --checkpoint-every 50 \
+  --keep-checkpoints 10 \
+  --model-path /tmp/generals-adaptive-ppo-8-12-16.eqx \
+  --seed 47100
+```
+
+每个候选 checkpoint 都必须使用 size-seat 矩阵评估：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/generals-adaptive-ppo-8-12-16.eqx \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-games 2048 \
+  --max-steps 750 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator generated \
+  --json-output /tmp/generals-adaptive-ppo-8-12-16-eval.json \
+  --require-win-rate 0.90 \
+  --seed 47200
+```
+
+当前状态：adaptive 训练、BC 和评估基础设施已可运行并有 CPU smoke coverage，但还没有任何 checkpoint 证明六个 size-seat pair 都超过 90%。下一步应先跑完整 BC，再用 `--checkpoint-every` 保存 PPO 候选，并优先评估中间 checkpoint 的 `min_win_rate`，避免只看训练 rollout 胜率。
 
 ## 评估命令
 
