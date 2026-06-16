@@ -513,3 +513,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the 256-env CUDA scoreboard-history triage from the 71.29% search-distill checkpoint and compare retained checkpoints at 256 games/row.
 - **Context:** Focused adaptive tests passed (`43 passed`), compileall and `git diff --check` passed, and CUDA train/eval smoke ran on `cuda:0`. Full pytest was interrupted after 53 passing tests to prioritize fast training iteration per user direction.
+
+## [2026-06-16 22:58] Adaptive Scoreboard History GPU Triage
+- **Changes:** Ran scoreboard-history CUDA triage, documented 256-env OOM and 128-env retained checkpoint evaluations in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote history checkpoints; next fast follow-up should reduce PPO drift, for example lower LR/shorter history continuation or distillation/replay for the new history/global branch.
+- **Context:** 256 envs OOMed even with minibatch 512. The 128-env run completed, and best retained checkpoint was iter 40/final at `70.31%` min over 256 games/row on seed 70040, improving same-seed source `68.75%` but below the existing 512-row `71.29%` candidate.

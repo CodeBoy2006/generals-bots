@@ -2209,6 +2209,36 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --seed 70030
 ```
 
+GPU triage result:
+
+```text
+256 envs, minibatch 1024: OOM in train_minibatch_step while allocating 1.88 GiB.
+256 envs, minibatch 512: same OOM.
+128 envs, minibatch 512: completed at about 46k SPS.
+
+source, seed 70040:
+  rows = 8p0 69.14%, 8p1 77.34%, 12p0 79.69%, 12p1 74.22%, 16p0 71.88%, 16p1 68.75%
+  min = 68.75%
+
+history iter10:
+  rows = 8p0 71.48%, 8p1 77.73%, 12p0 83.98%, 12p1 79.30%, 16p0 68.36%, 16p1 71.48%
+  min = 68.36%
+
+history iter20:
+  rows = 8p0 70.31%, 8p1 75.78%, 12p0 79.69%, 12p1 78.12%, 16p0 71.88%, 16p1 68.36%
+  min = 68.36%
+
+history iter30:
+  rows = 8p0 67.19%, 8p1 75.78%, 12p0 80.86%, 12p1 82.03%, 16p0 69.92%, 16p1 69.92%
+  min = 67.19%
+
+history iter40/final:
+  rows = 8p0 73.83%, 8p1 76.95%, 12p0 79.69%, 12p1 78.52%, 16p0 70.31%, 16p1 71.09%
+  min = 70.31%
+```
+
+结论更新：scoreboard history has useful signal on this seed, improving source min from 68.75% to 70.31%, but it still does not beat the existing 512-row 71.29% candidate. It also shifts weakness between 16p0/16p1 and does not fix PPO drift. Do not promote to 512-row validation. The next fast follow-up should reduce policy drift: either lower LR/shorter continuation for the history model, or train the new history/global branch with distillation/replay instead of full PPO updates.
+
 ## 评估命令
 
 评估 player 0：
