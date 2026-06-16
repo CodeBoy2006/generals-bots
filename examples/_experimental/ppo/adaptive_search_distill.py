@@ -25,14 +25,20 @@ from generals.core.game import GameInfo
 from generals.core.observation import Observation
 
 from adaptive_common import (
+    ADAPTIVE_GLOBAL_INPUT_CHANNELS,
+    ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
+    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_index_to_action,
     adaptive_obs_to_array,
+    adaptive_scoreboard_features,
+    adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
     parse_grid_sizes,
+    reset_adaptive_scoreboard_history,
 )
 from adaptive_network import load_or_create_adaptive_network
 from common import POLICY_MODE_NAME_TO_ID, POLICY_MODE_NAMES
@@ -46,6 +52,11 @@ from train import checkpoint_path_for_iteration, prune_old_checkpoints, stack_le
 TARGET_MODE_NAMES = ("hard", "soft")
 SOFT_WEIGHT_MODE_NAMES = ("active", "improvement")
 SOFT_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(SOFT_WEIGHT_MODE_NAMES)}
+
+
+def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
+    """Return empty previous-scoreboard features for vectorized distillation rollouts."""
+    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
 def compute_adaptive_conservative_loss(
@@ -244,9 +255,24 @@ def adaptive_score_observation(
     return terminal + army_weight * army_balance + land_weight * land_balance
 
 
-def adaptive_policy_action(network, obs, effective_size, key, policy_mode, pad_size: int):
+def adaptive_policy_action(
+    network,
+    obs,
+    effective_size,
+    key,
+    policy_mode,
+    pad_size: int,
+    global_context: bool = False,
+    scoreboard_history: jnp.ndarray | None = None,
+):
     """Dispatch an adaptive checkpoint action using greedy or sampled execution."""
-    obs_arr, active = adaptive_obs_to_array(obs, effective_size, pad_size)
+    obs_arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size,
+        pad_size,
+        include_global_context=global_context,
+        scoreboard_history=scoreboard_history,
+    )
     mask = compute_adaptive_valid_move_mask(
         obs.armies,
         obs.owned_cells,
@@ -708,12 +734,15 @@ def collect_adaptive_conservative_batch(
     margin_scale,
     max_weight,
     pad_size,
+    global_context=False,
+    scoreboard_history_enabled=False,
 ):
     """Collect adaptive learner states labeled by hard search improvements."""
     num_envs = states.armies.shape[0]
+    scoreboard_history = empty_scoreboard_history(num_envs)
 
     def body(carry, _):
-        states, key = carry
+        states, key, scoreboard_history = carry
         prior_info = jax.vmap(game.get_info)(states)
         is_active = ~prior_info.is_done
 
@@ -721,10 +750,38 @@ def collect_adaptive_conservative_batch(
         obs_p1 = jax.vmap(lambda state: game.get_observation(state, 1))(states)
         learner_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
         opponent_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
-        learner_obs_arr, active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
-            learner_obs,
-            effective_sizes,
-        )
+        if scoreboard_history_enabled:
+            current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
+                learner_obs,
+                effective_sizes,
+            )
+            history_context = adaptive_scoreboard_history_context(scoreboard_history, current_scoreboard)
+            learner_obs_arr, active = jax.vmap(
+                lambda obs, size, history: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=True,
+                    scoreboard_history=history,
+                )
+            )(
+                learner_obs,
+                effective_sizes,
+                history_context,
+            )
+        else:
+            current_scoreboard = scoreboard_history
+            learner_obs_arr, active = jax.vmap(
+                lambda obs, size: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=global_context,
+                )
+            )(
+                learner_obs,
+                effective_sizes,
+            )
         masks = jax.vmap(
             lambda obs, size: compute_adaptive_valid_move_mask(
                 obs.armies,
@@ -734,9 +791,15 @@ def collect_adaptive_conservative_batch(
                 pad_size,
             )
         )(learner_obs, effective_sizes)
-        base_obs_arr = learner_obs_arr
+        if global_context or scoreboard_history_enabled:
+            base_obs_arr, base_active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
+                learner_obs,
+                effective_sizes,
+            )
+        else:
+            base_obs_arr = learner_obs_arr
+            base_active = active
         base_masks = masks
-        base_active = active
 
         key, search_key, learner_key, opponent_key = jrandom.split(key, 4)
         search_keys = jrandom.split(search_key, num_envs)
@@ -770,16 +833,31 @@ def collect_adaptive_conservative_batch(
 
         learner_keys = jrandom.split(learner_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
-        learner_actions = jax.vmap(
-            lambda obs, size, sample_key: adaptive_policy_action(
-                student_network,
-                obs,
-                size,
-                sample_key,
-                policy_mode,
-                pad_size,
-            )
-        )(learner_obs, effective_sizes, learner_keys)
+        if scoreboard_history_enabled:
+            learner_actions = jax.vmap(
+                lambda obs, size, sample_key, history: adaptive_policy_action(
+                    student_network,
+                    obs,
+                    size,
+                    sample_key,
+                    policy_mode,
+                    pad_size,
+                    global_context=True,
+                    scoreboard_history=history,
+                )
+            )(learner_obs, effective_sizes, learner_keys, history_context)
+        else:
+            learner_actions = jax.vmap(
+                lambda obs, size, sample_key: adaptive_policy_action(
+                    student_network,
+                    obs,
+                    size,
+                    sample_key,
+                    policy_mode,
+                    pad_size,
+                    global_context=global_context,
+                )
+            )(learner_obs, effective_sizes, learner_keys)
         opponent_actions = jax.vmap(
             lambda obs, size, sample_key: adaptive_policy_action(
                 opponent_network,
@@ -797,7 +875,9 @@ def collect_adaptive_conservative_batch(
             states,
             next_states,
         )
-        return (final_states, key), (
+        final_info = jax.vmap(game.get_info)(final_states)
+        next_scoreboard_history = reset_adaptive_scoreboard_history(current_scoreboard, final_info.is_done)
+        return (final_states, key, next_scoreboard_history), (
             learner_obs_arr,
             masks,
             active,
@@ -810,7 +890,7 @@ def collect_adaptive_conservative_batch(
             margins,
         )
 
-    (states, key), batch = jax.lax.scan(body, (states, key), None, length=num_steps)
+    (states, key, _), batch = jax.lax.scan(body, (states, key, scoreboard_history), None, length=num_steps)
     return states, batch, key
 
 
@@ -839,12 +919,15 @@ def collect_adaptive_soft_batch(
     max_weight,
     score_temperature,
     pad_size,
+    global_context=False,
+    scoreboard_history_enabled=False,
 ):
     """Collect adaptive learner states labeled by soft search-score targets."""
     num_envs = states.armies.shape[0]
+    scoreboard_history = empty_scoreboard_history(num_envs)
 
     def body(carry, _):
-        states, key = carry
+        states, key, scoreboard_history = carry
         prior_info = jax.vmap(game.get_info)(states)
         is_active = ~prior_info.is_done
 
@@ -852,10 +935,38 @@ def collect_adaptive_soft_batch(
         obs_p1 = jax.vmap(lambda state: game.get_observation(state, 1))(states)
         learner_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
         opponent_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
-        learner_obs_arr, active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
-            learner_obs,
-            effective_sizes,
-        )
+        if scoreboard_history_enabled:
+            current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
+                learner_obs,
+                effective_sizes,
+            )
+            history_context = adaptive_scoreboard_history_context(scoreboard_history, current_scoreboard)
+            learner_obs_arr, active = jax.vmap(
+                lambda obs, size, history: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=True,
+                    scoreboard_history=history,
+                )
+            )(
+                learner_obs,
+                effective_sizes,
+                history_context,
+            )
+        else:
+            current_scoreboard = scoreboard_history
+            learner_obs_arr, active = jax.vmap(
+                lambda obs, size: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=global_context,
+                )
+            )(
+                learner_obs,
+                effective_sizes,
+            )
         masks = jax.vmap(
             lambda obs, size: compute_adaptive_valid_move_mask(
                 obs.armies,
@@ -865,9 +976,15 @@ def collect_adaptive_soft_batch(
                 pad_size,
             )
         )(learner_obs, effective_sizes)
-        base_obs_arr = learner_obs_arr
+        if global_context or scoreboard_history_enabled:
+            base_obs_arr, base_active = jax.vmap(lambda obs, size: adaptive_obs_to_array(obs, size, pad_size))(
+                learner_obs,
+                effective_sizes,
+            )
+        else:
+            base_obs_arr = learner_obs_arr
+            base_active = active
         base_masks = masks
-        base_active = active
 
         key, search_key, learner_key, opponent_key = jrandom.split(key, 4)
         search_keys = jrandom.split(search_key, num_envs)
@@ -911,16 +1028,31 @@ def collect_adaptive_soft_batch(
 
         learner_keys = jrandom.split(learner_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
-        learner_actions = jax.vmap(
-            lambda obs, size, sample_key: adaptive_policy_action(
-                student_network,
-                obs,
-                size,
-                sample_key,
-                policy_mode,
-                pad_size,
-            )
-        )(learner_obs, effective_sizes, learner_keys)
+        if scoreboard_history_enabled:
+            learner_actions = jax.vmap(
+                lambda obs, size, sample_key, history: adaptive_policy_action(
+                    student_network,
+                    obs,
+                    size,
+                    sample_key,
+                    policy_mode,
+                    pad_size,
+                    global_context=True,
+                    scoreboard_history=history,
+                )
+            )(learner_obs, effective_sizes, learner_keys, history_context)
+        else:
+            learner_actions = jax.vmap(
+                lambda obs, size, sample_key: adaptive_policy_action(
+                    student_network,
+                    obs,
+                    size,
+                    sample_key,
+                    policy_mode,
+                    pad_size,
+                    global_context=global_context,
+                )
+            )(learner_obs, effective_sizes, learner_keys)
         opponent_actions = jax.vmap(
             lambda obs, size, sample_key: adaptive_policy_action(
                 opponent_network,
@@ -938,7 +1070,9 @@ def collect_adaptive_soft_batch(
             states,
             next_states,
         )
-        return (final_states, key), (
+        final_info = jax.vmap(game.get_info)(final_states)
+        next_scoreboard_history = reset_adaptive_scoreboard_history(current_scoreboard, final_info.is_done)
+        return (final_states, key, next_scoreboard_history), (
             learner_obs_arr,
             masks,
             active,
@@ -952,7 +1086,7 @@ def collect_adaptive_soft_batch(
             active_weights,
         )
 
-    (states, key), batch = jax.lax.scan(body, (states, key), None, length=num_steps)
+    (states, key, _), batch = jax.lax.scan(body, (states, key, scoreboard_history), None, length=num_steps)
     return states, batch, key
 
 
@@ -971,6 +1105,10 @@ def parse_args():
     parser.add_argument("--channels", default=None)
     parser.add_argument("--base-channels", default=None)
     parser.add_argument("--init-channels", default=None)
+    parser.add_argument("--global-context", action="store_true")
+    parser.add_argument("--scoreboard-history", action="store_true")
+    parser.add_argument("--init-global-context", action="store_true")
+    parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
@@ -1048,6 +1186,8 @@ def parse_args():
         parser.error("city army range must satisfy min < max")
     if args.checkpoint_every < 0 or args.keep_checkpoints < 0:
         parser.error("--checkpoint-every and --keep-checkpoints cannot be negative")
+    if args.init_input_channels is not None and args.init_input_channels <= 0:
+        parser.error("--init-input-channels must be positive")
     try:
         args.channels = parse_policy_channels(args.channels)
         args.base_channels = parse_policy_channels(args.base_channels or args.channels)
@@ -1063,6 +1203,16 @@ def main():
     init_model_path = args.init_model_path or args.base_model_path
     policy_mode = POLICY_MODE_NAME_TO_ID[args.policy_mode]
     opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
+    network_global_context = args.global_context or args.scoreboard_history
+    if args.scoreboard_history:
+        input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
+    elif network_global_context:
+        input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
+    else:
+        input_channels = ADAPTIVE_INPUT_CHANNELS
+    init_input_channels = args.init_input_channels
+    if init_input_channels is None and network_global_context and not args.init_global_context:
+        init_input_channels = ADAPTIVE_INPUT_CHANNELS
 
     print("Adaptive conservative rollout-search distillation")
     print(f"Device:        {jax.devices()[0]}")
@@ -1074,6 +1224,15 @@ def main():
         print(f"Size weights:  {weights_label}")
     print(f"Student:       {init_model_path} channels={args.channels}")
     print(f"Base/Search:   {args.base_model_path} channels={args.base_channels}")
+    print(f"Student input: {input_channels} channels")
+    if init_input_channels is not None:
+        print(f"Warm inputs:   {init_input_channels} channels")
+    if args.init_global_context:
+        print("Warm global:   enabled")
+    if args.scoreboard_history:
+        print("Score history: enabled")
+    elif network_global_context:
+        print("Global ctx:    enabled")
     print(f"Learner:       player {args.learner_player}")
     print(f"Rollout:       {args.num_iterations} x {args.num_steps} steps, envs={args.num_envs}")
     print(
@@ -1098,12 +1257,18 @@ def main():
         init_model_path=init_model_path,
         channels=args.channels,
         init_channels=args.init_channels,
+        input_channels=input_channels,
+        init_input_channels=init_input_channels,
+        global_context=network_global_context,
+        init_global_context=args.init_global_context,
     )
     base_network = load_or_create_adaptive_network(
         base_key,
         pad_size=args.pad_to,
         init_model_path=args.base_model_path,
         channels=args.base_channels,
+        input_channels=ADAPTIVE_INPUT_CHANNELS,
+        global_context=False,
     )
     opponent_network = base_network
     optimizer = optax.adam(args.lr)
@@ -1151,6 +1316,8 @@ def main():
                 args.margin_scale,
                 args.max_improve_weight,
                 args.pad_to,
+                network_global_context,
+                args.scoreboard_history,
             )
             flat_batch = flatten_adaptive_conservative_batch(*batch)
             student_network, opt_state, loss, metrics, update_key = train_adaptive_conservative_epoch(
@@ -1191,6 +1358,8 @@ def main():
                 args.max_improve_weight,
                 args.score_temperature,
                 args.pad_to,
+                network_global_context,
+                args.scoreboard_history,
             )
             flat_batch = flatten_adaptive_soft_batch(*batch)
             student_network, opt_state, loss, metrics, update_key = train_adaptive_soft_epoch(

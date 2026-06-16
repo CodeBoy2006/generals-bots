@@ -2257,6 +2257,62 @@ history lr1e-6 iter20/final:
 
 结论更新：lower LR reduces the visible training-collapse pattern and improves the same-seed weak 16p0 row, but it still does not approach the current promotion bar. Plain PPO continuation, even with history inputs, remains too unstable and too low-signal. The next implementation target should be a distillation/replay path that can train the added global/history representation while anchoring the old policy, instead of applying full PPO pressure to every shared parameter.
 
+### Adaptive scoreboard history distillation
+
+2026-06-16 `adaptive_search_distill.py` now supports `--global-context` and `--scoreboard-history` for the student network. The design deliberately keeps `base_network`, rollout search, and opponent execution on the old 15-channel template, while the student receives 20/30-channel observations and a per-env scoreboard-history carry. This lets the new global/history branch learn from KL/search targets without turning the frozen teacher into a moving architecture target.
+
+Warm-start from the current 15-channel best remains:
+
+```bash
+--scoreboard-history \
+--init-input-channels 15
+```
+
+CUDA smoke passed on `cuda:0`:
+
+```text
+student/base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 16 envs, num_steps=1, num_iterations=2, top_k=2,
+        rollout_steps=1, rollouts_per_action=1, learner_player=1,
+        target_mode=soft, soft_weight_mode=active, scoreboard_history=True
+result: saved /tmp/generals-adaptive-history-distill-smoke.eqx
+```
+
+Next fast GPU probe:
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_search_distill.py 64 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 1024 \
+  --base-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --model-path /tmp/generals-adaptive-history-distill-p1-v1.eqx \
+  --target-mode soft \
+  --soft-weight-mode active \
+  --soft-improvement-extra-weight 0.02 \
+  --learner-player 1 \
+  --num-steps 8 \
+  --num-iterations 20 \
+  --num-epochs 1 \
+  --minibatch-size 512 \
+  --lr 0.000001 \
+  --top-k 4 \
+  --rollout-steps 8 \
+  --rollouts-per-action 1 \
+  --channels 32,32,32,16 \
+  --base-channels 32,32,32,16 \
+  --init-channels 32,32,32,16 \
+  --scoreboard-history \
+  --init-input-channels 15 \
+  --checkpoint-dir /tmp/generals-adaptive-history-distill-p1-v1-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 3 \
+  --seed 71100
+```
+
 ## 评估命令
 
 评估 player 0：

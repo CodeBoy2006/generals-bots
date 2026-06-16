@@ -525,3 +525,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop plain PPO continuation sweeps for history inputs; implement a distillation/replay path that trains the new global/history representation while anchoring the old policy.
 - **Context:** Lower LR improved same-seed source min from `66.02%` to `68.75%` over 256 games/row, mainly repairing 16p0/16p1, but remained below the 71.29%/512 best and does not merit promotion.
+
+## [2026-06-16 23:08] Adaptive History Search Distillation
+- **Changes:** Added `--global-context` and `--scoreboard-history` student-input support to `examples/_experimental/ppo/adaptive_search_distill.py`, including per-env scoreboard-history carry/reset and 15-channel base/search KL anchors. Updated the focused CLI smoke test and docs.
+- **Status:** Completed
+- **Next Steps:** Run the short CUDA history-distill p1 probe, evaluate retained checkpoints at 256 games/row, and only promote if the six-row min clearly beats the current `71.29%`/512 best.
+- **Context:** Verification was intentionally focused for speed: compileall, `git diff --check`, one CPU CLI smoke (`1 passed`), and a CUDA smoke on `cuda:0` saving `/tmp/generals-adaptive-history-distill-smoke.eqx`.
