@@ -899,7 +899,87 @@ player 1 vs Expander, seed 26751:
   player 1: 148/809/67
 ```
 
-结论：RNN/GRU 机制已经可训练、可评估，并且 `--freeze-base` 能保护 warm-start base 不被 PPO 迅速破坏。没有强 v5 起点时，fresh recurrent PPO 学不到 Expander 胜局；弱 BC 起点上，unfrozen PPO 会退化，frozen-base RNN 基本保持 BC 强度但没有明显提升。后续真正验证记忆收益，应把 v5 checkpoint 放回 `/tmp/generals-ppo-8x8-expander-gpu-v5.eqx` 后，用 `--freeze-base` 先训练 residual memory，再逐步解冻 base 或降低学习率。
+结论：RNN/GRU 机制已经可训练、可评估，并且 `--freeze-base` 能保护 warm-start base 不被 PPO 迅速破坏。没有强 v5 起点时，fresh recurrent PPO 学不到 Expander 胜局；弱 BC 起点上，unfrozen PPO 会退化，frozen-base RNN 基本保持 BC 强度但没有明显提升。
+
+v5 checkpoint 放回仓库根目录后，执行了两组 frozen-base residual GRU 训练。共同设置：
+
+- base/init/opponent：`generals-ppo-8x8-expander-gpu-v5.eqx`
+- opponent mode：`sample`
+- hidden size：64
+- envs：512
+- steps：64
+- iterations：500
+- epochs/minibatch：4 / 4096
+- learning rate：`2e-6`
+- terminal reward scale：`2.0`
+- CNN base：`--freeze-base`
+
+训练命令使用仓库根目录的 v5 文件：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_recurrent.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 500 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000002 \
+  --truncation 500 \
+  --hidden-size 64 \
+  --freeze-base \
+  --policy-input observation \
+  --init-model-path generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 2.0 \
+  --model-path /tmp/generals-recurrent-ppo-8x8-v5-freeze-p0-v1.eqx \
+  --seed 26810
+```
+
+把 `--learner-player` 改成 `1` 并把输出路径改为 `/tmp/generals-recurrent-ppo-8x8-v5-freeze-p1-v1.eqx` 可复现第二组。
+
+对 frozen v5 sample 的同 seed 评估如下：
+
+```text
+/tmp/generals-recurrent-ppo-8x8-v5-freeze-p0-v1.eqx, player 0, seed 26820:
+  candidate wins/losses/draws = 480/442/102
+  same-seed v5 baseline       = 459/463/102
+
+player 1, seed 26821:
+  candidate wins/losses/draws = 443/466/115
+  same-seed v5 baseline       = 455/469/100
+
+/tmp/generals-recurrent-ppo-8x8-v5-freeze-p1-v1.eqx, player 1, seed 26821:
+  candidate wins/losses/draws = 447/463/114
+  same-seed v5 baseline       = 455/469/100
+
+player 0, seed 26820:
+  candidate wins/losses/draws = 466/443/115
+  same-seed v5 baseline       = 459/463/102
+```
+
+对 Expander heuristic 的独立 1024 局评估：
+
+```text
+/tmp/generals-recurrent-ppo-8x8-v5-freeze-p0-v1.eqx vs Expander, player 0, seed 26840:
+  candidate wins/losses/draws = 927/80/17
+  same-seed v5 baseline       = 922/89/13
+
+player 1, seed 26841:
+  candidate wins/losses/draws = 935/77/12
+  same-seed v5 baseline       = 917/87/20
+```
+
+当前 RNN 结论：`/tmp/generals-recurrent-ppo-8x8-v5-freeze-p0-v1.eqx` 是这批 recurrent 训练里最好的候选。它对 v5 sample 的 player 0 有明确小幅提升，两个席位汇总为 `923/908/217`，优于同 seed v5 baseline 的 `914/932/202`；对 Expander 两个席位汇总为 `1862/157/29`，也高于同 seed v5 baseline 的 `1839/176/33`。但提升仍是小幅 residual memory gain，不是 80%+ best-response 级别的突破；继续训练时应保留 v5 与该 RNN checkpoint 双基线，下一步再尝试更低学习率、周期性评估保存、或部分解冻 CNN 后半层。
 
 因此，当前 PPO best-response 结论是：
 
@@ -908,7 +988,7 @@ player 1 vs Expander, seed 26751:
 - 更强 terminal reward 会加速策略崩坏，而不是学出 best response。
 - general-target shaping 会降低 draw rate/终局时间，但本次没有提升总胜率。
 - path-assignment shaping 能减少路径盲区，但目标权重必须谨慎；frontier 目标容易把奖励拉向局部扩张。
-- residual GRU memory 已可用，但需要强 warm-start；没有 v5 时只能保持弱 BC 基线，不能单独学出 Expander 级策略。
+- residual GRU memory 已可用；从 v5 冻结底座 warm start 时能带来小幅提升，但当前收益仍不足以替代 rollout-search 或 checkpoint league。
 - expanded-64 容量没有改善 PPO 吸收 hidden-state 信息的能力。
 
 #### 高 margin search 蒸馏中止记录
