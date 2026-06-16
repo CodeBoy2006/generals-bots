@@ -543,3 +543,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a mixed-seat history-distill probe with `--freeze-legacy-weights` and compare 256-row retained checkpoints against the active-soft mixed run.
 - **Context:** Verification stayed lightweight: compileall, `git diff --check`, one CPU CLI smoke (`1 passed`), and a CUDA freeze smoke on `cuda:0` saving `/tmp/generals-adaptive-history-distill-freeze-smoke.eqx`.
+
+## [2026-06-16 23:24] Adaptive History Distill GPU Triage
+- **Changes:** Ran and documented single-seat, mixed-seat, freeze-legacy, and high-LR freeze-legacy history-distill CUDA probes in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote any history-distill checkpoint; stop this action-level search-CE/history sweep and move to value/finish/Q/intent targets from search or outcome labels.
+- **Context:** On eval seed 71140, source min was `64.84%`. Best history-distill retained checkpoints only reached `67.19%` over 256 games/row (`p0-only iter10` and `freeze lr=1e-4 iter10`), while mixed-seat active-soft fell to `61.33%` by iter20. Current best remains `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx` at `71.29%` over 512 games/row.

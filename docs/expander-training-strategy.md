@@ -2318,6 +2318,40 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_sea
   --seed 71100
 ```
 
+GPU triage on eval seed 71140:
+
+```text
+source / current 71.29%-512 candidate:
+  rows = 8p0 73.05%, 8p1 71.88%, 12p0 82.03%, 12p1 80.47%, 16p0 70.31%, 16p1 64.84%
+  min = 64.84%
+
+history p1-only, lr=1e-6:
+  iter10 rows = 8p0 71.88%, 8p1 75.78%, 12p0 80.86%, 12p1 82.81%, 16p0 68.36%, 16p1 66.80%
+  iter10 min = 66.80%
+  iter20 min = 64.45%
+
+history p0-only, lr=1e-6:
+  iter10 rows = 8p0 71.09%, 8p1 75.78%, 12p0 80.86%, 12p1 82.03%, 16p0 67.97%, 16p1 67.19%
+  iter10 min = 67.19%
+  iter20 min = 66.02%
+
+history mixed-seat, lr=1e-6:
+  iter10 rows = 8p0 71.48%, 8p1 76.17%, 12p0 80.08%, 12p1 83.98%, 16p0 69.14%, 16p1 65.62%
+  iter10 min = 65.62%
+  iter20 min = 61.33%
+
+history mixed-seat freeze-legacy, lr=1e-6:
+  iter10 min = 65.23%
+  iter20 min = 64.06%
+
+history mixed-seat freeze-legacy, lr=1e-4:
+  iter10 rows = 8p0 70.31%, 8p1 73.44%, 12p0 80.47%, 12p1 80.08%, 16p0 68.75%, 16p1 67.19%
+  iter10 min = 67.19%
+  iter20 min = 64.84%
+```
+
+结论更新：history/global channels can be wired into search distillation, but action-level active-soft search CE still does not transfer the useful long-horizon signal. Freezing the legacy trunk prevents collapse but mostly preserves the old policy; raising LR lets the new branch move, yet the best 256-row min is still only `67.19%`, far below the current `71.29%`/512 candidate. Do not promote any history-distill checkpoint. Stop this search-CE/history sweep; the next useful implementation should train value/finish/Q/intent targets from search or full-state outcomes, not more single-action KL/CE variants.
+
 ## 评估命令
 
 评估 player 0：
