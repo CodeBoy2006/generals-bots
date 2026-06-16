@@ -231,8 +231,11 @@ uv run python examples/_experimental/ppo/train.py 256 \
 新增参数：
 
 - `--self-play-opponent`：让非 learner 玩家使用当前 learner policy；不能和 `--opponent-policy-path` 同时使用。
+- `--opponent-policy-pool a.eqx,b.eqx`：让非 learner 玩家从多个同架构 frozen checkpoint 中采样对手；不能和 `--opponent-policy-path` 或 `--self-play-opponent` 同时使用。每个 training iteration 会为每个环境采样一个 opponent index，并在该 iteration 的 rollout steps 内保持不变。
+- `--opponent-policy-pool-modes sample,greedy`：指定 opponent pool 中每个 checkpoint 的执行模式，省略时全部使用 `sample`。
 - `--learner-player 0|1`：选择 learner 控制环境中的哪个玩家槽位。用它可以分别训练先手/后手视角，避免只优化 player 0。
 - `--terminal-reward-scale N`：在 decisive terminal transition 上给 learner 胜局 `+N`、败局 `-N`。默认 `0.0`，保持旧 composite reward 行为。
+- `--checkpoint-dir DIR`、`--checkpoint-every N`、`--keep-checkpoints K`：周期保存训练中间 checkpoint，并可只保留最新 K 个，用于后续 league 评估和选模。
 
 使用建议：
 
@@ -240,6 +243,61 @@ uv run python examples/_experimental/ppo/train.py 256 \
 - 每次 self-play 后都要重新测 Expander、其它 heuristic、历史 best checkpoint 和镜像座位。
 - 如果新模型打赢历史模型但对 Expander 或 mixed heuristic 退化，不应替换 best checkpoint。
 - 后续可以把多个历史 checkpoint 做成 league opponent，避免只针对一个 frozen/current opponent 过拟合。
+
+### Checkpoint league best-response
+
+当目标变成“对所有 heuristic 和 v5 都超过 80%”时，单一 frozen v5 对手不够可靠。推荐把历史 checkpoint 组成 ordinary policy opponent pool，并周期保存中间模型：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 300 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000001 \
+  --truncation 500 \
+  --init-model-path generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-pool generals-ppo-8x8-expander-gpu-v2.eqx,generals-ppo-8x8-expander-gpu-v3.eqx,generals-ppo-8x8-expander-gpu-v4.eqx,generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-pool-modes sample,sample,sample,sample \
+  --learner-player 0 \
+  --terminal-reward-scale 1.0 \
+  --checkpoint-dir /tmp/generals-league-p0 \
+  --checkpoint-every 50 \
+  --keep-checkpoints 8 \
+  --model-path /tmp/generals-ppo-8x8-league-p0-v1.eqx \
+  --seed 30200
+```
+
+每个候选训练完后，用 league evaluator 统一验收：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/evaluate_league.py /tmp/generals-ppo-8x8-league-p0-v1.eqx \
+  --checkpoint-opponent v5=generals-ppo-8x8-expander-gpu-v5.eqx:sample \
+  --num-games 1024 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --max-steps 500 \
+  --policy-mode sample \
+  --json-output /tmp/generals-ppo-8x8-league-p0-v1-league.json \
+  --seed 30300
+```
+
+`evaluate_league.py` 默认评估所有 `HEURISTIC_NAMES` 的两个 seat；`--checkpoint-opponent` 用来加入 v5 或其它 frozen checkpoint。报告中的 `league_score` 是所有 required opponent-seat pair 的最低总胜率，因此它比平均胜率更适合作为 promotion gate。最终目标只有在每个 heuristic seat 和 v5 两个 seat 都超过 `80%` 时才算完成。
 
 ### 当前 v5 自博弈结果
 

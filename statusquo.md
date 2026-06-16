@@ -249,3 +249,9 @@
 - **Status:** Completed
 - **Next Steps:** Run full verification, document league workflow commands, then start the first v5 warm-start league best-response training run.
 - **Context:** `JAX_PLATFORMS=cpu uv run pytest -q tests/test_ppo_train.py` passed, including parser, loader, and CLI smoke coverage for checkpoint-pool training.
+
+## [2026-06-16 11:50] League Workflow Docs
+- **Changes:** Documented checkpoint-pool training, periodic checkpoint saving, and `evaluate_league.py` promotion-gate usage in README, the Chinese manual, and `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Start the first league best-response run from v5 with v2-v5 as the frozen opponent pool, then evaluate the resulting checkpoints with `evaluate_league.py`.
+- **Context:** Full CPU verification passed before the docs update: `139 passed`, compileall succeeded, and `git diff --check` passed.
