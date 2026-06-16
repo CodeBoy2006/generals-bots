@@ -555,3 +555,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a mixed-seat scoreboard-history CUDA probe with search-value supervision and compare retained checkpoints against the same-seed source.
 - **Context:** Verification stayed focused: RED test failed on missing loss API, then passed after implementation; related loss/collector tests passed, CPU CLI smoke passed, and CUDA smoke with `--search-value-weight 0.1` saved `/tmp/generals-adaptive-search-value-smoke.eqx`.
+
+## [2026-06-16 23:35] Adaptive Search Value GPU Triage
+- **Changes:** Ran and documented mixed-seat search-value CUDA probes, a p0 continuation, and a value-first lower action-CE variant in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote search-value checkpoints; implement explicit finish/draw/outcome supervision from actual rollout terminal status.
+- **Context:** Best retained search-value checkpoint was `/tmp/generals-adaptive-search-value-mixed-v1-ckpts/generals-adaptive-search-value-mixed-v1-iter-000020.eqx` at `68.36%` min over 256 games/row on seed 71140. It improved 16p1 to `71.48%` but left 16p0 at `68.36%`, below the current `71.29%`/512 best.

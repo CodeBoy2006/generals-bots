@@ -2356,6 +2356,29 @@ history mixed-seat freeze-legacy, lr=1e-4:
 
 结论更新：history/global channels can be wired into search distillation, but action-level active-soft search CE still does not transfer the useful long-horizon signal. Freezing the legacy trunk prevents collapse but mostly preserves the old policy; raising LR lets the new branch move, yet the best 256-row min is still only `67.19%`, far below the current `71.29%`/512 candidate. Do not promote any history-distill checkpoint. Stop this search-CE/history sweep; the next useful implementation should train value/finish/Q/intent targets from search or full-state outcomes, not more single-action KL/CE variants.
 
+Search-value distillation follow-up:
+
+```text
+mixed history, search_value_weight=0.1, scale=100, improve_weight=0.05, extra=0.02:
+  train: value loss fell from 0.0160 to 0.0071, KL stayed <= 0.00007.
+  iter10 rows = 8p0 71.88%, 8p1 74.22%, 12p0 79.69%, 12p1 83.20%, 16p0 69.14%, 16p1 67.19%
+  iter10 min = 67.19%
+  iter20 rows = 8p0 73.05%, 8p1 75.39%, 12p0 80.86%, 12p1 82.81%, 16p0 68.36%, 16p1 71.48%
+  iter20 min = 68.36%
+
+p0 continuation from mixed search-value iter20, lr=5e-7:
+  iter10 rows = 8p0 73.05%, 8p1 73.05%, 12p0 82.03%, 12p1 83.59%, 16p0 69.14%, 16p1 67.58%
+  iter10 min = 67.58%
+
+value-first mixed history, search_value_weight=0.2, scale=20, improve_weight=0.02, extra=0:
+  train: value loss fell from 0.0132 to 0.0077, KL stayed <= 0.00005.
+  iter10 min = 67.58%
+  iter20 rows = 8p0 72.27%, 8p1 75.39%, 12p0 80.47%, 12p1 80.86%, 16p0 71.09%, 16p1 67.97%
+  iter20 min = 67.97%
+```
+
+结论更新：search-value supervision is learnable and improves the weak 16p1 row in one configuration, but it still shifts the bottleneck to 16p0/16p1 rather than raising the six-row floor. No search-value checkpoint beats the current `71.29%`/512 candidate. The next implementation should use an explicit finish/draw/outcome target from actual rollout terminal status, because the remaining 16x16 problem is dominated by high draw rate and failure to convert decisive positions before timeout.
+
 ## 评估命令
 
 评估 player 0：
