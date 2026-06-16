@@ -477,3 +477,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the 256-env GPU v3-hlgauss triage from the 71.29% search-distill checkpoint and compare retained checkpoints with 256 games/row before any 512-row promotion.
 - **Context:** Verification passed with focused adaptive tests (`32 passed`), compileall, `git diff --check`, and full CPU pytest (`175 passed`). CUDA smoke used `CudaDevice(id=0)`, trained `/tmp/generals-adaptive-ppo-v3-hlgauss-smoke.eqx`, and confirmed the categorical checkpoint loads in the evaluator with matching `--value-loss hl-gauss`; the 16 games/row smoke is a loader/runtime check, not a strength result.
+
+## [2026-06-16 22:01] Adaptive HL-Gauss GPU Triage
+- **Changes:** Added `--value-heads shared|per-size` to `evaluate_adaptive_policy.py`, extended CLI coverage for per-size categorical checkpoint loading, and documented the 256-env v3-hlgauss GPU triage in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote the v3-hlgauss checkpoints; implement a representation/auxiliary-target change next, such as memory stack/global context, finish/draw auxiliary heads, or search-to-Q/intent distillation.
+- **Context:** The 40-iteration CUDA run saved `/tmp/generals-adaptive-ppo-v3-hlgauss.eqx` and iter 10/20/30/40 checkpoints. Best 256 games/row result was iter 30 at `min_win_rate = 69.92%`, only slightly above the same-seed scalar base at 69.14% and below the prior 71.29%/512-row candidate. Verification passed with focused adaptive tests (`32 passed`), compileall, `git diff --check`, and full CPU pytest (`175 passed`).

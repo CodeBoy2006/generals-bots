@@ -1792,7 +1792,7 @@ config: same as terminal EMA run, but without --eval-ema
 - `AdaptivePolicyValueNetwork(..., value_bins=N)` 会保留原 scalar value heads，同时新增 shared/per-size categorical value logits。
 - `train_adaptive.py --value-loss hl-gauss` 使用 HL-Gauss target distribution 和 categorical cross-entropy 训练 value head；policy logits、old logprob 和 entropy 仍按原 PPO objective 更新。
 - `--value-heads per-size --init-value-heads shared` 可从旧 shared scalar checkpoint warm start 到 per-size categorical value heads；policy trunk/pass/policy logits 保持可迁移。
-- categorical checkpoint 评估时必须给 `evaluate_adaptive_policy.py` 传同样的 `--value-loss hl-gauss --value-bins ... --value-sigma ...`，否则 loader 会按 scalar 模板读 checkpoint。
+- categorical/per-size checkpoint 评估时必须给 `evaluate_adaptive_policy.py` 传匹配的 `--value-heads`、`--value-loss hl-gauss --value-bins ... --value-sigma ...`，否则 loader 会按错误模板读 checkpoint。
 
 本地 16GB RTX 5070 Ti 上，512 envs x 256 steps x minibatch 4096 已确认 OOM；下一轮 GPU triage 使用 256 envs、256 rollout、minibatch 1024：
 
@@ -1844,6 +1844,7 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/evaluate_ada
   --opponent expander \
   --policy-mode sample \
   --map-generator generated \
+  --value-heads per-size \
   --value-loss hl-gauss \
   --value-bins 128 \
   --value-sigma 0.04 \
@@ -1868,6 +1869,48 @@ train log:
 ```
 
 The smoke only proves the categorical checkpoint can warm-start from the scalar search-distill checkpoint, train on CUDA, save EMA parameters, and be loaded by `evaluate_adaptive_policy.py` with the matching value-loss template. Its 16-row evaluation is intentionally too small and too short to judge strength.
+
+256-env HL-Gauss triage:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-hlgauss.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 256 envs, num_steps=256, num_iterations=40, minibatch_size=1024,
+        reward_mode=terminal, gamma=1.0, gae_lambda=0.9, top_advantage_fraction=0.25,
+        ema_decay=0.999, eval_ema, value_heads=per-size, value_loss=hl-gauss, 128 bins
+train log:
+  iter 1:  loss=13.0792, episodes=96,  wins=73, draws=0,  SPS=11232
+  iter 10: loss=8.2170,  episodes=151, wins=88, draws=27, SPS=84059
+  iter 20: loss=5.5432,  episodes=146, wins=61, draws=35, SPS=84213
+  iter 30: loss=4.2508,  episodes=142, wins=49, draws=37, SPS=84007
+  iter 40: loss=3.6038,  episodes=140, wins=38, draws=39, SPS=84208
+```
+
+256 games/row eval, seed 67030:
+
+```text
+base scalar search-distill iter40:
+  8p0 75.00%, 8p1 71.09%, 12p0 82.81%, 12p1 85.16%, 16p0 69.14%, 16p1 74.61%
+  min_win_rate = 69.14%
+
+HL-Gauss iter10:
+  8p0 71.88%, 8p1 71.09%, 12p0 81.64%, 12p1 80.47%, 16p0 69.14%, 16p1 76.56%
+  min_win_rate = 69.14%
+
+HL-Gauss iter20:
+  8p0 74.61%, 8p1 70.31%, 12p0 80.08%, 12p1 82.42%, 16p0 67.58%, 16p1 74.61%
+  min_win_rate = 67.58%
+
+HL-Gauss iter30:
+  8p0 75.39%, 8p1 73.83%, 12p0 78.91%, 12p1 84.77%, 16p0 69.92%, 16p1 74.22%
+  min_win_rate = 69.92%
+
+HL-Gauss iter40/final:
+  8p0 73.83%, 8p1 68.75%, 12p0 80.47%, 12p1 78.52%, 16p0 70.70%, 16p1 73.83%
+  min_win_rate = 68.75%
+```
+
+结论更新：HL-Gauss/per-size value heads are implemented and trainable, but this direct PPO continuation does not break the adaptive plateau. The best retained checkpoint, iter 30, only improves the same-seed 256-row base by 0.78 percentage points and remains below the earlier 71.29%/512-row candidate. Do not promote this run to 512-row validation. The training log also shows rollout wins declining as categorical value loss falls, so the next step should change representation or auxiliary targets: memory stack/global context, finish/draw auxiliary, or search-to-Q/intent distillation. Repeating sparse PPO with the same CNN trunk is unlikely to fix the weak 8x8/16x16 rows.
 
 Promotion rule remains unchanged: only if the six-row `min_win_rate` clearly beats the current 71.29%/512-row candidate on 256-row triage should retained checkpoints be promoted to 512-row evaluation. If HL-Gauss still does not move the weak 8x8/16x16 rows, the next implementation step should be memory-stack/global-context inputs or finish/draw auxiliary heads, not another pure PPO hyperparameter sweep.
 

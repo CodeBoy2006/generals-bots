@@ -163,6 +163,7 @@ def parse_args():
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
+    parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
     parser.add_argument("--value-min", type=float, default=-1.0)
@@ -221,6 +222,7 @@ def main():
         pad_size=args.pad_to,
         init_model_path=args.model_path,
         channels=args.channels,
+        value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
         value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
         value_min=args.value_min,
         value_max=args.value_max,
@@ -236,6 +238,8 @@ def main():
     print(f"Grid sizes:  {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Opponent:    {args.opponent}")
     print(f"Mode:        {args.policy_mode}")
+    if args.value_heads != "shared":
+        print(f"Value heads: {args.value_heads}")
     if args.value_loss == "hl-gauss":
         print(
             "Value loss:  "

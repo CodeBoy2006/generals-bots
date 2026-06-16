@@ -1010,7 +1010,13 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
     output_path = tmp_path / "adaptive-eval.json"
     eqx.tree_serialise_leaves(
         model_path,
-        AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, value_bins=8, value_sigma=0.2),
+        AdaptivePolicyValueNetwork(
+            jrandom.PRNGKey(0),
+            pad_size=6,
+            value_head_sizes=(4, 6),
+            value_bins=8,
+            value_sigma=0.2,
+        ),
     )
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
@@ -1028,6 +1034,8 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
         "4",
         "--map-generator",
         "simple",
+        "--value-heads",
+        "per-size",
         "--value-loss",
         "hl-gauss",
         "--value-bins",
