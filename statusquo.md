@@ -339,3 +339,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a medium CPU adaptive BC baseline using periodic checkpoints, then evaluate the resulting checkpoint across the 8/12/16 size-seat matrix.
 - **Context:** Task followed TDD: the checkpoint-pruning CLI test first failed because the adaptive BC parser lacked the flags, then passed after wiring the existing checkpoint helpers. Full CPU pytest passed with 155 tests.
+
+## [2026-06-16 14:08] Adaptive CPU Baseline
+- **Changes:** Documented a medium CPU adaptive BC and PPO baseline in `docs/expander-training-strategy.md`, including size-seat evaluation matrices for `/tmp/generals-adaptive-bc-medium.eqx` and `/tmp/generals-adaptive-ppo-medium.eqx`.
+- **Status:** Completed
+- **Next Steps:** Run the full adaptive BC recipe on a CUDA JAX environment, or first design a dual-seat adaptive PPO mode so one checkpoint trains against both required evaluation seats.
+- **Context:** The CPU baseline verified the training/evaluation chain and checkpoint retention but did not approach the target: both BC and short PPO had `min_win_rate = 0.00%` over 32 games/row at 300 steps.

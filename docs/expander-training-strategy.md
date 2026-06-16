@@ -1282,6 +1282,55 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
 
 当前状态：adaptive 训练、BC 和评估基础设施已可运行并有 CPU smoke coverage，但还没有任何 checkpoint 证明六个 size-seat pair 都超过 90%。下一步应先跑完整 BC，再用 `--checkpoint-every` 保存 PPO 候选，并优先评估中间 checkpoint 的 `min_win_rate`，避免只看训练 rollout 胜率。
 
+### CPU medium baseline
+
+2026-06-16 在 CPU-only JAX 环境跑了一组中等 smoke，目标是验证 checkpoint 保存、训练链路和评估矩阵，不是冲击最终胜率。
+
+BC 设置：
+
+```text
+model: /tmp/generals-adaptive-bc-medium.eqx
+num_envs=64, num_steps=16, num_iterations=80, pool_size=192
+grid_sizes=8,12,16, pad_to=16, map_generator=generated
+checkpoint_every=20, keep_checkpoints=4
+final train log: loss=3.1039, accuracy=18.5%
+```
+
+BC 的 32 games/row、300 step 评估：
+
+```text
+8x8 p0:  1/21/10, win rate 3.12%
+8x8 p1:  2/18/12, win rate 6.25%
+12x12 p0: 0/9/23, win rate 0.00%
+12x12 p1: 1/13/18, win rate 3.12%
+16x16 p0: 2/2/28, win rate 6.25%
+16x16 p1: 1/1/30, win rate 3.12%
+min_win_rate = 0.00%
+```
+
+随后从该 BC checkpoint 跑短 PPO：
+
+```text
+model: /tmp/generals-adaptive-ppo-medium.eqx
+num_envs=64, num_steps=16, num_iterations=40, num_epochs=2, minibatch_size=512
+opponent=expander, learner_player=0, terminal_reward_scale=1.0
+final train log: iter 40 loss=0.0189, rollout wins=0
+```
+
+PPO 的 32 games/row、300 step 评估：
+
+```text
+8x8 p0:  1/23/8, win rate 3.12%
+8x8 p1:  0/25/7, win rate 0.00%
+12x12 p0: 1/7/24, win rate 3.12%
+12x12 p1: 1/4/27, win rate 3.12%
+16x16 p0: 0/1/31, win rate 0.00%
+16x16 p1: 0/1/31, win rate 0.00%
+min_win_rate = 0.00%
+```
+
+结论：短 CPU 训练量远远不足以产生可用 adaptive checkpoint；它只证明基础设施能跑、checkpoint 能保留、评估能输出完整矩阵。下一轮有意义的实验应使用 CUDA JAX 跑完整 BC 配方，或先设计并实现双座位/交替座位 adaptive PPO 训练，避免只针对 `learner_player=0` 更新。
+
 ## 评估命令
 
 评估 player 0：
