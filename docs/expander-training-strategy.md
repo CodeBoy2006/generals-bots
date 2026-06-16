@@ -1719,6 +1719,72 @@ train log:
 
 结论：GPU v3-noarch smoke 证明 CUDA training、EMA checkpoint 保存和 evaluator 加载链路可用；5 iteration/64-row 样本太小，不能作为棋力结论。下一步要跑上面的 80-iteration GPU continuation，并用 256 games/row triage 判断是否值得升到 512-row。
 
+Full 512-env command failed on the local 16GB RTX 5070 Ti:
+
+```text
+config: 512 envs, num_steps=256, minibatch_size=4096
+failure: JaxRuntimeError RESOURCE_EXHAUSTED while allocating 1.88GiB inside train_minibatch_step
+root cause: rollout storage plus 4096-sample backward pass is too large for this GPU
+working local config: 256 envs, num_steps=256, minibatch_size=1024
+```
+
+256-env terminal-only EMA run:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-noarch-256env.eqx
+base: /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+config: 256 envs, num_steps=256, num_iterations=40, minibatch_size=1024,
+        reward_mode=terminal, gamma=1.0, gae_lambda=0.9, top_advantage_fraction=0.25,
+        ema_decay=0.999, eval_ema, learner_player=mixed
+train log:
+  iter 1:  loss=-0.6703, episodes=96,  wins=73,  draws=0,  SPS=12613
+  iter 10: loss=-0.7758, episodes=181, wins=142, draws=13, SPS=88363
+  iter 20: loss=-0.7416, episodes=174, wins=130, draws=19, SPS=90196
+  iter 30: loss=-0.7435, episodes=170, wins=130, draws=18, SPS=89218
+  iter 40: loss=-0.7014, episodes=157, wins=113, draws=17, SPS=88203
+256 games/row eval, seed 66030:
+  final EMA: min_win_rate = 69.53%
+  iter 10 EMA: min_win_rate = 67.97%
+  iter 20 EMA: min_win_rate = 69.14%
+  iter 30 EMA: min_win_rate = 69.14%
+```
+
+Same-seed base control:
+
+```text
+/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx
+256 games/row, seed 66030:
+  8x8 p0 68.75%, 8x8 p1 69.14%, 12x12 p0 80.86%, 12x12 p1 81.25%,
+  16x16 p0 70.70%, 16x16 p1 72.27%, min_win_rate = 68.75%
+```
+
+Composite reward control:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-composite-256env.eqx
+config: same as terminal run, but reward_mode=composite
+train log:
+  iter 1:  loss=-0.9399, episodes=97,  wins=78,  draws=0,  SPS=12529
+  iter 10: loss=-0.9470, episodes=165, wins=127, draws=12, SPS=87647
+  iter 20: loss=-0.9768, episodes=165, wins=131, draws=17, SPS=88454
+  iter 30: loss=-0.9482, episodes=167, wins=131, draws=16, SPS=87882
+  iter 40: loss=-0.9008, episodes=169, wins=127, draws=14, SPS=88464
+256 games/row eval, seed 66030:
+  min_win_rate = 68.75%
+```
+
+Terminal last-iterate control:
+
+```text
+model: /tmp/generals-adaptive-ppo-v3-terminal-last-256env.eqx
+config: same as terminal EMA run, but without --eval-ema
+256 games/row eval, seed 66030:
+  8x8 p0 69.14%, 8x8 p1 69.14%, 12x12 p0 80.08%, 12x12 p1 82.03%,
+  16x16 p0 71.88%, 16x16 p1 69.53%, min_win_rate = 69.14%
+```
+
+结论更新：v3-noarch infrastructure works on GPU, but this isolated recipe does not break the adaptive plateau. Against the same 256-row seed, terminal EMA is only noise-level above the base and below the earlier 512-row 71.29% candidate; composite and last-iterate controls also fail promotion. The next implementation step should be value-target quality, specifically HL-Gauss/by-size value or finish/draw auxiliary targets, rather than more reward/seat/CE weight tuning.
+
 ## 评估命令
 
 评估 player 0：
