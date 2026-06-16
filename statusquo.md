@@ -363,3 +363,9 @@
 - **Status:** Completed
 - **Next Steps:** Continue from the 70.31% min-win checkpoint with a targeted plan for 16x16 draw reduction and 8x8 decisive strength, likely requiring draw/timeout reward shaping, size weighting, or dual-seat batch training.
 - **Context:** CUDA JAX is available through `uv run --extra dev --extra cuda13`. The best adaptive checkpoint reached `min_win_rate = 70.31%` over 512 games/row at 750 steps, not the required >90% on all 8x8/12x12/16x16 seats.
+
+## [2026-06-16 15:06] Adaptive PPO Plateau Probes
+- **Changes:** Documented additional CUDA continuation probes in `docs/expander-training-strategy.md`: 8x16 p1/p0 curricula, second 16x16-only p1 continuation, and all-size p1 with `--terminal-reward-scale 2.0`.
+- **Status:** Completed
+- **Next Steps:** Stop repeating single-seat low-lr continuations; implement or design a new training signal such as draw/timeout reward shaping, size weighting, or dual-seat batch training.
+- **Context:** None of the probes beat the current best `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` at `min_win_rate = 70.31%` over 512 games/row. The best rejected follow-up was terminal-reward-scale 2.0 at 69.92% over 256 games/row.

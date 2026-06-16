@@ -1413,8 +1413,11 @@ Negative follow-ups:
 
 - Continuing all-size p1 from the 16-only best (`/tmp/generals-adaptive-ppo-gpu-alt8-p1-v1.eqx`) reduced the 256-row `min_win_rate` to 66.41%.
 - 8x8-only p0 training from the 16-only best (`/tmp/generals-adaptive-ppo-gpu-8p0-v1.eqx`) reduced the 256-row `min_win_rate` to 64.06%, mostly by hurting 16x16.
+- 8x16-focused p1 training (`/tmp/generals-adaptive-ppo-gpu-8x16p1-v1.eqx`) reached only 68.16% over 512 games/row; p0 symmetry (`/tmp/generals-adaptive-ppo-gpu-8x16p0-v1.eqx`) reached only 67.97% over 256 games/row.
+- A second 16x16-only p1 continuation (`/tmp/generals-adaptive-ppo-gpu-16p1-v2.eqx`) looked promising at 256 games/row but fell to 68.75% over 512 games/row.
+- Raising `--terminal-reward-scale` to `2.0` for all-size p1 (`/tmp/generals-adaptive-ppo-gpu-term2-p1-v1.eqx`) reached only 69.92% over 256 games/row.
 
-结论：GPU 训练把 adaptive checkpoint 从 CPU baseline 的 0% 推到 70% min win rate，证明 adaptive architecture 和 alternating/curriculum PPO 方向有效；但距离六行都超过 90% 仍有明显差距。下一轮优先方向应是降低 16x16 draw rate 与提升 8x8 decisive strength，而不是继续盲目 all-size low-lr fine-tune。可尝试：更长 16-only curriculum、显式 draw/timeout 惩罚、按尺寸加权采样，或实现真正的双座位同批训练以减少顺序 fine-tune 的遗忘。
+结论：GPU 训练把 adaptive checkpoint 从 CPU baseline 的 0% 推到 70% min win rate，证明 adaptive architecture 和 alternating/curriculum PPO 方向有效；但距离六行都超过 90% 仍有明显差距。现有单座位续训、8x16 课程和单纯提高终局奖励已经进入平台期。下一轮优先方向应是引入新的训练信号来降低 16x16 draw rate 与提升 8x8 decisive strength，而不是继续盲目 low-lr fine-tune。可尝试：显式 draw/timeout 惩罚、按尺寸加权采样、真正的双座位同批训练，或把 rollout-search/target-assignment 信号接入 adaptive trainer。
 
 ## 评估命令
 
