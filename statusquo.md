@@ -447,3 +447,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not use pure improvement-only weighting as a replacement for active soft targets; implement a mixed objective or finish/draw/Q auxiliary target next.
 - **Context:** Improvement-only probes did not beat the active-soft p1 r8 iter40 candidate at 71.29%/512. Best 256-row minimums were 71.09% for margin 1 and 69.92% for margin 0.2.
+
+## [2026-06-16 17:24] Adaptive Mixed Soft Search Objective
+- **Changes:** Added `--soft-improvement-extra-weight` to `examples/_experimental/ppo/adaptive_search_distill.py`, allowing active soft target training plus an extra high-margin improvement CE term. Updated tests and documented the parameter in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Run a mixed objective probe from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` using `--soft-weight-mode active --soft-improvement-extra-weight`.
+- **Context:** Verified with `tests/test_adaptive_ppo.py` (`22 passed`), compileall, `git diff --check`, and full pytest (`165 passed`). No win-rate experiment has been run for the mixed objective yet.

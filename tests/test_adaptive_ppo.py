@@ -244,6 +244,7 @@ def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
     search_scores = jnp.array([[1.0, 2.0], [4.0, 4.0]], dtype=jnp.float32)
     target_probs = search_score_target_probs(search_scores, temperature=1.0)
     search_weights = jnp.ones((2,), dtype=jnp.float32)
+    improvement_extra_weights = jnp.zeros((2,), dtype=jnp.float32)
     kl_weights = jnp.ones((2,), dtype=jnp.float32)
 
     loss, metrics = compute_adaptive_soft_conservative_loss(
@@ -258,9 +259,11 @@ def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
         candidate_indices,
         target_probs,
         search_weights,
+        improvement_extra_weights,
         kl_weights,
         kl_weight=1.0,
         improve_weight=0.05,
+        improvement_extra_weight=0.0,
         temperature=1.0,
     )
 
@@ -268,6 +271,68 @@ def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
     assert jnp.isfinite(metrics["kl_loss"])
     assert jnp.isfinite(metrics["improve_loss"])
     assert jnp.allclose(jnp.sum(target_probs, axis=1), jnp.ones((2,), dtype=jnp.float32))
+
+
+def test_adaptive_soft_loss_can_add_extra_improvement_term():
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import (
+        compute_adaptive_soft_conservative_loss,
+        search_score_target_probs,
+    )
+
+    network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
+    obs = jnp.zeros((2, ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
+    masks = jnp.ones((2, 6, 6, 4), dtype=bool)
+    active = jnp.ones((2, 6, 6), dtype=bool)
+    candidate_indices = jnp.array([[0, 1], [2, 3]], dtype=jnp.int32)
+    target_probs = search_score_target_probs(jnp.array([[1.0, 3.0], [4.0, 4.0]], dtype=jnp.float32), temperature=1.0)
+    search_weights = jnp.ones((2,), dtype=jnp.float32)
+    improvement_extra_weights = jnp.array([1.0, 0.0], dtype=jnp.float32)
+    kl_weights = jnp.ones((2,), dtype=jnp.float32)
+
+    base_loss, base_metrics = compute_adaptive_soft_conservative_loss(
+        network,
+        network,
+        obs,
+        masks,
+        active,
+        obs,
+        masks,
+        active,
+        candidate_indices,
+        target_probs,
+        search_weights,
+        improvement_extra_weights,
+        kl_weights,
+        kl_weight=0.0,
+        improve_weight=0.05,
+        improvement_extra_weight=0.0,
+        temperature=1.0,
+    )
+    mixed_loss, mixed_metrics = compute_adaptive_soft_conservative_loss(
+        network,
+        network,
+        obs,
+        masks,
+        active,
+        obs,
+        masks,
+        active,
+        candidate_indices,
+        target_probs,
+        search_weights,
+        improvement_extra_weights,
+        kl_weights,
+        kl_weight=0.0,
+        improve_weight=0.05,
+        improvement_extra_weight=0.1,
+        temperature=1.0,
+    )
+
+    assert float(mixed_loss) > float(base_loss)
+    assert float(base_metrics["improvement_extra_loss"]) == 0.0
+    assert float(mixed_metrics["improvement_extra_loss"]) > 0.0
 
 
 def test_soft_search_weights_can_select_only_search_improvements():
@@ -396,7 +461,19 @@ def test_collect_adaptive_soft_batch_returns_expected_shapes():
         pad_size=pad_size,
     )
 
-    obs, masks, active, base_obs, base_masks, base_active, candidate_indices, target_probs, search_weights, kl_weights = batch
+    (
+        obs,
+        masks,
+        active,
+        base_obs,
+        base_masks,
+        base_active,
+        candidate_indices,
+        target_probs,
+        search_weights,
+        improvement_extra_weights,
+        kl_weights,
+    ) = batch
     assert obs.shape[:2] == (1, num_envs)
     assert masks.shape == (1, num_envs, pad_size, pad_size, 4)
     assert active.shape == (1, num_envs, pad_size, pad_size)
@@ -406,6 +483,7 @@ def test_collect_adaptive_soft_batch_returns_expected_shapes():
     assert candidate_indices.shape == (1, num_envs, 2)
     assert target_probs.shape == (1, num_envs, 2)
     assert search_weights.shape == (1, num_envs)
+    assert improvement_extra_weights.shape == (1, num_envs)
     assert kl_weights.shape == (1, num_envs)
     assert jnp.allclose(jnp.sum(target_probs, axis=-1), jnp.ones((1, num_envs), dtype=jnp.float32))
 
@@ -591,6 +669,8 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
         "soft",
         "--soft-weight-mode",
         "improvement",
+        "--soft-improvement-extra-weight",
+        "0.1",
         "--learner-player",
         "1",
         "--num-steps",

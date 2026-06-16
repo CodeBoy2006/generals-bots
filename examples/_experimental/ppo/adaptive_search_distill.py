@@ -127,9 +127,11 @@ def compute_adaptive_soft_conservative_loss(
     candidate_indices,
     target_probs,
     search_weights,
+    improvement_extra_weights,
     kl_weights,
     kl_weight: float,
     improve_weight: float,
+    improvement_extra_weight: float,
     temperature: float,
 ):
     """Return adaptive KL-to-base plus weighted soft top-k search-target loss."""
@@ -166,17 +168,30 @@ def compute_adaptive_soft_conservative_loss(
 
     student_log_probs = jax.nn.log_softmax(student_logits, axis=-1)
     search_loss = weighted_topk_cross_entropy(student_log_probs, candidate_indices, target_probs, search_weights)
-    loss = kl_weight * kl_loss + improve_weight * search_loss
+    improvement_extra_loss = weighted_topk_cross_entropy(
+        student_log_probs,
+        candidate_indices,
+        target_probs,
+        improvement_extra_weights,
+    )
+    loss = kl_weight * kl_loss + improve_weight * search_loss + improvement_extra_weight * improvement_extra_loss
 
     best_targets = jnp.take_along_axis(candidate_indices, jnp.argmax(target_probs, axis=-1)[:, None], axis=1)[:, 0]
     search_normalizer = jnp.maximum(jnp.sum(search_weights), 1.0)
+    extra_normalizer = jnp.maximum(jnp.sum(improvement_extra_weights), 1.0)
     accuracy = jnp.sum((jnp.argmax(student_logits, axis=-1) == best_targets) * search_weights) / search_normalizer
+    extra_accuracy = (
+        jnp.sum((jnp.argmax(student_logits, axis=-1) == best_targets) * improvement_extra_weights) / extra_normalizer
+    )
     target_entropy = -jnp.sum(target_probs * jnp.log(jnp.clip(target_probs, 1e-8, 1.0)), axis=-1)
     metrics = {
         "kl_loss": kl_loss,
         "improve_loss": search_loss,
+        "improvement_extra_loss": jnp.where(improvement_extra_weight > 0.0, improvement_extra_loss, 0.0),
         "selected_fraction": jnp.sum(search_weights) / kl_normalizer,
+        "improvement_extra_fraction": jnp.sum(improvement_extra_weights) / kl_normalizer,
         "accuracy": accuracy,
+        "improvement_extra_accuracy": jnp.where(jnp.sum(improvement_extra_weights) > 0.0, extra_accuracy, 0.0),
         "target_entropy": jnp.sum(target_entropy * search_weights) / search_normalizer,
     }
     return loss, metrics
@@ -411,12 +426,23 @@ def train_adaptive_soft_minibatch(
     optimizer,
     kl_weight,
     improve_weight,
+    improvement_extra_weight,
     temperature,
 ):
     """Train one adaptive soft-target distillation minibatch."""
-    obs, masks, active, base_obs, base_masks, base_active, candidate_indices, target_probs, search_weights, kl_weights = (
-        minibatch
-    )
+    (
+        obs,
+        masks,
+        active,
+        base_obs,
+        base_masks,
+        base_active,
+        candidate_indices,
+        target_probs,
+        search_weights,
+        improvement_extra_weights,
+        kl_weights,
+    ) = minibatch
 
     def loss_fn(net):
         return compute_adaptive_soft_conservative_loss(
@@ -431,9 +457,11 @@ def train_adaptive_soft_minibatch(
             candidate_indices,
             target_probs,
             search_weights,
+            improvement_extra_weights,
             kl_weights,
             kl_weight,
             improve_weight,
+            improvement_extra_weight,
             temperature,
         )
 
@@ -482,6 +510,7 @@ def flatten_adaptive_soft_batch(
     candidate_indices,
     target_probs,
     search_weights,
+    improvement_extra_weights,
     kl_weights,
 ):
     """Flatten time/environment axes for adaptive soft-target distillation."""
@@ -496,6 +525,7 @@ def flatten_adaptive_soft_batch(
         candidate_indices.reshape(batch_size, *candidate_indices.shape[2:]),
         target_probs.reshape(batch_size, *target_probs.shape[2:]),
         search_weights.reshape(batch_size),
+        improvement_extra_weights.reshape(batch_size),
         kl_weights.reshape(batch_size),
     )
 
@@ -582,12 +612,23 @@ def train_adaptive_soft_epoch(
     minibatch_size,
     kl_weight,
     improve_weight,
+    improvement_extra_weight,
     temperature,
 ):
     """Run adaptive soft-target distillation over shuffled minibatches."""
-    obs, masks, active, base_obs, base_masks, base_active, candidate_indices, target_probs, search_weights, kl_weights = (
-        flat_batch
-    )
+    (
+        obs,
+        masks,
+        active,
+        base_obs,
+        base_masks,
+        base_active,
+        candidate_indices,
+        target_probs,
+        search_weights,
+        improvement_extra_weights,
+        kl_weights,
+    ) = flat_batch
     batch_size = obs.shape[0]
     actual_minibatch_size = min(minibatch_size, batch_size)
     num_complete_batches = max(batch_size // actual_minibatch_size, 1)
@@ -607,6 +648,7 @@ def train_adaptive_soft_epoch(
             candidate_indices[permutation],
             target_probs[permutation],
             search_weights[permutation],
+            improvement_extra_weights[permutation],
             kl_weights[permutation],
         )
         epoch_loss = 0.0
@@ -624,6 +666,7 @@ def train_adaptive_soft_epoch(
                 optimizer,
                 kl_weight,
                 improve_weight,
+                improvement_extra_weight,
                 temperature,
             )
             epoch_loss += loss
@@ -637,6 +680,7 @@ def train_adaptive_soft_epoch(
 
     avg_metrics = dict(avg_metrics)
     avg_metrics["selected_samples"] = jnp.sum((search_weights > 0.0).astype(jnp.float32))
+    avg_metrics["improvement_extra_samples"] = jnp.sum((improvement_extra_weights > 0.0).astype(jnp.float32))
     avg_metrics["mean_selected_margin"] = 0.0
     return student_network, opt_state, avg_loss, avg_metrics, key
 
@@ -856,6 +900,14 @@ def collect_adaptive_soft_batch(
             margin_scale,
             max_weight,
         )
+        _, improvement_extra_weights, _ = select_search_improvements(
+            candidate_indices,
+            search_scores,
+            min_margin,
+            margin_scale,
+            max_weight,
+        )
+        improvement_extra_weights = improvement_extra_weights * active_weights
 
         learner_keys = jrandom.split(learner_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
@@ -896,6 +948,7 @@ def collect_adaptive_soft_batch(
             candidate_indices,
             target_probs,
             search_weights,
+            improvement_extra_weights,
             active_weights,
         )
 
@@ -930,6 +983,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--kl-weight", type=float, default=1.0)
     parser.add_argument("--improve-weight", type=float, default=0.05)
+    parser.add_argument("--soft-improvement-extra-weight", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--score-temperature", type=float, default=1.0)
     parser.add_argument("--min-margin", type=float, default=25.0)
@@ -976,8 +1030,8 @@ def parse_args():
         parser.error("--minibatch-size must be positive")
     if args.lr <= 0.0:
         parser.error("--lr must be positive")
-    if args.kl_weight < 0.0 or args.improve_weight < 0.0:
-        parser.error("--kl-weight and --improve-weight must be non-negative")
+    if args.kl_weight < 0.0 or args.improve_weight < 0.0 or args.soft_improvement_extra_weight < 0.0:
+        parser.error("--kl-weight, --improve-weight, and --soft-improvement-extra-weight must be non-negative")
     if args.temperature <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--temperature and --score-temperature must be positive")
     if args.margin_scale <= 0.0 or args.max_improve_weight <= 0.0:
@@ -1029,7 +1083,8 @@ def main():
     print(
         "Objective:     "
         f"kl={args.kl_weight:g}, improve={args.improve_weight:g}, "
-        f"mode={args.target_mode}, soft_weight={args.soft_weight_mode}, score_temp={args.score_temperature:g}"
+        f"mode={args.target_mode}, soft_weight={args.soft_weight_mode}, "
+        f"soft_extra={args.soft_improvement_extra_weight:g}, score_temp={args.score_temperature:g}"
     )
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
@@ -1149,6 +1204,7 @@ def main():
                 args.minibatch_size,
                 args.kl_weight,
                 args.improve_weight,
+                args.soft_improvement_extra_weight,
                 args.temperature,
             )
         jax.block_until_ready(student_network)
