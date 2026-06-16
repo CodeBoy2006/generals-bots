@@ -399,3 +399,9 @@
 - **Status:** Completed
 - **Next Steps:** Expand `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` from `32,32,32,16` to `64,64,64,32`, run PPO continuation, and evaluate retained checkpoints.
 - **Context:** Wide-from-BC did not preserve current strength: `/tmp/generals-adaptive-bc-wide-v1.eqx` reached 16.41% min over 128 games/row, wide small-batch PPO reached 18.75%, and wide p0 PPO reached 31.25%. The new expansion path preserves the current best policy before fine-tuning.
+
+## [2026-06-16 16:24] Expanded Adaptive PPO Probes
+- **Changes:** Documented expanded adaptive PPO probes from the current best checkpoint: all-size expanded-v1, trainable-extra-channel expanded-v2, and 16x16-only player-1 fine-tune.
+- **Status:** Completed
+- **Next Steps:** Stop repeating basic PPO continuations; design an adaptive distillation or stronger-teacher step that can improve finish rate before PPO fine-tuning.
+- **Context:** None of the expanded PPO probes beat the current best 70.31% minimum row. Expanded-v1 reached 68.75% over 256 games/row, its iter-100 checkpoint reached 67.58% over 512 games/row, expanded-v2 reached 68.36% over 256 games/row, and expanded 16p1 reached 68.75% over 256 games/row.

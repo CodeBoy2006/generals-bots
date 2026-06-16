@@ -1532,6 +1532,27 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --seed 63300
 ```
 
+扩容 PPO 实验结果：
+
+```text
+/tmp/generals-adaptive-ppo-expanded-v1.eqx
+  config: output-preserving expansion 32,32,32,16 -> 64,64,64,32, all-size alternate
+  256 games/row min_win_rate = 68.75%
+  /tmp/generals-adaptive-ppo-expanded-v1-checkpoints/...-iter-000100.eqx
+    512 games/row min_win_rate = 67.58%
+
+/tmp/generals-adaptive-ppo-expanded-v2.eqx
+  config: trainable extra conv channels, all-size alternate
+  256 games/row min_win_rate = 68.36%
+  best 128-row retained checkpoints only reached 70.31%, not enough to justify 512-row promotion
+
+/tmp/generals-adaptive-ppo-expanded-16p1-v1.eqx
+  config: trainable expansion, 16x16-only, learner_player=1
+  256 games/row min_win_rate = 68.75%
+```
+
+结论：扩容 warm start 本身可用，且能保持源 checkpoint 初始行为；但当前 PPO objective 仍会在尺寸/座位之间迁移强度，未突破 70.31% best。下一轮不应继续只改 `lr`、weights 或 seat schedule。更有希望的方向是把 rollout-search、target-assignment 或更强 teacher 信号接入 adaptive 训练，先用监督/蒸馏提高 tactical finish rate，再做 PPO fine-tune。
+
 ## 评估命令
 
 评估 player 0：
