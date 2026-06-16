@@ -309,3 +309,9 @@
 - **Status:** Completed
 - **Next Steps:** Add `behavior_clone_adaptive.py` and its CLI smoke test so the adaptive checkpoint can get an Expander warm start.
 - **Context:** Task 3 followed TDD: pool/target tests first failed on missing helpers, then passed after implementation. The pool assigns remainder slots to larger sizes to bias scarce capacity toward harder maps.
+
+## [2026-06-16 13:40] Adaptive Behavior Cloning
+- **Changes:** Added `examples/_experimental/ppo/behavior_clone_adaptive.py` for mixed-size adaptive BC from Expander-soft or heuristic teachers, plus CLI smoke coverage in `tests/test_adaptive_ppo.py`.
+- **Status:** Completed
+- **Next Steps:** Add the adaptive PPO trainer so BC checkpoints can be fine-tuned against Expander.
+- **Context:** Task 4 followed TDD: CLI smoke first failed on missing script, then passed after implementation. The smoke test trains a tiny 4/6 padded checkpoint on CPU and verifies an `.eqx` artifact is written.

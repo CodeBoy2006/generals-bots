@@ -147,3 +147,38 @@ def test_adaptive_expander_target_probs_has_single_pass_slot():
 
     assert target.shape == (8 * 6 * 6 + 1,)
     assert jnp.isclose(jnp.sum(target), 1.0)
+
+
+def test_behavior_clone_adaptive_cli_smoke(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    model_path = tmp_path / "adaptive-bc.eqx"
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/behavior_clone_adaptive.py",
+        "2",
+        "--grid-sizes",
+        "4,6",
+        "--pad-to",
+        "6",
+        "--map-generator",
+        "simple",
+        "--pool-size",
+        "4",
+        "--num-steps",
+        "1",
+        "--num-iterations",
+        "1",
+        "--model-path",
+        str(model_path),
+        "--seed",
+        "41000",
+    ]
+
+    subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+
+    assert model_path.exists()
