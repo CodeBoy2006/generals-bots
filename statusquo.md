@@ -417,3 +417,9 @@
 - **Status:** Completed
 - **Next Steps:** Execute the plan task-by-task, starting with adaptive loss tests and the new `adaptive_search_distill.py` scaffold.
 - **Context:** The plan intentionally scopes the first implementation to scalar learner seat selection and a frozen adaptive base opponent before adding alternating seats or Expander-in-the-loop collection.
+
+## [2026-06-16 16:50] Adaptive Search Distillation Implementation
+- **Changes:** Added `examples/_experimental/ppo/adaptive_search_distill.py` with adaptive rollout-search candidates, hard/soft conservative losses, adaptive batch collection, CLI training loop, and checkpoint retention. Added focused tests in `tests/test_adaptive_ppo.py`.
+- **Status:** Completed
+- **Next Steps:** Run a small CUDA narrow distillation from `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx`, evaluate retained checkpoints at 128 or 256 games per size-seat row, and only promote checkpoints above the current 70.31% minimum row to 512-game evaluation.
+- **Context:** This implements the stronger-teacher step; it does not prove the 90% target. The best verified checkpoint remains `/tmp/generals-adaptive-ppo-gpu-16p0-v1.eqx` until a new evaluation beats it.
