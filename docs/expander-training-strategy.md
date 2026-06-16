@@ -828,6 +828,79 @@ player 0, seed 26620:
 
 结论：path-assignment shaping 能表达“沿真实最短路运兵”和“为不同兵团选择 general/city/frontier 目标”，也能降低部分 draw rate；但直接作为 PPO reward 时仍会引入错误局部目标，尤其是 frontier 权重。本轮最佳可观察信号是 p0-v2 作为 player 1 的总胜率从同 seed v5 baseline 的 `42.87%` 到 `45.12%`，但它没有在 player 0 或 decisive win rate 上形成稳定优势，不能作为新 best checkpoint。
 
+新增 residual GRU 记忆 PPO 后，实验入口为：
+
+- `examples/_experimental/ppo/recurrent_network.py`：`RecurrentPolicyValueNetwork`，在 CNN base 之后叠加 GRU hidden state 和 residual policy/value delta。delta heads 零初始化，因此初始 logits/value 等于 base CNN。
+- `examples/_experimental/ppo/train_recurrent.py`：维护每个环境的 hidden state，episode reset 时清零；支持 frozen checkpoint opponent 或 heuristic/Expander opponent。
+- `examples/_experimental/ppo/evaluate_recurrent_policy.py`：评估 recurrent checkpoint，评估时同样携带 hidden state。
+
+预期 v5 warm-start 命令如下：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_recurrent.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --mountain-density-min 0.12 \
+  --mountain-density-max 0.22 \
+  --num-cities-min 4 \
+  --num-cities-max 8 \
+  --min-generals-distance 5 \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 500 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000002 \
+  --truncation 500 \
+  --hidden-size 64 \
+  --policy-input observation \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-mode sample \
+  --learner-player 0 \
+  --terminal-reward-scale 2.0 \
+  --freeze-base \
+  --model-path /tmp/generals-recurrent-ppo-8x8-v5-p0.eqx \
+  --seed 26710
+```
+
+本轮执行时当前环境缺少 `/tmp/generals-ppo-8x8-expander-gpu-v5.eqx`，也没有 v4/BC 历史 checkpoint，因此不能直接完成 v5 warm-start。为验证 RNN 训练链路，先重新生成一个短训 Expander-soft BC warm-start：
+
+```text
+/tmp/generals-bc-8x8-rnn-warm.eqx, player 0 vs Expander, seed 26750:
+  wins/losses/draws = 148/815/61
+  win rate = 14.45%
+
+player 1 vs Expander, seed 26751:
+  wins/losses/draws = 169/803/52
+  win rate = 16.50%
+```
+
+然后训练三类 recurrent 候选：
+
+```text
+/tmp/generals-recurrent-ppo-8x8-expander-fresh-v1.eqx
+  fresh recurrent PPO vs Expander, no warm-start
+  player 0: 0/419/605
+  player 1: 0/440/584
+
+/tmp/generals-recurrent-ppo-8x8-bc-expander-p0-v1.eqx
+  BC warm-start, unfrozen base, 300 PPO iterations
+  player 0: 0/869/155
+
+/tmp/generals-recurrent-ppo-8x8-bc-expander-p0-short.eqx
+  BC warm-start, unfrozen base, 30 PPO iterations
+  player 0: 66/908/50
+
+/tmp/generals-recurrent-ppo-8x8-bc-expander-p0-freeze-v1.eqx
+  BC warm-start, --freeze-base, 100 PPO iterations
+  player 0: 147/819/58
+  player 1: 148/809/67
+```
+
+结论：RNN/GRU 机制已经可训练、可评估，并且 `--freeze-base` 能保护 warm-start base 不被 PPO 迅速破坏。没有强 v5 起点时，fresh recurrent PPO 学不到 Expander 胜局；弱 BC 起点上，unfrozen PPO 会退化，frozen-base RNN 基本保持 BC 强度但没有明显提升。后续真正验证记忆收益，应把 v5 checkpoint 放回 `/tmp/generals-ppo-8x8-expander-gpu-v5.eqx` 后，用 `--freeze-base` 先训练 residual memory，再逐步解冻 base 或降低学习率。
+
 因此，当前 PPO best-response 结论是：
 
 - 18 通道输入能被 PPO 训练链路正常使用。
@@ -835,6 +908,7 @@ player 0, seed 26620:
 - 更强 terminal reward 会加速策略崩坏，而不是学出 best response。
 - general-target shaping 会降低 draw rate/终局时间，但本次没有提升总胜率。
 - path-assignment shaping 能减少路径盲区，但目标权重必须谨慎；frontier 目标容易把奖励拉向局部扩张。
+- residual GRU memory 已可用，但需要强 warm-start；没有 v5 时只能保持弱 BC 基线，不能单独学出 Expander 级策略。
 - expanded-64 容量没有改善 PPO 吸收 hidden-state 信息的能力。
 
 #### 高 margin search 蒸馏中止记录

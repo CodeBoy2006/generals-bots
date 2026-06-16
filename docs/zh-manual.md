@@ -479,6 +479,8 @@ uv run python examples/_experimental/ppo/train.py 256 \
 
 `--self-play-opponent` 不能和 `--opponent-policy-path` 同时使用。`--learner-player 0|1` 控制被更新的 learner 座位；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入胜负奖励。`--general-target-reward-scale` 会用完整状态奖励强兵靠近敌方 general 的势能变化，可配合 `--general-target-min-army` 和 `--general-target-max-distance` 控制触发条件。`--path-assignment-reward-scale` 会在 reward 内缓存 passable shortest-path 距离场，并把强兵分配到敌方 general、非己方城市或前线目标，可用 `--path-assignment-*-weight` 控制目标优先级。`--policy-input augmented-full-state` 可让 PPO learner 使用 18 通道输入；从 v5 这类 9 通道 checkpoint 开始时通常配合 `--init-input-channels 9` 使用。冻结 opponent 更稳定，适合作为后续 checkpoint league 的基础；current-policy opponent 适合快速检验同步自博弈方向。
 
+Residual GRU 记忆 PPO 可用 `train_recurrent.py` 训练。它在 CNN policy 上叠加 GRU hidden state 和 residual logits/value delta；`--freeze-base` 会冻结 warm-start 的 CNN，只训练记忆适配器，适合保护 v5 或行为克隆基线。对应评估入口是 `examples/_experimental/ppo/evaluate_recurrent_policy.py`。
+
 ### 7.7 批量评估 checkpoint
 
 评估行为克隆或 PPO checkpoint：

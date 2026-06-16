@@ -292,6 +292,22 @@ uv run python examples/_experimental/ppo/train.py 256 \
 
 `--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 同时使用。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。`--general-target-reward-scale` 会用完整状态奖励强兵靠近敌方 general 的势能变化，可配合 `--general-target-min-army` 和 `--general-target-max-distance` 控制触发条件。`--path-assignment-reward-scale` 会在 reward 内缓存 passable shortest-path 距离场，并把强兵分配到敌方 general、非己方城市或前线目标，可用 `--path-assignment-*-weight` 控制目标优先级。`--policy-input augmented-full-state` 可让 PPO learner 使用 18 通道输入，通常与 `--init-input-channels 9` 一起从 v5 这类 9 通道 checkpoint 扩展。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
 
+Residual GRU 记忆 PPO：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_recurrent.py 512 \
+  --grid-size 8 \
+  --map-generator generated \
+  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --hidden-size 64 \
+  --freeze-base \
+  --model-path /tmp/generals-recurrent-ppo-8x8-v5.eqx
+```
+
+`train_recurrent.py` 会在 CNN policy 上叠加 GRU hidden state 和 residual logits/value delta；`--freeze-base` 会冻结 warm-start 的 CNN，只训练记忆适配器，适合保护 v5 或行为克隆基线。用 `evaluate_recurrent_policy.py` 可评估 recurrent checkpoint；没有 `--opponent-policy-path` 时也可直接测 `--opponent expander`。
+
 胜者轨迹辅助克隆：
 
 ```bash
