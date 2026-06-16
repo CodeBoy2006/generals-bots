@@ -2282,6 +2282,8 @@ Single-seat p0/p1 probes improved the weak same-seed 16p1 row slightly but still
 
 2026-06-16 follow-up added `--freeze-legacy-weights` for distillation. When used with global/history inputs, gradients are kept only for conv1 weights connected to channels after the legacy 15-channel observation plus the global/history MLP. The old conv trunk and policy/value heads stay frozen, so the history branch can learn additive corrections without dragging the existing 15-channel policy away from the 71.29% anchor.
 
+2026-06-16 follow-up added `--search-value-weight` and `--search-value-scale`. The teacher target is `tanh(max_topk_search_score / scale)`, weighted on active samples. This is a first Q/value-style teacher signal: rollout search can now supervise the scalar value/shared representation instead of only a single-step action distribution. Default weight is `0.0`, preserving previous action-CE distillation runs.
+
 Next fast GPU probe:
 
 ```bash
@@ -2297,6 +2299,8 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_sea
   --target-mode soft \
   --soft-weight-mode active \
   --soft-improvement-extra-weight 0.02 \
+  --search-value-weight 0.1 \
+  --search-value-scale 100 \
   --learner-player mixed \
   --num-steps 8 \
   --num-iterations 20 \

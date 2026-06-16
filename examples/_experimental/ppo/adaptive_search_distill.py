@@ -72,6 +72,11 @@ def concatenate_flat_batches(*batches):
     return tuple(jnp.concatenate(items, axis=0) for items in zip(*batches, strict=True))
 
 
+def search_value_targets(search_scores: jnp.ndarray, score_scale: float) -> jnp.ndarray:
+    """Convert top-k rollout-search scores into bounded scalar value targets."""
+    return jnp.tanh(jnp.max(search_scores, axis=-1) / score_scale).astype(jnp.float32)
+
+
 def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS):
     """Keep gradients only for newly added adaptive input paths."""
     masked = jax.tree.map(lambda leaf: jnp.zeros_like(leaf) if eqx.is_inexact_array(leaf) else leaf, grads)
@@ -170,10 +175,13 @@ def compute_adaptive_soft_conservative_loss(
     target_probs,
     search_weights,
     improvement_extra_weights,
+    search_value_targets,
+    search_value_weights,
     kl_weights,
     kl_weight: float,
     improve_weight: float,
     improvement_extra_weight: float,
+    search_value_weight: float,
     temperature: float,
 ):
     """Return adaptive KL-to-base plus weighted soft top-k search-target loss."""
@@ -216,7 +224,22 @@ def compute_adaptive_soft_conservative_loss(
         target_probs,
         improvement_extra_weights,
     )
-    loss = kl_weight * kl_loss + improve_weight * search_loss + improvement_extra_weight * improvement_extra_loss
+    student_values = jax.vmap(
+        lambda sample_obs, sample_mask, sample_active: student_network.logits_value(
+            sample_obs,
+            sample_mask,
+            sample_active,
+        )[1]
+    )(obs, masks, active)
+    value_normalizer = jnp.maximum(jnp.sum(search_value_weights), 1.0)
+    search_value_errors = (student_values - search_value_targets) ** 2
+    search_value_loss = jnp.sum(search_value_errors * search_value_weights) / value_normalizer
+    loss = (
+        kl_weight * kl_loss
+        + improve_weight * search_loss
+        + improvement_extra_weight * improvement_extra_loss
+        + search_value_weight * search_value_loss
+    )
 
     best_targets = jnp.take_along_axis(candidate_indices, jnp.argmax(target_probs, axis=-1)[:, None], axis=1)[:, 0]
     search_normalizer = jnp.maximum(jnp.sum(search_weights), 1.0)
@@ -230,6 +253,8 @@ def compute_adaptive_soft_conservative_loss(
         "kl_loss": kl_loss,
         "improve_loss": search_loss,
         "improvement_extra_loss": jnp.where(improvement_extra_weight > 0.0, improvement_extra_loss, 0.0),
+        "search_value_loss": jnp.where(search_value_weight > 0.0, search_value_loss, 0.0),
+        "mean_search_value_target": jnp.sum(search_value_targets * search_value_weights) / value_normalizer,
         "selected_fraction": jnp.sum(search_weights) / kl_normalizer,
         "improvement_extra_fraction": jnp.sum(improvement_extra_weights) / kl_normalizer,
         "accuracy": accuracy,
@@ -488,6 +513,7 @@ def train_adaptive_soft_minibatch(
     kl_weight,
     improve_weight,
     improvement_extra_weight,
+    search_value_weight,
     temperature,
     freeze_legacy_weights=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
@@ -504,6 +530,8 @@ def train_adaptive_soft_minibatch(
         target_probs,
         search_weights,
         improvement_extra_weights,
+        search_value_targets,
+        search_value_weights,
         kl_weights,
     ) = minibatch
 
@@ -521,10 +549,13 @@ def train_adaptive_soft_minibatch(
             target_probs,
             search_weights,
             improvement_extra_weights,
+            search_value_targets,
+            search_value_weights,
             kl_weights,
             kl_weight,
             improve_weight,
             improvement_extra_weight,
+            search_value_weight,
             temperature,
         )
 
@@ -576,6 +607,8 @@ def flatten_adaptive_soft_batch(
     target_probs,
     search_weights,
     improvement_extra_weights,
+    search_value_targets,
+    search_value_weights,
     kl_weights,
 ):
     """Flatten time/environment axes for adaptive soft-target distillation."""
@@ -591,6 +624,8 @@ def flatten_adaptive_soft_batch(
         target_probs.reshape(batch_size, *target_probs.shape[2:]),
         search_weights.reshape(batch_size),
         improvement_extra_weights.reshape(batch_size),
+        search_value_targets.reshape(batch_size),
+        search_value_weights.reshape(batch_size),
         kl_weights.reshape(batch_size),
     )
 
@@ -682,6 +717,7 @@ def train_adaptive_soft_epoch(
     kl_weight,
     improve_weight,
     improvement_extra_weight,
+    search_value_weight,
     temperature,
     freeze_legacy_weights=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
@@ -698,6 +734,8 @@ def train_adaptive_soft_epoch(
         target_probs,
         search_weights,
         improvement_extra_weights,
+        search_value_targets,
+        search_value_weights,
         kl_weights,
     ) = flat_batch
     batch_size = obs.shape[0]
@@ -720,6 +758,8 @@ def train_adaptive_soft_epoch(
             target_probs[permutation],
             search_weights[permutation],
             improvement_extra_weights[permutation],
+            search_value_targets[permutation],
+            search_value_weights[permutation],
             kl_weights[permutation],
         )
         epoch_loss = 0.0
@@ -738,6 +778,7 @@ def train_adaptive_soft_epoch(
                 kl_weight,
                 improve_weight,
                 improvement_extra_weight,
+                search_value_weight,
                 temperature,
                 freeze_legacy_weights,
                 legacy_input_channels,
@@ -755,6 +796,7 @@ def train_adaptive_soft_epoch(
     avg_metrics["selected_samples"] = jnp.sum((search_weights > 0.0).astype(jnp.float32))
     avg_metrics["improvement_extra_samples"] = jnp.sum((improvement_extra_weights > 0.0).astype(jnp.float32))
     avg_metrics["mean_selected_margin"] = 0.0
+    avg_metrics["search_value_samples"] = jnp.sum((search_value_weights > 0.0).astype(jnp.float32))
     return student_network, opt_state, avg_loss, avg_metrics, key
 
 
@@ -965,6 +1007,7 @@ def collect_adaptive_soft_batch(
     margin_scale,
     max_weight,
     score_temperature,
+    search_value_scale,
     pad_size,
     global_context=False,
     scoreboard_history_enabled=False,
@@ -1054,6 +1097,7 @@ def collect_adaptive_soft_batch(
             )
         )(states, effective_sizes, search_keys)
         target_probs = search_score_target_probs(search_scores, score_temperature)
+        value_targets = search_value_targets(search_scores, search_value_scale)
         active_weights = is_active.astype(jnp.float32)
         search_weights = soft_search_weights(
             candidate_indices,
@@ -1130,6 +1174,8 @@ def collect_adaptive_soft_batch(
             target_probs,
             search_weights,
             improvement_extra_weights,
+            value_targets,
+            active_weights,
             active_weights,
         )
 
@@ -1170,6 +1216,8 @@ def parse_args():
     parser.add_argument("--kl-weight", type=float, default=1.0)
     parser.add_argument("--improve-weight", type=float, default=0.05)
     parser.add_argument("--soft-improvement-extra-weight", type=float, default=0.0)
+    parser.add_argument("--search-value-weight", type=float, default=0.0)
+    parser.add_argument("--search-value-scale", type=float, default=100.0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--score-temperature", type=float, default=1.0)
     parser.add_argument("--min-margin", type=float, default=25.0)
@@ -1218,8 +1266,18 @@ def parse_args():
         parser.error("--minibatch-size must be positive")
     if args.lr <= 0.0:
         parser.error("--lr must be positive")
-    if args.kl_weight < 0.0 or args.improve_weight < 0.0 or args.soft_improvement_extra_weight < 0.0:
-        parser.error("--kl-weight, --improve-weight, and --soft-improvement-extra-weight must be non-negative")
+    if (
+        args.kl_weight < 0.0
+        or args.improve_weight < 0.0
+        or args.soft_improvement_extra_weight < 0.0
+        or args.search_value_weight < 0.0
+    ):
+        parser.error(
+            "--kl-weight, --improve-weight, --soft-improvement-extra-weight, "
+            "and --search-value-weight must be non-negative"
+        )
+    if args.search_value_scale <= 0.0:
+        parser.error("--search-value-scale must be positive")
     if args.temperature <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--temperature and --score-temperature must be positive")
     if args.margin_scale <= 0.0 or args.max_improve_weight <= 0.0:
@@ -1304,8 +1362,11 @@ def main():
         "Objective:     "
         f"kl={args.kl_weight:g}, improve={args.improve_weight:g}, "
         f"mode={args.target_mode}, soft_weight={args.soft_weight_mode}, "
-        f"soft_extra={args.soft_improvement_extra_weight:g}, score_temp={args.score_temperature:g}"
+        f"soft_extra={args.soft_improvement_extra_weight:g}, value={args.search_value_weight:g}, "
+        f"score_temp={args.score_temperature:g}"
     )
+    if args.search_value_weight > 0.0:
+        print(f"Search value:  scale={args.search_value_scale:g}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -1483,6 +1544,7 @@ def main():
                     args.margin_scale,
                     args.max_improve_weight,
                     args.score_temperature,
+                    args.search_value_scale,
                     args.pad_to,
                     network_global_context,
                     args.scoreboard_history,
@@ -1510,6 +1572,7 @@ def main():
                     args.margin_scale,
                     args.max_improve_weight,
                     args.score_temperature,
+                    args.search_value_scale,
                     args.pad_to,
                     network_global_context,
                     args.scoreboard_history,
@@ -1542,6 +1605,7 @@ def main():
                     args.margin_scale,
                     args.max_improve_weight,
                     args.score_temperature,
+                    args.search_value_scale,
                     args.pad_to,
                     network_global_context,
                     args.scoreboard_history,
@@ -1559,6 +1623,7 @@ def main():
                 args.kl_weight,
                 args.improve_weight,
                 args.soft_improvement_extra_weight,
+                args.search_value_weight,
                 args.temperature,
                 args.freeze_legacy_weights,
                 ADAPTIVE_INPUT_CHANNELS,
@@ -1579,6 +1644,7 @@ def main():
                 f"Iter {iteration:4d} | Loss: {float(loss):.5f} | "
                 f"KL: {float(metrics['kl_loss']):.5f} | "
                 f"Improve: {float(metrics['improve_loss']):.4f} | "
+                f"Value: {float(metrics.get('search_value_loss', 0.0)):.4f} | "
                 f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
                 f"({float(metrics['selected_fraction']) * 100:4.1f}%) | "
                 f"Margin: {float(metrics['mean_selected_margin']):6.1f} | "

@@ -549,3 +549,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote any history-distill checkpoint; stop this action-level search-CE/history sweep and move to value/finish/Q/intent targets from search or outcome labels.
 - **Context:** On eval seed 71140, source min was `64.84%`. Best history-distill retained checkpoints only reached `67.19%` over 256 games/row (`p0-only iter10` and `freeze lr=1e-4 iter10`), while mixed-seat active-soft fell to `61.33%` by iter20. Current best remains `/tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx` at `71.29%` over 512 games/row.
+
+## [2026-06-16 23:29] Adaptive Search Value Distillation
+- **Changes:** Added `--search-value-weight` and `--search-value-scale` to `adaptive_search_distill.py`, deriving a bounded scalar value target from top-k rollout-search scores and adding a weighted MSE value loss alongside action KL/CE. Updated focused tests and docs.
+- **Status:** Completed
+- **Next Steps:** Run a mixed-seat scoreboard-history CUDA probe with search-value supervision and compare retained checkpoints against the same-seed source.
+- **Context:** Verification stayed focused: RED test failed on missing loss API, then passed after implementation; related loss/collector tests passed, CPU CLI smoke passed, and CUDA smoke with `--search-value-weight 0.1` saved `/tmp/generals-adaptive-search-value-smoke.eqx`.
