@@ -345,3 +345,9 @@
 - **Status:** Completed
 - **Next Steps:** Run the full adaptive BC recipe on a CUDA JAX environment, or first design a dual-seat adaptive PPO mode so one checkpoint trains against both required evaluation seats.
 - **Context:** The CPU baseline verified the training/evaluation chain and checkpoint retention but did not approach the target: both BC and short PPO had `min_win_rate = 0.00%` over 32 games/row at 300 steps.
+
+## [2026-06-16 14:14] Adaptive Hard-Teacher Baseline
+- **Changes:** Added the hard `--teacher expander` adaptive BC iter-100 comparison to `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Avoid spending more CPU time on short hard-teacher BC; use CUDA for full BC or design dual-seat adaptive PPO before longer PPO runs.
+- **Context:** The hard-teacher checkpoint also had `min_win_rate = 0.00%` over 32 games/row at 300 steps, with 8x8 player 1, 12x12 player 1, and both 16x16 seats at 0% wins.

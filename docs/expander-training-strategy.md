@@ -1329,7 +1329,19 @@ PPO 的 32 games/row、300 step 评估：
 min_win_rate = 0.00%
 ```
 
-结论：短 CPU 训练量远远不足以产生可用 adaptive checkpoint；它只证明基础设施能跑、checkpoint 能保留、评估能输出完整矩阵。下一轮有意义的实验应使用 CUDA JAX 跑完整 BC 配方，或先设计并实现双座位/交替座位 adaptive PPO 训练，避免只针对 `learner_player=0` 更新。
+随后用 hard `--teacher expander` 跑了对照 BC。128 env、384 pool 的 run 在 iter 100 后手动中止，但保留了 `/tmp/generals-adaptive-bc-hard-medium-checkpoints/generals-adaptive-bc-hard-medium-iter-000100.eqx`。训练日志到 iter 100 时约为 `loss=3.2799, accuracy=15.7%`。同样 32 games/row、300 step 评估：
+
+```text
+8x8 p0:  2/24/6, win rate 6.25%
+8x8 p1:  0/26/6, win rate 0.00%
+12x12 p0: 1/6/25, win rate 3.12%
+12x12 p1: 0/9/23, win rate 0.00%
+16x16 p0: 0/3/29, win rate 0.00%
+16x16 p1: 0/3/29, win rate 0.00%
+min_win_rate = 0.00%
+```
+
+结论：短 CPU 训练量远远不足以产生可用 adaptive checkpoint；它只证明基础设施能跑、checkpoint 能保留、评估能输出完整矩阵。hard Expander teacher 在这个训练量下没有明显优于 soft target，且仍有多个 size-seat pair 为 0%。下一轮有意义的实验应使用 CUDA JAX 跑完整 BC 配方，或先设计并实现双座位/交替座位 adaptive PPO 训练，避免只针对 `learner_player=0` 更新。
 
 ## 评估命令
 
