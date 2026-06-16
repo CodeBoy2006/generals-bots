@@ -315,3 +315,9 @@
 - **Status:** Completed
 - **Next Steps:** Add the adaptive PPO trainer so BC checkpoints can be fine-tuned against Expander.
 - **Context:** Task 4 followed TDD: CLI smoke first failed on missing script, then passed after implementation. The smoke test trains a tiny 4/6 padded checkpoint on CPU and verifies an `.eqx` artifact is written.
+
+## [2026-06-16 13:44] Adaptive PPO Trainer
+- **Changes:** Added `examples/_experimental/ppo/train_adaptive.py` with adaptive rollout collection, PPO loss/update, effective-size reset handling, periodic checkpoint saving, and CLI smoke coverage.
+- **Status:** Completed
+- **Next Steps:** Add adaptive policy evaluation across configured sizes and seats.
+- **Context:** Task 5 followed TDD: trainer smoke first failed on missing script, then passed after implementation. The trainer keeps the existing fixed-size PPO scripts untouched and writes periodic checkpoints using the existing checkpoint helper.

@@ -182,3 +182,48 @@ def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
 
     assert model_path.exists()
+
+
+def test_train_adaptive_cli_smoke(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    model_path = tmp_path / "adaptive-ppo.eqx"
+    checkpoint_dir = tmp_path / "ckpts"
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable,
+        "examples/_experimental/ppo/train_adaptive.py",
+        "2",
+        "--grid-sizes",
+        "4,6",
+        "--pad-to",
+        "6",
+        "--map-generator",
+        "simple",
+        "--pool-size",
+        "4",
+        "--num-steps",
+        "1",
+        "--num-iterations",
+        "1",
+        "--num-epochs",
+        "1",
+        "--minibatch-size",
+        "2",
+        "--checkpoint-dir",
+        str(checkpoint_dir),
+        "--checkpoint-every",
+        "1",
+        "--model-path",
+        str(model_path),
+        "--seed",
+        "42000",
+    ]
+
+    subprocess.run(cmd, check=True, text=True, capture_output=True, env=env)
+
+    assert model_path.exists()
+    assert (checkpoint_dir / "adaptive-ppo-iter-000001.eqx").exists()
