@@ -981,3 +981,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-midgame-highgap-imitation-v0/v1/v2-balanced/v3-mixed`. Use high-gap search rows for value/finish/outcome supervision or carefully weighted auxiliary replay, not dominant primitive action CE.
 - **Context:** CUDA high-gap search collection from `adaptive-midgame-search-imitation-v1` produced 2294 decisive rows under ignored `runs/adaptive-strategy-search-highgap-v1/`. Direct main-policy imitation regressed Expander 64-row min versus same-seed v1 baseline `73.44%`: v0 `62.50%`, v1 `65.62%`, v2-balanced `64.06%`, v3-mixed `62.50%`, all weak on 8x8 p1.
+
+## [2026-06-17 23:47] Search-Q Rank Supervision Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --search-q-rank-weight` and `--search-q-temperature` to train the strategy action-Q head from saved rollout-search top-k rankings. Updated README, zh manual, and Expander strategy notes.
+- **Status:** Completed
+- **Next Steps:** Do not promote q-rerank from this probe. Use high-gap search rankings for calibrated/gated Q, finish/value/intent heads, or broader mixed datasets before any full-policy update.
+- **Context:** CUDA run `runs/adaptive-midgame-search-q-rank-v0/` reduced SQ loss `3.8067 -> 2.7584` but top1 stayed weak. Expander 256-row seed85280 scale=0 was `71.09%`; q-rerank scale `0.001` was `71.48%`, while scale `0.01` collapsed 64-row min to `54.69%` on 8p1. A low-lr full-policy decisive imitation recheck with KL/action CE/finish/outcome/belief/intent still collapsed 64-row 8p1 to `56.25%`.

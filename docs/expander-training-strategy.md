@@ -7437,3 +7437,80 @@ CE and into value/finish/search-target supervision:
 3. if policy is updated, require per-row or per-stratum KL/behavior preservation
    and confirm 8p1 before any 256-row promotion run.
 ```
+
+### Search-Q rank head from high-gap shards
+
+`adaptive_strategy_supervised.py` now consumes the rollout-search top-k fields
+saved by `adaptive_strategy_dataset.py --teacher-kind search`:
+
+```text
+search_candidate_indices
+search_prior_scores
+search_scores
+search_score_gap
+```
+
+The new `--search-q-rank-weight` loss trains the strategy action-Q head on a
+soft top-k ranking target derived from `search_scores / --search-q-temperature`.
+Rows only contribute when they have at least two valid prior candidates and a
+positive `search_score_gap`. This keeps high-gap search supervision away from
+the main policy logits and from primitive action CE.
+
+GPU probe:
+
+```text
+run: runs/adaptive-midgame-search-q-rank-v0/
+data: adaptive-strategy-search-highgap-v1, balanced by size-seat
+init: adaptive-midgame-search-imitation-v1
+update_scope: strategy-heads
+losses: search_q_rank=1.0 only
+epochs: 20
+result:
+  SQ loss: 3.8067 -> 2.7584
+  SQ top1: ~27.5% -> ~24.2%
+```
+
+Gameplay probes on seed `85280`:
+
+```text
+scale=0, 64-row:
+  Expander min: 73.44%
+
+q-rerank scale=0.01, 64-row:
+  Expander min: 54.69%
+  weak row: 8p1
+
+q-rerank scale=0.001, 64-row:
+  Expander min: 75.00%
+
+scale=0, 256-row:
+  Expander min: 71.09%
+
+q-rerank scale=0.001, 256-row:
+  Expander min: 71.48%
+```
+
+Conclusion: the rank loss is trainable, but raw action-Q rerank is still not a
+promotion path. The 256-row improvement is noise-sized, and a modestly larger
+scale collapses 8p1. Future use should normalize/gate Q bias or use these
+targets for finish/value/intent supervision rather than direct logits bias.
+
+Low-learning-rate full-policy recheck:
+
+```text
+run: runs/adaptive-midgame-decisive-imitation-v0/
+data: same highgap-v1, balanced by size-seat
+weights: KL=1.0, action CE=0.30, finish=0.50, outcome=0.40,
+         belief=0.25, intent=0.20
+lr: 1e-6
+epochs: 12
+Expander 64-row seed85280 min: 56.25%
+weak row: 8p1
+```
+
+This reinforces the earlier high-gap imitation result: even with finish,
+outcome, belief, and intent auxiliary targets, directly updating the whole U-Net
+policy on narrow high-gap winning rows creates a seat-specific regression.
+Freeze policy first, mix broader non-winning/draw-heavy counterexamples, or add
+a much stricter per-stratum behavior-preservation gate before trying another
+full-policy trajectory imitation run.
