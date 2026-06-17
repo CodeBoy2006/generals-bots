@@ -849,3 +849,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v0 directly. Scale Plan-Q/Worker data with more fixed-v5 decisive states, then train mixed best/all accepted-plan Workers and add a confidence gate before stronger Worker influence.
 - **Context:** Best-plan v0 trained on 403 non-pass Plan-Q examples (`Act 16.4% -> 41.2%`, `Src 30.8% -> 54.6%`, `Dir 45.2% -> 65.5%`). Fixed-v5 max250 256-row improved at low scale (`9.77%` min baseline to `10.55%` at scale `0.02`, `11.33%` at scale `0.05`), while Expander 256-row at scale `0.02` was roughly flat (`76.56%` min baseline to `76.17%`).
+
+## [2026-06-17 20:03] Plan-Worker Data Scaling
+- **Changes:** Collected four ignored fixed-v5 Plan-Q/Worker shards under `runs/adaptive-plan-q-fixed-v5-worker-v3/`, trained `adaptive-plan-worker-best-v1`, and documented the data/training/eval results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop scaling best-only Worker data. Train the next Worker on mixed best/all accepted plans and add an explicit confidence/gate label before stronger inference influence.
+- **Context:** v1 used 1620 best non-pass plans and fit them much better (`Act 29.4% -> 73.8%`, `Src 44.5% -> 97.0%`, `Dir 56.2% -> 76.0%`), but fixed-v5 max250 128-row only improved min from `7.03%` to `7.81%`; p1 remains the bottleneck, so better command imitation alone is not enough.

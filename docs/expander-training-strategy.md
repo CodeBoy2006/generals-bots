@@ -5894,3 +5894,72 @@ decisive fixed-v5 states, train Plan-Worker on mixed best/all accepted plans,
 and add a learned confidence gate before allowing stronger Worker influence.
 Do not promote v0, but do continue Plan-Worker data scaling.
 ```
+
+## 2026-06-17 Plan-Worker Data Scaling v1
+
+Collected a larger fixed-v5 Plan-Q/Worker dataset with the same warmup and
+worker rollout settings as v2, but four shards and the current
+`adaptive-plan-q-replacement-gate-v1` checkpoint as the base policy:
+
+```text
+output: runs/adaptive-plan-q-fixed-v5-worker-v3/
+grid: 8x8
+truncation: 250
+warmup_steps: 190
+samples: 2048
+plans/state: 4x4
+plan_rollout_steps: 64
+plan_worker_steps: 16
+rollouts/plan: 1
+device: cuda:0
+```
+
+Shard stats:
+
+| shard | mean gap | best q | best win | best draw |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | `0.4211` | `-0.0027` | `14.5%` | `78.7%` |
+| 1 | `0.3789` | `-0.0076` | `11.5%` | `82.4%` |
+| 2 | `0.3088` | `-0.0239` | `6.8%` | `91.4%` |
+| 3 | `0.2915` | `-0.0189` | `3.1%` | `94.9%` |
+
+Trained `adaptive-plan-worker-best-v1` from v0:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-worker-v3/plan-q-*.npz
+examples: 1620 best non-pass plans
+init:    runs/adaptive-plan-worker-best-v0/generals-adaptive-plan-worker-best-v0.eqx
+output:  runs/adaptive-plan-worker-best-v1/generals-adaptive-plan-worker-best-v1.eqx
+loss:    action=0.2, source=1.0, direction=1.0
+epochs:  100
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| loss | `3.1411` | `1.0056` |
+| action accuracy | `29.4%` | `73.8%` |
+| source accuracy | `44.5%` | `97.0%` |
+| direction accuracy | `56.2%` | `76.0%` |
+
+Fixed-v5 max250, 128 games/row on seed `84060`:
+
+| plan-worker scale | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `11.72%` | `7.03%` | `7.03%` | `56.25%` | `58.59%` |
+| `0.01` | `11.72%` | `7.81%` | `7.81%` | `51.56%` | `59.38%` |
+| `0.02` | `12.50%` | `7.81%` | `7.81%` | `45.31%` | `55.47%` |
+| `0.05` | `10.94%` | `7.81%` | `7.81%` | `57.03%` | `58.59%` |
+
+Conclusion:
+
+```text
+Scaling best-plan data made the Worker much better at reproducing selected
+commands, but did not expand fixed-v5 gameplay gains beyond v0.
+The p1 bottleneck persists and stronger fit mostly shifts draw/loss balance.
+Do not spend the next run on more best-only data.
+Next data/training variant should mix best plans with all accepted/improved
+candidate plans and train a separate confidence/gate target, so the Worker is
+used only when the command is likely to be outcome-improving.
+```
