@@ -891,3 +891,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote pair-rank checkpoints. Next route should use an explicit plan-pair/Commander scorer or target-conditioned source selector/Worker-conditioned source head; additive source+target decomposition is too weak.
 - **Context:** Model-worker source rank reached `33.4%`/corr `+0.127`; pair-rank reached `15.3%` pair top1 (`S33.8%/T43.9%`, corr `+0.179`); combo reached `15.9%` pair top1 but did not materially improve source/target. All runs were CUDA and saved under ignored `runs/`.
+
+## [2026-06-17 21:05] Explicit Plan Pair Scorer
+- **Changes:** Added `adaptive_plan_pair_scorer.py` and `adaptive_plan_pair_supervised.py`, a validation-tracked explicit MLP ranker for source-target Plan-Q candidates. Ran CUDA v1/v2/small probes and documented results.
+- **Status:** Completed
+- **Next Steps:** Do not connect the scorer to gameplay inference yet. Collect a larger same-family `model-worker` Plan-Q shard or train a target-conditioned source selector before promotion-oriented evaluator integration.
+- **Context:** Same-split additive baseline on the worker-source shard had validation pair top1 `4.19%`. Gap-weighted worker-source v1 reached best validation pair top1 `23.3%` (`S32.9%/T43.7%`, corr `+0.154`) at epoch 62. Mixed model+model-worker v2 fell to `12.9%`, and no-gap small worker-source fell to `13.7%`, so the signal is real but data-sensitive. All models/logs are under ignored `runs/`.

@@ -6569,3 +6569,137 @@ Next route should not continue spatial/rerank-scale sweeps. Use an explicit
 plan-pair/Commander scorer, or make source selection target-conditioned with
 Worker-conditioned route, army, safety, and accepted-plan features.
 ```
+
+### Explicit plan-pair scorer
+
+Added two files:
+
+```text
+examples/_experimental/ppo/adaptive_plan_pair_scorer.py
+examples/_experimental/ppo/adaptive_plan_pair_supervised.py
+```
+
+The scorer is a normalized MLP over one source-target plan candidate. It uses
+only inference-time features:
+
+```text
+policy/action-Q delta
+source/target logits
+finish probability
+source/target army
+route distance
+candidate/current policy logits and Q
+source/target coordinates and deltas
+grid size, turn, seat
+source cell observation channels
+target cell observation channels
+```
+
+The supervised trainer builds row-wise `16` pair examples from Plan-Q shards
+and trains a rank CE target from:
+
+```text
+plan_value = (1 - outcome_weight) * plan_q
+           + outcome_weight * outcome_value(loss=-1, draw=0, win=1)
+```
+
+It now saves both the final checkpoint and a `.best.eqx` checkpoint selected by
+validation pair top-1 accuracy.
+
+Same-split additive baseline on
+`runs/adaptive-plan-q-model-worker-candidates-v0/plan-q-00000.npz`, with the
+v1 train/validation split:
+
+```text
+train: loss 3.0071, pair 8.66%, source 38.18%, target 23.46%, corr -0.002
+val:   loss 2.9355, pair 4.19%, source 28.70%, target 26.18%, corr +0.026
+```
+
+GPU run v1, worker-source shard, gap-weighted:
+
+```text
+output: runs/adaptive-plan-pair-scorer-v1/
+dataset: runs/adaptive-plan-q-model-worker-candidates-v0/plan-q-00000.npz
+rows: 512
+train/val: 410 / 102
+hidden_dim: 128
+epochs: 128
+device: cuda:0
+```
+
+Best validation:
+
+```text
+epoch: 62
+loss: 2.7398
+pair top1: 23.3%
+source top1: 32.9%
+target top1: 43.7%
+corr: +0.154
+best checkpoint: runs/adaptive-plan-pair-scorer-v1/generals-adaptive-plan-pair-scorer-v1.best.eqx
+```
+
+GPU run v2, mixed model + model-worker shards:
+
+```text
+output: runs/adaptive-plan-pair-scorer-v2/
+datasets:
+  runs/adaptive-plan-q-model-worker-candidates-v0/plan-q-00000.npz
+  runs/adaptive-plan-q-model-candidates-v0/plan-q-00000.npz
+rows: 1024
+train/val: 819 / 205
+hidden_dim: 128
+epochs: 128
+device: cuda:0
+```
+
+Best validation:
+
+```text
+epoch: 20
+loss: 2.7819
+pair top1: 12.9%
+source top1: 23.6%
+target top1: 33.4%
+corr: +0.092
+```
+
+GPU run worker-small-v0, worker-source shard, no gap weighting:
+
+```text
+output: runs/adaptive-plan-pair-scorer-worker-small-v0/
+dataset: runs/adaptive-plan-q-model-worker-candidates-v0/plan-q-00000.npz
+rows: 512
+train/val: 410 / 102
+hidden_dim: 64
+epochs: 64
+gap_weighting: false
+device: cuda:0
+```
+
+Best validation:
+
+```text
+epoch: 11
+loss: 2.7561
+pair top1: 13.7%
+source top1: 25.5%
+target top1: 36.3%
+corr: +0.087
+```
+
+Conclusion:
+
+```text
+The explicit pair scorer can learn non-additive plan interactions on the
+worker-source shard: v1 validation pair top1 is 23.3%, far above the same-split
+additive baseline of 4.19%.
+
+The signal is still data-sensitive. Mixing model and model-worker candidate
+families degrades pair ranking, and removing gap weighting removes most of the
+benefit. This is not ready for fixed-v5 gameplay promotion.
+
+Next step should be a larger same-family model-worker Plan-Q shard or a
+target-conditioned source selector. Do not connect this scorer to inference
+until validation remains stable across larger shards/seeds.
+```
