@@ -1593,6 +1593,29 @@ def test_worker_command_obs_to_array_uses_observation_command_channels():
     assert jnp.all(obs_arr[-3, :, 4:] == 0)
 
 
+def test_worker_source_direction_targets_marginalize_full_move_planes():
+    from examples._experimental.ppo.adaptive_common import adaptive_action_space_size
+    from examples._experimental.ppo.adaptive_worker_pretrain import worker_source_direction_targets
+
+    pad_size = 3
+    targets = jnp.zeros((1, adaptive_action_space_size(pad_size)), dtype=jnp.float32)
+    right_from_origin = 0 * pad_size * pad_size + 0 * pad_size + 0
+    down_from_center = 2 * pad_size * pad_size + 1 * pad_size + 1
+    targets = targets.at[0, right_from_origin].set(0.25)
+    targets = targets.at[0, down_from_center].set(0.75)
+
+    source_targets, direction_targets = worker_source_direction_targets(targets, pad_size)
+
+    assert source_targets.shape == (1, pad_size * pad_size)
+    assert direction_targets.shape == (1, 4)
+    assert source_targets[0, 0] == 0.25
+    assert source_targets[0, 4] == 0.75
+    assert direction_targets[0, 0] == 0.25
+    assert direction_targets[0, 2] == 0.75
+    assert jnp.sum(source_targets) == 1.0
+    assert jnp.sum(direction_targets) == 1.0
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess

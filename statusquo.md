@@ -603,3 +603,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop hard-switching to the flat-action Worker. Next Worker branch should split source selection and direction prediction, or use Worker logits only as a candidate reranker under the adaptive policy rather than replacing policy actions.
 - **Context:** Pure Worker `general-v2` scored `0.00%` min over 64 games/row on seed 74710. Hybrid fallback with Worker never triggered stayed in base range (`64.06%` min), validating the evaluator path, but visible-general/contact/turn Worker takeover collapsed to `0.00-15.62%` min. The negative result shows the current flat action head learned route support but cannot execute finish moves precisely.
+
+## [2026-06-17 11:58] Worker Split-Loss Probe
+- **Changes:** Added Worker source/direction target marginalization and split loss weights to `adaptive_worker_pretrain.py`, preserving the old flat action CE defaults. Added a focused marginalization test and documented the GPU split-loss probe plus hybrid visible-general evaluation.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-worker-split-general-v1` as a policy. Use its logits only as a small rerank bias/candidate proposer under the adaptive fallback policy, or move to explicit separate source/direction heads before another hard-switch attempt.
+- **Context:** GPU split run in `runs/adaptive-worker-split-general-v1/` reached final `Acc 21.7%`, `Src 40.0%`, `Dir 51.8%`, `Useful 91.0%`, `Mass 0.172`, improving supervised Worker metrics over flat `general-v2`. However a 64 games/row hybrid visible-general takeover still scored only `14.06%` min win rate, so hard-switch Worker control remains rejected.

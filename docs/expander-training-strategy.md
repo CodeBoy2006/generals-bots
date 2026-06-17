@@ -2830,3 +2830,55 @@ execution:
   only use Worker as action reranker/candidate proposer at first
   do not hard-switch control from the adaptive policy
 ```
+
+## 2026-06-17 Worker Split-Loss Probe
+
+Implemented the first half of the split Worker branch in `adaptive_worker_pretrain.py` without changing the network schema. The flat adaptive policy logits are now marginalized into:
+
+```text
+source logits: logsumexp over the 8 move planes per source cell
+direction logits: logsumexp over all source cells and full/half planes per direction
+```
+
+New CLI weights:
+
+```text
+--action-loss-weight
+--source-loss-weight
+--direction-loss-weight
+```
+
+Default behavior is unchanged (`action=1, source=0, direction=0`). The split probe used `action=0.1, source=1.0, direction=1.0` on GPU:
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_worker_pretrain.py 64 \
+  --grid-sizes 8,12,16 --grid-size-weights 8:1,12:1,16:2 --pad-to 16 \
+  --map-generator generated --target-family general --target-temperature 2.0 \
+  --num-steps 32 --num-iterations 100 --pool-size 1024 --truncation 300 \
+  --lr 1e-4 --channels 32,32,32,16 \
+  --action-loss-weight 0.1 --source-loss-weight 1.0 --direction-loss-weight 1.0 \
+  --model-path runs/adaptive-worker-split-general-v1/generals-adaptive-worker-split-general-v1.eqx \
+  --checkpoint-dir runs/adaptive-worker-split-general-v1/ckpts --checkpoint-every 50 --keep-checkpoints 2 \
+  --seed 74800
+```
+
+Training result:
+
+| run | final Acc | final Src | final Dir | final Useful | final Mass |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `adaptive-worker-pretrain-general-v2` flat soft CE | `9.9%` | n/a | n/a | `62.7%` | `0.089` |
+| `adaptive-worker-split-general-v1` split loss | `21.7%` | `40.0%` | `51.8%` | `91.0%` | `0.172` |
+
+The split loss substantially improves supervised route-support metrics, but it is still not a promotion policy. A 64 games/row hybrid visible-general takeover check against Expander scored:
+
+| size/seat | win/loss/draw | win rate |
+| --- | ---: | ---: |
+| 8x8 p0 | `18/41/5` | `28.12%` |
+| 8x8 p1 | `19/39/6` | `29.69%` |
+| 12x12 p0 | `23/25/16` | `35.94%` |
+| 12x12 p1 | `23/16/25` | `35.94%` |
+| 16x16 p0 | `15/12/37` | `23.44%` |
+| 16x16 p1 | `9/10/45` | `14.06%` |
+
+Interpretation: source/direction supervision made the Worker much better at recognizing useful BFS-support moves, but hard-switching control still corrupts the policy. Next step should use Worker logits as a small rerank bias/candidate proposer under the adaptive fallback policy, not as a replacement action source.

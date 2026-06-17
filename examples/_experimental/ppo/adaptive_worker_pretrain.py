@@ -234,6 +234,29 @@ def worker_bfs_target_probs(
     return probs, label, has_label.astype(jnp.float32)
 
 
+def worker_source_direction_targets(targets: jnp.ndarray, pad_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Marginalize adaptive action targets into source-cell and direction targets."""
+    leading_shape = targets.shape[:-1]
+    move_planes = targets[..., : 8 * pad_size * pad_size].reshape(*leading_shape, 8, pad_size, pad_size)
+    source_targets = jnp.sum(move_planes, axis=-3).reshape(*leading_shape, pad_size * pad_size)
+    full_direction_targets = jnp.sum(move_planes[..., :4, :, :], axis=(-1, -2))
+    half_direction_targets = jnp.sum(move_planes[..., 4:8, :, :], axis=(-1, -2))
+    direction_targets = full_direction_targets + half_direction_targets
+    return source_targets, direction_targets
+
+
+def worker_source_direction_logits(logits: jnp.ndarray, pad_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Convert flat adaptive logits into source-cell and direction logits."""
+    leading_shape = logits.shape[:-1]
+    move_logits = logits[..., : 8 * pad_size * pad_size].reshape(*leading_shape, 8, pad_size, pad_size)
+    source_logits = jax.nn.logsumexp(move_logits, axis=-3).reshape(*leading_shape, pad_size * pad_size)
+    direction_logits = jax.nn.logsumexp(
+        jnp.stack([move_logits[..., :4, :, :], move_logits[..., 4:8, :, :]], axis=-1),
+        axis=(-1, -2, -3),
+    )
+    return source_logits, direction_logits
+
+
 def target_families_for_mode(key, num_envs: int, target_mode: int) -> jnp.ndarray:
     """Sample or broadcast Worker target family ids."""
     if target_mode == WORKER_TARGET_RANDOM:
@@ -369,39 +392,87 @@ def collect_worker_batch(
 
 
 @eqx.filter_jit
-def train_worker_step(network, opt_state, obs, masks, active, targets, labels, weights, optimizer):
+def train_worker_step(
+    network,
+    opt_state,
+    obs,
+    masks,
+    active,
+    targets,
+    labels,
+    weights,
+    optimizer,
+    action_loss_weight: float,
+    source_loss_weight: float,
+    direction_loss_weight: float,
+):
     """Train one Worker supervised batch."""
     batch_size = obs.shape[0] * obs.shape[1]
+    pad_size = active.shape[-1]
     obs_flat = obs.reshape(batch_size, *obs.shape[2:])
     masks_flat = masks.reshape(batch_size, *masks.shape[2:])
     active_flat = active.reshape(batch_size, *active.shape[2:])
     targets_flat = targets.reshape(batch_size, targets.shape[-1])
     labels_flat = labels.reshape(batch_size)
     weights_flat = weights.reshape(batch_size)
+    source_targets, direction_targets = worker_source_direction_targets(targets_flat, pad_size)
 
     def loss_fn(net):
         logits = jax.vmap(lambda o, m, a: net.logits_value(o, m, a)[0])(obs_flat, masks_flat, active_flat)
         log_probs = jax.nn.log_softmax(logits, axis=-1)
-        losses = -jnp.sum(targets_flat * log_probs, axis=-1)
+        action_losses = -jnp.sum(targets_flat * log_probs, axis=-1)
+        source_logits, direction_logits = worker_source_direction_logits(logits, pad_size)
+        source_log_probs = jax.nn.log_softmax(source_logits, axis=-1)
+        direction_log_probs = jax.nn.log_softmax(direction_logits, axis=-1)
+        source_losses = -jnp.sum(source_targets * source_log_probs, axis=-1)
+        direction_losses = -jnp.sum(direction_targets * direction_log_probs, axis=-1)
+        losses = (
+            action_loss_weight * action_losses
+            + source_loss_weight * source_losses
+            + direction_loss_weight * direction_losses
+        )
         normalizer = jnp.maximum(jnp.sum(weights_flat), 1.0)
         loss = jnp.sum(losses * weights_flat) / normalizer
         predictions = jnp.argmax(logits, axis=-1)
+        source_predictions = jnp.argmax(source_logits, axis=-1)
+        direction_predictions = jnp.argmax(direction_logits, axis=-1)
+        source_labels = jnp.argmax(source_targets, axis=-1)
+        direction_labels = jnp.argmax(direction_targets, axis=-1)
         accuracy = jnp.sum((predictions == labels_flat) * weights_flat) / normalizer
+        source_accuracy = jnp.sum((source_predictions == source_labels) * weights_flat) / normalizer
+        direction_accuracy = jnp.sum((direction_predictions == direction_labels) * weights_flat) / normalizer
         predicted_mass = jnp.take_along_axis(targets_flat, predictions[:, None], axis=1)[:, 0]
         useful = predicted_mass > 0.0
         useful_accuracy = jnp.sum(useful.astype(jnp.float32) * weights_flat) / normalizer
         mean_predicted_mass = jnp.sum(predicted_mass * weights_flat) / normalizer
         valid_fraction = jnp.mean(weights_flat > 0.0)
-        return loss, (accuracy, useful_accuracy, mean_predicted_mass, valid_fraction)
+        return loss, (
+            accuracy,
+            source_accuracy,
+            direction_accuracy,
+            useful_accuracy,
+            mean_predicted_mass,
+            valid_fraction,
+        )
 
-    (loss, (accuracy, useful_accuracy, mean_predicted_mass, valid_fraction)), grads = eqx.filter_value_and_grad(
-        loss_fn,
-        has_aux=True,
-    )(network)
+    (
+        loss,
+        (accuracy, source_accuracy, direction_accuracy, useful_accuracy, mean_predicted_mass, valid_fraction),
+    ), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(network)
     params = eqx.filter(network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     network = eqx.apply_updates(network, updates)
-    return network, opt_state, loss, accuracy, useful_accuracy, mean_predicted_mass, valid_fraction
+    return (
+        network,
+        opt_state,
+        loss,
+        accuracy,
+        source_accuracy,
+        direction_accuracy,
+        useful_accuracy,
+        mean_predicted_mass,
+        valid_fraction,
+    )
 
 
 def parse_args():
@@ -417,6 +488,9 @@ def parse_args():
     parser.add_argument("--num-steps", type=int, default=16)
     parser.add_argument("--num-iterations", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--action-loss-weight", type=float, default=1.0)
+    parser.add_argument("--source-loss-weight", type=float, default=0.0)
+    parser.add_argument("--direction-loss-weight", type=float, default=0.0)
     parser.add_argument("--pool-size", type=int, default=4096)
     parser.add_argument("--truncation", type=int, default=500)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
@@ -455,6 +529,10 @@ def parse_args():
         parser.error("--num-steps and --num-iterations must be positive")
     if args.lr <= 0.0:
         parser.error("--lr must be positive")
+    if args.action_loss_weight < 0.0 or args.source_loss_weight < 0.0 or args.direction_loss_weight < 0.0:
+        parser.error("Worker loss weights must be non-negative")
+    if args.action_loss_weight + args.source_loss_weight + args.direction_loss_weight <= 0.0:
+        parser.error("At least one Worker loss weight must be positive")
     if args.target_temperature <= 0.0:
         parser.error("--target-temperature must be positive")
     if args.truncation <= 0:
@@ -491,6 +569,10 @@ def main():
     print(f"Target temp:   {args.target_temperature:g}")
     print(f"Input chans:   {WORKER_INPUT_CHANNELS}")
     print(f"Iterations:    {args.num_iterations} x {args.num_steps} steps")
+    print(
+        f"Loss weights:  action={args.action_loss_weight:g}, "
+        f"source={args.source_loss_weight:g}, direction={args.direction_loss_weight:g}"
+    )
     print(f"Reset pool:    {args.pool_size}")
     if args.channels is not None:
         print(f"Channels:      {args.channels}")
@@ -548,7 +630,17 @@ def main():
             args.target_temperature,
         )
         obs, masks, active, targets, labels, weights, families, dones = batch
-        network, opt_state, loss, accuracy, useful_accuracy, mean_predicted_mass, valid_fraction = train_worker_step(
+        (
+            network,
+            opt_state,
+            loss,
+            accuracy,
+            source_accuracy,
+            direction_accuracy,
+            useful_accuracy,
+            mean_predicted_mass,
+            valid_fraction,
+        ) = train_worker_step(
             network,
             opt_state,
             obs,
@@ -558,6 +650,9 @@ def main():
             labels,
             weights,
             optimizer,
+            args.action_loss_weight,
+            args.source_loss_weight,
+            args.direction_loss_weight,
         )
         jax.block_until_ready(network)
 
@@ -581,7 +676,9 @@ def main():
             family_counts = jnp.bincount(families.reshape(-1), length=3)
             print(
                 f"Iter {iteration:4d} | Loss: {float(loss):.4f} | "
-                f"Acc: {float(accuracy) * 100:5.1f}% | Useful: {float(useful_accuracy) * 100:5.1f}% | "
+                f"Acc: {float(accuracy) * 100:5.1f}% | Src: {float(source_accuracy) * 100:5.1f}% | "
+                f"Dir: {float(direction_accuracy) * 100:5.1f}% | "
+                f"Useful: {float(useful_accuracy) * 100:5.1f}% | "
                 f"Mass: {float(mean_predicted_mass):.3f} | Valid: {float(valid_fraction) * 100:5.1f}% | "
                 f"Labels: {labeled:5d} | Episodes: {episodes:4d} | "
                 f"Fam: {int(family_counts[0])}/{int(family_counts[1])}/{int(family_counts[2])} | "
