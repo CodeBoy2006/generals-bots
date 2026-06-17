@@ -1443,6 +1443,63 @@ def test_collect_adaptive_soft_batch_returns_expected_shapes():
     assert jnp.allclose(jnp.sum(target_probs, axis=-1), jnp.ones((1, num_envs), dtype=jnp.float32))
 
 
+def test_collect_adaptive_soft_batch_supports_history_base_network():
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_HISTORY_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import collect_adaptive_soft_batch
+
+    pad_size = 6
+    num_envs = 2
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=pad_size,
+        input_channels=ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        channels=(16, 16, 16, 8),
+        global_context=True,
+    )
+    states = jax.tree.map(
+        lambda *xs: jnp.stack(xs),
+        make_padded_state(size=4, pad_to=pad_size),
+        make_padded_state(size=6, pad_to=pad_size),
+    )
+    effective_sizes = jnp.array([4, 6], dtype=jnp.int32)
+
+    _, batch, _ = collect_adaptive_soft_batch(
+        network,
+        network,
+        network,
+        states,
+        effective_sizes,
+        jrandom.PRNGKey(3),
+        num_steps=1,
+        policy_mode=0,
+        opponent_policy_mode=0,
+        learner_player=0,
+        top_k=2,
+        rollout_steps=1,
+        rollouts_per_action=1,
+        army_weight=12.0,
+        land_weight=8.0,
+        prior_weight=0.01,
+        terminal_score=1000.0,
+        soft_weight_mode=0,
+        min_margin=2.0,
+        margin_scale=4.0,
+        max_weight=1.0,
+        score_temperature=1.0,
+        search_value_scale=100.0,
+        pad_size=pad_size,
+        global_context=True,
+        scoreboard_history_enabled=True,
+        base_global_context=True,
+        base_scoreboard_history_enabled=True,
+    )
+
+    obs, _, _, base_obs, *_ = batch
+    assert obs.shape == (1, num_envs, ADAPTIVE_HISTORY_INPUT_CHANNELS, pad_size, pad_size)
+    assert base_obs.shape == obs.shape
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess

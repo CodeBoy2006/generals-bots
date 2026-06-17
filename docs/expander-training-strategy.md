@@ -2650,3 +2650,65 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/evaluate_ada
 ```
 
 注意：这不是强度结果。当前工作区里历史 best adaptive checkpoint 已不在原 `/tmp` 路径，尝试从 `generals-adaptive-search-distill-p1-v1-iter-000040.eqx` warm start 会失败。因此本轮只完成 Phase 1 训练机制转向和 CUDA smoke。下一步应把真实 71.29% 候选迁移到 `runs/` 后，启动 mixed-seat scoreboard-history strategy-aux distill；若 256 games/row triage 超过当前 71.29%/512-row 候选，再做 512-row promotion。
+
+## 2026-06-17 History-Base Strategy Aux Probe
+
+用户提示检查 `legacymodels/` 后，结论是：目录里没有 exact historical best `generals-adaptive-search-distill-p1-v1-iter-000040.eqx`，但有多组 30-channel scoreboard-history adaptive probe。文件结构按 checkpoint 大小可分为：
+
+- `147880` bytes：30-channel global/history shared scalar value，无 outcome/strategy aux。
+- `148916` bytes：30-channel global/history shared scalar value + outcome head。
+- `309684` bytes：30-channel per-size HL-Gauss value head。
+
+当前 `adaptive_search_distill.py` 只给 base/search/opponent teacher 增加了 20/30-channel shared-MSE 模板支持：`--base-global-context` / `--base-scoreboard-history`。这足够加载 `generals-adaptive-ppo-v3-composite-balanced-probe1.eqx` 这类 shared-MSE history checkpoint；outcome 或 HL-Gauss teacher 还需要额外的 base template 参数，暂未加入。
+
+64 games/row CUDA quick rank，generated maps，`--scoreboard-history`，seed `74000`：
+
+| candidate | min win rate | bottleneck |
+| --- | ---: | --- |
+| `generals-adaptive-ppo-v3-composite-balanced-probe1.eqx` | `70.31%` | 16p0/16p1 |
+| `generals-adaptive-ppo-v3-noarch-probe1.eqx` | `70.31%` | per-size HL, not usable as current base template |
+| `generals-adaptive-search-value-mixed-v1-iter-000020.eqx` | `68.75%` | 16p0 |
+| `generals-adaptive-search-outcome-freeze-v1-iter-000010.eqx` | `65.62%` | 16p0 |
+| `generals-adaptive-ppo-v3-mse-last-probe1.eqx` | `65.62%` | 16p0 |
+| `generals-adaptive-ppo-v3-composite-last-probe1.eqx` | `60.94%` | 16p0 |
+
+因此本轮选择 `legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx` 作为 history-base teacher。新增实现点：
+
+- search prior、KL base logits、opponent execution 都能按 `--base-scoreboard-history` 构造 30-channel 输入。
+- search rollout 内为 p0/p1 分别 carry previous scoreboard，候选第一步后的 rollout 会继续使用一致的 one-step delta history。
+- 新增 focused collector test，覆盖 student/base 都是 30-channel history 网络时的 soft batch shape。
+
+CUDA smoke:
+
+```text
+runs/history-base-strategy-smoke/generals-adaptive-strategy-history-base-smoke.eqx
+Iter 1 | Loss 65.83665 | StratQ 643.7910 | Intent 23.6869 | Belief 6.7736
+```
+
+这只验证 30-channel base/search teacher 可以在 GPU 上编译、采样、保存，不作为强度结果。
+
+随后从 `composite-balanced` 跑两个短 strategy-aux probe，输出均在项目内 `runs/`，没有写缓存目录：
+
+| run | main change | seed 74000 min | seed 74210 min | conclusion |
+| --- | --- | ---: | ---: | --- |
+| `runs/adaptive-strategy-aux-v1/` | action soft + Q/intent/finish/belief, `lr=1e-6` | `62.50%` final, `65.62%` iter4 | `64.06%` final | action soft target still shifts 16x16; not promote |
+| `runs/adaptive-strategy-aux-v2/` | stronger KL, no improve CE, lighter Q, `lr=5e-7` | `68.75%` final | `64.06%` final | more stable than v1, still below base seed74000 `70.31%`; not promote |
+
+v1 same-seed `74210` did improve the base control from `59.38%` min to `64.06%`, and v2 kept most rows closer to the base. But neither crosses the 71.29% historical bar, and neither is stronger than the `composite-balanced` seed74000 control. The useful result is engineering rather than promotion: history-base strategy auxiliary training is now runnable, and the next iteration should avoid all-active action soft labels. Recommended next probe:
+
+```text
+use shared-MSE history base:
+  --base-scoreboard-history
+  --scoreboard-history
+  --learner-player mixed
+  --kl-weight high
+  --improve-weight 0
+  Q/intent/finish/belief on
+
+change target sampling:
+  train action CE only on high-margin rows, or disable action CE entirely
+  keep Q/intent/belief as representation losses
+
+optional:
+  add base value-head/outcome/HL-Gauss template flags so noarch_hl can be used as teacher
+```

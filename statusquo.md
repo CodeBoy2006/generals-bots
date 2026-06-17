@@ -579,3 +579,9 @@
 - **Status:** Completed
 - **Next Steps:** Move the real 71.29% adaptive candidate into `runs/`, then run mixed-seat scoreboard-history strategy-aux distillation on GPU and triage at 256 games/row before any 512-row promotion.
 - **Context:** Focused adaptive tests passed (`6 passed`), compileall and `git diff --check` passed, and CUDA train/load smoke passed on `cuda:0` using `runs/strategy-aux-smoke-postpatch/`. The smoke uses a synthetic tiny checkpoint and is not a strength result; the historical best checkpoint was absent from its old `/tmp` path.
+
+## [2026-06-17 11:11] History-Base Strategy Aux Probe
+- **Changes:** Added `adaptive_search_distill.py --base-global-context` / `--base-scoreboard-history`, allowing shared-MSE 20/30-channel adaptive checkpoints to act as base/search/opponent teacher networks with per-seat scoreboard-history carry through rollout search. Added a focused collector test and documented `legacymodels/` ranking plus v1/v2 GPU probes.
+- **Status:** Completed
+- **Next Steps:** Do not promote the v1/v2 strategy-aux checkpoints. Next probe should disable all-active action soft labels or restrict action CE to high-margin rows while keeping Q/intent/belief representation losses; optionally add base template flags for outcome/HL-Gauss teacher checkpoints.
+- **Context:** `legacymodels/` does not contain the exact 71.29% historical best, but `generals-adaptive-ppo-v3-composite-balanced-probe1.eqx` was the best shared-MSE history teacher found in 64 games/row triage (`70.31%` min on seed 74000). v2 reached `68.75%` min on seed 74000 and `64.06%` on seed 74210, so it is an engineering validation rather than a promotion candidate. Focused verification passed: compileall, `git diff --check`, and 3 targeted CPU pytest cases.
