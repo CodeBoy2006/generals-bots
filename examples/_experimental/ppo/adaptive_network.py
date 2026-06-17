@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -27,6 +28,15 @@ except ImportError:  # pragma: no cover - used when running this directory as sc
         adaptive_action_to_index,
         adaptive_index_to_action,
     )
+
+
+class StrategyAuxOutputs(NamedTuple):
+    """Strategic auxiliary predictions for intent, finish, belief, and action Q."""
+
+    intent_logits: jnp.ndarray
+    finish_logits: jnp.ndarray
+    enemy_general_logits: jnp.ndarray
+    action_q_values: jnp.ndarray
 
 
 def value_bin_centers(value_bins: int, value_min: float = -1.0, value_max: float = 1.0) -> jnp.ndarray:
@@ -90,6 +100,11 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_linear2: eqx.nn.Linear
     categorical_value_linear2: eqx.nn.Linear | None
     outcome_linear2: eqx.nn.Linear | None
+    strategy_intent_linear2: eqx.nn.Linear | None
+    strategy_finish_linear2: eqx.nn.Linear | None
+    strategy_q_conv: eqx.nn.Conv2d | None
+    strategy_q_pass_linear: eqx.nn.Linear | None
+    strategy_enemy_general_conv: eqx.nn.Conv2d | None
     global_linear1: eqx.nn.Linear | None
     global_linear2: eqx.nn.Linear | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
@@ -102,6 +117,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_max: float = eqx.field(static=True)
     value_sigma: float = eqx.field(static=True)
     outcome_head: bool = eqx.field(static=True)
+    strategy_aux: bool = eqx.field(static=True)
     global_context: bool = eqx.field(static=True)
 
     def __init__(
@@ -116,6 +132,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         value_max: float = 1.0,
         value_sigma: float = 0.04,
         outcome_head: bool = False,
+        strategy_aux: bool = False,
         global_context: bool = False,
     ):
         if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
@@ -124,10 +141,11 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
         outcome_keys = 1 if outcome_head else 0
+        strategy_keys = 5 if strategy_aux else 0
         global_keys = 2 if global_context else 0
         keys = jrandom.split(
             key,
-            8 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys + global_keys,
+            8 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys + global_keys + strategy_keys,
         )
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
@@ -136,6 +154,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.value_max = value_max
         self.value_sigma = value_sigma
         self.outcome_head = bool(outcome_head)
+        self.strategy_aux = bool(strategy_aux)
         self.global_context = bool(global_context)
         self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
@@ -178,6 +197,24 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         else:
             self.global_linear1 = None
             self.global_linear2 = None
+        strategy_offset = global_offset + global_keys
+        if strategy_aux:
+            self.strategy_intent_linear2 = eqx.nn.Linear(64, 8, key=keys[strategy_offset])
+            self.strategy_finish_linear2 = eqx.nn.Linear(64, 2, key=keys[strategy_offset + 1])
+            self.strategy_q_conv = eqx.nn.Conv2d(channels[3], 8, kernel_size=1, key=keys[strategy_offset + 2])
+            self.strategy_q_pass_linear = eqx.nn.Linear(channels[3] * 2, 1, key=keys[strategy_offset + 3])
+            self.strategy_enemy_general_conv = eqx.nn.Conv2d(
+                channels[3],
+                1,
+                kernel_size=1,
+                key=keys[strategy_offset + 4],
+            )
+        else:
+            self.strategy_intent_linear2 = None
+            self.strategy_finish_linear2 = None
+            self.strategy_q_conv = None
+            self.strategy_q_pass_linear = None
+            self.strategy_enemy_general_conv = None
 
     def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.conv1(obs))
@@ -222,6 +259,31 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             return None
         value_hidden = jax.nn.relu(self.value_linear1(pooled))
         return self.outcome_linear2(value_hidden)
+
+    def strategy_auxiliary(self, obs: jnp.ndarray, mask: jnp.ndarray, active: jnp.ndarray) -> StrategyAuxOutputs:
+        """Compute optional strategic auxiliary predictions."""
+        if (
+            self.strategy_intent_linear2 is None
+            or self.strategy_finish_linear2 is None
+            or self.strategy_q_conv is None
+            or self.strategy_q_pass_linear is None
+            or self.strategy_enemy_general_conv is None
+        ):
+            raise ValueError("strategy auxiliary heads are not configured")
+        x = self._features(obs)
+        pooled = self._masked_pool(x, active)
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        move_q = self.strategy_q_conv(x)
+        pass_q = self.strategy_q_pass_linear(pooled)
+        action_q_values = jnp.concatenate([move_q.reshape(-1), pass_q], axis=0)
+        enemy_general_logits = self.strategy_enemy_general_conv(x)[0]
+        enemy_general_logits = jnp.where(active, enemy_general_logits, -10.0)
+        return StrategyAuxOutputs(
+            intent_logits=self.strategy_intent_linear2(value_hidden),
+            finish_logits=self.strategy_finish_linear2(value_hidden),
+            enemy_general_logits=enemy_general_logits,
+            action_q_values=action_q_values,
+        )
 
     def _size_value(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
         if not self.value_head_sizes:
@@ -343,6 +405,8 @@ def load_or_create_adaptive_network(
     init_value_sigma: float | None = None,
     outcome_head: bool = False,
     init_outcome_head: bool | None = None,
+    strategy_aux: bool = False,
+    init_strategy_aux: bool | None = None,
     global_context: bool = False,
     init_global_context: bool | None = None,
 ) -> AdaptivePolicyValueNetwork:
@@ -361,6 +425,7 @@ def load_or_create_adaptive_network(
         value_max=value_max,
         value_sigma=value_sigma,
         outcome_head=outcome_head,
+        strategy_aux=strategy_aux,
         global_context=global_context,
     )
     if init_model_path is None:
@@ -386,6 +451,7 @@ def load_or_create_adaptive_network(
         parsed_init_value_sigma,
     )
     parsed_init_outcome_head = outcome_head if init_outcome_head is None else bool(init_outcome_head)
+    parsed_init_strategy_aux = strategy_aux if init_strategy_aux is None else bool(init_strategy_aux)
     parsed_init_global_context = global_context if init_global_context is None else bool(init_global_context)
     needs_expansion = (
         parsed_init_channels != parsed_channels
@@ -396,6 +462,7 @@ def load_or_create_adaptive_network(
         or parsed_init_value_max != value_max
         or parsed_init_value_sigma != value_sigma
         or parsed_init_outcome_head != outcome_head
+        or parsed_init_strategy_aux != strategy_aux
         or parsed_init_global_context != global_context
     )
     if needs_expansion:
@@ -410,6 +477,7 @@ def load_or_create_adaptive_network(
             value_max=parsed_init_value_max,
             value_sigma=parsed_init_value_sigma,
             outcome_head=parsed_init_outcome_head,
+            strategy_aux=parsed_init_strategy_aux,
             global_context=parsed_init_global_context,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
@@ -594,6 +662,41 @@ def expand_adaptive_network_channels(
             lambda net: net.outcome_linear2,
             target,
             _copy_linear_prefix(target.outcome_linear2, source.outcome_linear2),
+        )
+    if target.strategy_intent_linear2 is not None and source.strategy_intent_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_intent_linear2,
+            target,
+            _copy_linear_prefix(target.strategy_intent_linear2, source.strategy_intent_linear2),
+        )
+    if target.strategy_finish_linear2 is not None and source.strategy_finish_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_finish_linear2,
+            target,
+            _copy_linear_prefix(target.strategy_finish_linear2, source.strategy_finish_linear2),
+        )
+    if target.strategy_q_conv is not None and source.strategy_q_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_q_conv,
+            target,
+            _copy_conv_prefix(target.strategy_q_conv, source.strategy_q_conv),
+        )
+    if target.strategy_q_pass_linear is not None and source.strategy_q_pass_linear is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_q_pass_linear,
+            target,
+            _copy_pooled_linear_prefix(
+                target.strategy_q_pass_linear,
+                source.strategy_q_pass_linear,
+                target_channels,
+                source_channels,
+            ),
+        )
+    if target.strategy_enemy_general_conv is not None and source.strategy_enemy_general_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_enemy_general_conv,
+            target,
+            _copy_conv_prefix(target.strategy_enemy_general_conv, source.strategy_enemy_general_conv),
         )
     if (
         target.global_linear1 is not None

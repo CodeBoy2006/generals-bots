@@ -149,7 +149,7 @@ def parse_args():
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--channels", default=None)
     parser.add_argument("--init-model-path", default=None)
-    parser.add_argument("--model-path", default="/tmp/generals-adaptive-bc-8-12-16.eqx")
+    parser.add_argument("--model-path", default="runs/generals-adaptive-bc-8-12-16.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--keep-checkpoints", type=int, default=0)
@@ -291,6 +291,7 @@ def main():
                 f"SPS: {samples / elapsed:8.0f} | Time: {elapsed:.2f}s"
             )
 
+    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, network)
     print(f"\nModel saved to: {args.model_path}")
 

@@ -41,6 +41,7 @@ from adaptive_common import (
     reset_adaptive_scoreboard_history,
 )
 from adaptive_network import load_or_create_adaptive_network
+from adaptive_strategy_aux import strategy_aux_targets
 from common import POLICY_MODE_NAME_TO_ID, POLICY_MODE_NAMES
 from conservative_search_distill import (
     search_score_target_probs,
@@ -106,6 +107,16 @@ def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT
         masked = eqx.tree_at(lambda net: net.global_linear2, masked, grads.global_linear2)
     if grads.outcome_linear2 is not None:
         masked = eqx.tree_at(lambda net: net.outcome_linear2, masked, grads.outcome_linear2)
+    if grads.strategy_intent_linear2 is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_intent_linear2, masked, grads.strategy_intent_linear2)
+    if grads.strategy_finish_linear2 is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_finish_linear2, masked, grads.strategy_finish_linear2)
+    if grads.strategy_q_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_q_conv, masked, grads.strategy_q_conv)
+    if grads.strategy_q_pass_linear is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_q_pass_linear, masked, grads.strategy_q_pass_linear)
+    if grads.strategy_enemy_general_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_enemy_general_conv, masked, grads.strategy_enemy_general_conv)
     return masked
 
 
@@ -299,6 +310,76 @@ def compute_adaptive_soft_conservative_loss(
         "accuracy": accuracy,
         "improvement_extra_accuracy": jnp.where(jnp.sum(improvement_extra_weights) > 0.0, extra_accuracy, 0.0),
         "target_entropy": jnp.sum(target_entropy * search_weights) / search_normalizer,
+    }
+    return loss, metrics
+
+
+def binary_cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray:
+    """Numerically stable binary cross-entropy."""
+    return jnp.maximum(logits, 0.0) - logits * targets + jnp.log1p(jnp.exp(-jnp.abs(logits)))
+
+
+def compute_strategy_aux_loss(
+    student_network,
+    obs,
+    masks,
+    active,
+    candidate_indices,
+    candidate_q_targets,
+    q_weights,
+    intent_targets,
+    intent_weights,
+    finish_targets,
+    finish_weights,
+    enemy_general_targets,
+    belief_weights,
+    q_weight: float,
+    intent_weight: float,
+    finish_weight: float,
+    belief_weight: float,
+):
+    """Return strategic Q/intent/finish/belief auxiliary loss and metrics."""
+    outputs = jax.vmap(
+        lambda sample_obs, sample_mask, sample_active: student_network.strategy_auxiliary(
+            sample_obs,
+            sample_mask,
+            sample_active,
+        )
+    )(obs, masks, active)
+
+    candidate_q = jnp.take_along_axis(outputs.action_q_values, candidate_indices, axis=1)
+    q_errors = jnp.mean((candidate_q - candidate_q_targets) ** 2, axis=1)
+    q_normalizer = jnp.maximum(jnp.sum(q_weights), 1.0)
+    q_loss = jnp.sum(q_errors * q_weights) / q_normalizer
+
+    intent_log_probs = jax.nn.log_softmax(outputs.intent_logits, axis=-1)
+    intent_losses = -jnp.take_along_axis(intent_log_probs, intent_targets[:, None], axis=1)[:, 0]
+    intent_normalizer = jnp.maximum(jnp.sum(intent_weights), 1.0)
+    intent_loss = jnp.sum(intent_losses * intent_weights) / intent_normalizer
+    intent_accuracy = jnp.sum((jnp.argmax(outputs.intent_logits, axis=-1) == intent_targets) * intent_weights)
+    intent_accuracy = intent_accuracy / intent_normalizer
+
+    finish_log_probs = jax.nn.log_softmax(outputs.finish_logits, axis=-1)
+    finish_losses = -jnp.take_along_axis(finish_log_probs, finish_targets[:, None], axis=1)[:, 0]
+    finish_normalizer = jnp.maximum(jnp.sum(finish_weights), 1.0)
+    finish_loss = jnp.sum(finish_losses * finish_weights) / finish_normalizer
+    finish_accuracy = jnp.sum((jnp.argmax(outputs.finish_logits, axis=-1) == finish_targets) * finish_weights)
+    finish_accuracy = finish_accuracy / finish_normalizer
+
+    active_f = active.astype(jnp.float32)
+    per_cell_bce = binary_cross_entropy_with_logits(outputs.enemy_general_logits, enemy_general_targets)
+    per_sample_belief = jnp.sum(per_cell_bce * active_f, axis=(1, 2)) / jnp.maximum(jnp.sum(active_f, axis=(1, 2)), 1.0)
+    belief_normalizer = jnp.maximum(jnp.sum(belief_weights), 1.0)
+    belief_loss = jnp.sum(per_sample_belief * belief_weights) / belief_normalizer
+
+    loss = q_weight * q_loss + intent_weight * intent_loss + finish_weight * finish_loss + belief_weight * belief_loss
+    metrics = {
+        "strategy_q_loss": jnp.where(q_weight > 0.0, q_loss, 0.0),
+        "strategy_intent_loss": jnp.where(intent_weight > 0.0, intent_loss, 0.0),
+        "strategy_finish_loss": jnp.where(finish_weight > 0.0, finish_loss, 0.0),
+        "strategy_belief_loss": jnp.where(belief_weight > 0.0, belief_loss, 0.0),
+        "strategy_intent_accuracy": jnp.where(intent_weight > 0.0, intent_accuracy, 0.0),
+        "strategy_finish_accuracy": jnp.where(finish_weight > 0.0, finish_accuracy, 0.0),
     }
     return loss, metrics
 
@@ -564,6 +645,10 @@ def train_adaptive_soft_minibatch(
     improvement_extra_weight,
     search_value_weight,
     search_outcome_weight,
+    strategy_q_weight,
+    strategy_intent_weight,
+    strategy_finish_weight,
+    strategy_belief_weight,
     temperature,
     freeze_legacy_weights=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
@@ -585,10 +670,18 @@ def train_adaptive_soft_minibatch(
         search_outcome_targets,
         search_outcome_weights,
         kl_weights,
+        strategy_candidate_q_targets,
+        strategy_q_weights,
+        strategy_intent_targets,
+        strategy_intent_weights,
+        strategy_finish_targets,
+        strategy_finish_weights,
+        strategy_enemy_general_targets,
+        strategy_belief_weights,
     ) = minibatch
 
     def loss_fn(net):
-        return compute_adaptive_soft_conservative_loss(
+        distill_loss, metrics = compute_adaptive_soft_conservative_loss(
             net,
             base_network,
             obs,
@@ -613,6 +706,44 @@ def train_adaptive_soft_minibatch(
             search_outcome_weight,
             temperature,
         )
+        if (
+            strategy_q_weight > 0.0
+            or strategy_intent_weight > 0.0
+            or strategy_finish_weight > 0.0
+            or strategy_belief_weight > 0.0
+        ):
+            strategy_loss, strategy_metrics = compute_strategy_aux_loss(
+                net,
+                obs,
+                masks,
+                active,
+                candidate_indices,
+                strategy_candidate_q_targets,
+                strategy_q_weights,
+                strategy_intent_targets,
+                strategy_intent_weights,
+                strategy_finish_targets,
+                strategy_finish_weights,
+                strategy_enemy_general_targets,
+                strategy_belief_weights,
+                strategy_q_weight,
+                strategy_intent_weight,
+                strategy_finish_weight,
+                strategy_belief_weight,
+            )
+        else:
+            strategy_loss = jnp.asarray(0.0, dtype=jnp.float32)
+            strategy_metrics = {
+                "strategy_q_loss": jnp.asarray(0.0, dtype=jnp.float32),
+                "strategy_intent_loss": jnp.asarray(0.0, dtype=jnp.float32),
+                "strategy_finish_loss": jnp.asarray(0.0, dtype=jnp.float32),
+                "strategy_belief_loss": jnp.asarray(0.0, dtype=jnp.float32),
+                "strategy_intent_accuracy": jnp.asarray(0.0, dtype=jnp.float32),
+                "strategy_finish_accuracy": jnp.asarray(0.0, dtype=jnp.float32),
+            }
+        metrics = dict(metrics)
+        metrics.update(strategy_metrics)
+        return distill_loss + strategy_loss, metrics
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
     if freeze_legacy_weights:
@@ -667,6 +798,14 @@ def flatten_adaptive_soft_batch(
     search_outcome_targets,
     search_outcome_weights,
     kl_weights,
+    strategy_candidate_q_targets,
+    strategy_q_weights,
+    strategy_intent_targets,
+    strategy_intent_weights,
+    strategy_finish_targets,
+    strategy_finish_weights,
+    strategy_enemy_general_targets,
+    strategy_belief_weights,
 ):
     """Flatten time/environment axes for adaptive soft-target distillation."""
     batch_size = obs.shape[0] * obs.shape[1]
@@ -686,6 +825,14 @@ def flatten_adaptive_soft_batch(
         search_outcome_targets.reshape(batch_size),
         search_outcome_weights.reshape(batch_size),
         kl_weights.reshape(batch_size),
+        strategy_candidate_q_targets.reshape(batch_size, *strategy_candidate_q_targets.shape[2:]),
+        strategy_q_weights.reshape(batch_size),
+        strategy_intent_targets.reshape(batch_size),
+        strategy_intent_weights.reshape(batch_size),
+        strategy_finish_targets.reshape(batch_size),
+        strategy_finish_weights.reshape(batch_size),
+        strategy_enemy_general_targets.reshape(batch_size, *strategy_enemy_general_targets.shape[2:]),
+        strategy_belief_weights.reshape(batch_size),
     )
 
 
@@ -778,6 +925,10 @@ def train_adaptive_soft_epoch(
     improvement_extra_weight,
     search_value_weight,
     search_outcome_weight,
+    strategy_q_weight,
+    strategy_intent_weight,
+    strategy_finish_weight,
+    strategy_belief_weight,
     temperature,
     freeze_legacy_weights=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
@@ -799,6 +950,14 @@ def train_adaptive_soft_epoch(
         search_outcome_targets,
         search_outcome_weights,
         kl_weights,
+        strategy_candidate_q_targets,
+        strategy_q_weights,
+        strategy_intent_targets,
+        strategy_intent_weights,
+        strategy_finish_targets,
+        strategy_finish_weights,
+        strategy_enemy_general_targets,
+        strategy_belief_weights,
     ) = flat_batch
     batch_size = obs.shape[0]
     actual_minibatch_size = min(minibatch_size, batch_size)
@@ -825,6 +984,14 @@ def train_adaptive_soft_epoch(
             search_outcome_targets[permutation],
             search_outcome_weights[permutation],
             kl_weights[permutation],
+            strategy_candidate_q_targets[permutation],
+            strategy_q_weights[permutation],
+            strategy_intent_targets[permutation],
+            strategy_intent_weights[permutation],
+            strategy_finish_targets[permutation],
+            strategy_finish_weights[permutation],
+            strategy_enemy_general_targets[permutation],
+            strategy_belief_weights[permutation],
         )
         epoch_loss = 0.0
         epoch_metrics = None
@@ -844,6 +1011,10 @@ def train_adaptive_soft_epoch(
                 improvement_extra_weight,
                 search_value_weight,
                 search_outcome_weight,
+                strategy_q_weight,
+                strategy_intent_weight,
+                strategy_finish_weight,
+                strategy_belief_weight,
                 temperature,
                 freeze_legacy_weights,
                 legacy_input_channels,
@@ -863,6 +1034,7 @@ def train_adaptive_soft_epoch(
     avg_metrics["mean_selected_margin"] = 0.0
     avg_metrics["search_value_samples"] = jnp.sum((search_value_weights > 0.0).astype(jnp.float32))
     avg_metrics["search_outcome_samples"] = jnp.sum((search_outcome_weights > 0.0).astype(jnp.float32))
+    avg_metrics["strategy_samples"] = jnp.sum((strategy_q_weights > 0.0).astype(jnp.float32))
     return student_network, opt_state, avg_loss, avg_metrics, key
 
 
@@ -1166,6 +1338,19 @@ def collect_adaptive_soft_batch(
         value_targets = search_value_targets(search_scores, search_value_scale)
         best_candidate = jnp.argmax(search_scores, axis=-1)
         outcome_targets = jnp.take_along_axis(candidate_outcomes, best_candidate[:, None], axis=1)[:, 0]
+        strategy_targets = jax.vmap(
+            lambda state, obs, size, scores, outcomes: strategy_aux_targets(
+                state,
+                obs,
+                learner_player,
+                size,
+                pad_size,
+                scores,
+                outcomes,
+                search_value_scale,
+            )
+        )(states, learner_obs, effective_sizes, search_scores, candidate_outcomes)
+        strategy_candidate_q_targets = jnp.tanh(search_scores / search_value_scale).astype(jnp.float32)
         active_weights = is_active.astype(jnp.float32)
         search_weights = soft_search_weights(
             candidate_indices,
@@ -1247,6 +1432,14 @@ def collect_adaptive_soft_batch(
             outcome_targets,
             active_weights,
             active_weights,
+            strategy_candidate_q_targets,
+            active_weights,
+            strategy_targets.intent,
+            active_weights,
+            strategy_targets.finish,
+            active_weights,
+            strategy_targets.enemy_general_heatmap,
+            active_weights,
         )
 
     (states, key, _), batch = jax.lax.scan(body, (states, key, scoreboard_history), None, length=num_steps)
@@ -1264,7 +1457,7 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=4096)
     parser.add_argument("--base-model-path", required=True)
     parser.add_argument("--init-model-path", default=None)
-    parser.add_argument("--model-path", default="/tmp/generals-adaptive-search-distill.eqx")
+    parser.add_argument("--model-path", default="runs/generals-adaptive-search-distill.eqx")
     parser.add_argument("--channels", default=None)
     parser.add_argument("--base-channels", default=None)
     parser.add_argument("--init-channels", default=None)
@@ -1273,6 +1466,7 @@ def parse_args():
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--init-outcome-head", action="store_true")
+    parser.add_argument("--init-strategy-aux", action="store_true")
     parser.add_argument("--freeze-legacy-weights", action="store_true")
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
@@ -1290,6 +1484,10 @@ def parse_args():
     parser.add_argument("--search-value-weight", type=float, default=0.0)
     parser.add_argument("--search-value-scale", type=float, default=100.0)
     parser.add_argument("--search-outcome-weight", type=float, default=0.0)
+    parser.add_argument("--strategy-q-weight", type=float, default=0.0)
+    parser.add_argument("--strategy-intent-weight", type=float, default=0.0)
+    parser.add_argument("--strategy-finish-weight", type=float, default=0.0)
+    parser.add_argument("--strategy-belief-weight", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--score-temperature", type=float, default=1.0)
     parser.add_argument("--min-margin", type=float, default=25.0)
@@ -1344,10 +1542,14 @@ def parse_args():
         or args.soft_improvement_extra_weight < 0.0
         or args.search_value_weight < 0.0
         or args.search_outcome_weight < 0.0
+        or args.strategy_q_weight < 0.0
+        or args.strategy_intent_weight < 0.0
+        or args.strategy_finish_weight < 0.0
+        or args.strategy_belief_weight < 0.0
     ):
         parser.error(
             "--kl-weight, --improve-weight, --soft-improvement-extra-weight, "
-            "--search-value-weight, and --search-outcome-weight must be non-negative"
+            "--search-value-weight, --search-outcome-weight, and strategy weights must be non-negative"
         )
     if args.search_value_scale <= 0.0:
         parser.error("--search-value-scale must be positive")
@@ -1389,6 +1591,12 @@ def main():
     mixed_learner = args.learner_player == "mixed"
     fixed_learner_player = 0 if args.learner_player == "0" else 1
     network_global_context = args.global_context or args.scoreboard_history
+    strategy_aux_enabled = (
+        args.strategy_q_weight > 0.0
+        or args.strategy_intent_weight > 0.0
+        or args.strategy_finish_weight > 0.0
+        or args.strategy_belief_weight > 0.0
+    )
     if args.scoreboard_history:
         input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
     elif network_global_context:
@@ -1443,6 +1651,12 @@ def main():
         print(f"Search value:  scale={args.search_value_scale:g}")
     if args.search_outcome_weight > 0.0:
         print("Search outcome: enabled")
+    if strategy_aux_enabled:
+        print(
+            "Strategy aux:   "
+            f"q={args.strategy_q_weight:g}, intent={args.strategy_intent_weight:g}, "
+            f"finish={args.strategy_finish_weight:g}, belief={args.strategy_belief_weight:g}"
+        )
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -1459,6 +1673,8 @@ def main():
         init_input_channels=init_input_channels,
         outcome_head=args.search_outcome_weight > 0.0,
         init_outcome_head=args.init_outcome_head,
+        strategy_aux=strategy_aux_enabled,
+        init_strategy_aux=args.init_strategy_aux,
         global_context=network_global_context,
         init_global_context=args.init_global_context,
     )
@@ -1703,6 +1919,10 @@ def main():
                 args.soft_improvement_extra_weight,
                 args.search_value_weight,
                 args.search_outcome_weight,
+                args.strategy_q_weight,
+                args.strategy_intent_weight,
+                args.strategy_finish_weight,
+                args.strategy_belief_weight,
                 args.temperature,
                 args.freeze_legacy_weights,
                 ADAPTIVE_INPUT_CHANNELS,
@@ -1725,12 +1945,16 @@ def main():
                 f"Improve: {float(metrics['improve_loss']):.4f} | "
                 f"Value: {float(metrics.get('search_value_loss', 0.0)):.4f} | "
                 f"Outcome: {float(metrics.get('search_outcome_loss', 0.0)):.4f} | "
+                f"StratQ: {float(metrics.get('strategy_q_loss', 0.0)):.4f} | "
+                f"Intent: {float(metrics.get('strategy_intent_loss', 0.0)):.4f} | "
+                f"Belief: {float(metrics.get('strategy_belief_loss', 0.0)):.4f} | "
                 f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
                 f"({float(metrics['selected_fraction']) * 100:4.1f}%) | "
                 f"Margin: {float(metrics['mean_selected_margin']):6.1f} | "
                 f"SPS: {samples / elapsed:7.0f} | Time: {elapsed:.2f}s"
             )
 
+    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, student_network)
     print(f"\nModel saved to: {args.model_path}")
 

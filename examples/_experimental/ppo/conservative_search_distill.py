@@ -654,7 +654,7 @@ def parse_args():
     parser.add_argument("--base-model-path", required=True, help="Fixed base checkpoint used for search labels and KL.")
     parser.add_argument("--init-model-path", default=None, help="Student warm-start checkpoint. Defaults to base model.")
     parser.add_argument("--opponent-policy-path", default=None, help="Frozen opponent checkpoint. Defaults to base model.")
-    parser.add_argument("--model-path", default="/tmp/generals-conservative-search-distill.eqx")
+    parser.add_argument("--model-path", default="runs/generals-conservative-search-distill.eqx")
     parser.add_argument("--grid-size", type=int, default=8)
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
@@ -922,6 +922,7 @@ def main():
                 f"SPS: {samples / elapsed:7.0f} | Time: {elapsed:.2f}s"
             )
 
+    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, student_network)
     print(f"\nModel saved to: {args.model_path}")
 

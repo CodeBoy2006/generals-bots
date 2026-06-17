@@ -573,3 +573,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop plain noarch PPO reward/value sweeps; implement true seat x size stratified PPO batches or gradient-conflict mitigation before spending more GPU time on this CNN trainer.
 - **Context:** Outcome distillation failed promotion (`70.31%` over 256 games/row dropped to `65.82%` over 512). PPO v3 reruns improved some weak seeds but moved the bottleneck to another seat/size; best new 256-row min was `69.92%`, below the current `71.29%`/512 search-distill candidate.
+
+## [2026-06-17 10:42] Adaptive Strategy Auxiliary Heads
+- **Changes:** Added `adaptive_strategy_aux.py`, optional strategy auxiliary heads on `AdaptivePolicyValueNetwork`, and Q/intent/finish/belief losses in `adaptive_search_distill.py`; added `evaluate_adaptive_policy.py --strategy-aux`; moved training defaults and examples away from `/tmp` to ignored `runs/`; documented the Phase 1 strategy-aux pivot.
+- **Status:** Completed
+- **Next Steps:** Move the real 71.29% adaptive candidate into `runs/`, then run mixed-seat scoreboard-history strategy-aux distillation on GPU and triage at 256 games/row before any 512-row promotion.
+- **Context:** Focused adaptive tests passed (`6 passed`), compileall and `git diff --check` passed, and CUDA train/load smoke passed on `cuda:0` using `runs/strategy-aux-smoke-postpatch/`. The smoke uses a synthetic tiny checkpoint and is not a strength result; the historical best checkpoint was absent from its old `/tmp` path.

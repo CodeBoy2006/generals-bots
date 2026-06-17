@@ -626,7 +626,7 @@ def parse_args():
     parser.add_argument("--outcome-aux-weight", type=float, default=0.0)
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-model-path", default=None)
-    parser.add_argument("--model-path", default="/tmp/generals-adaptive-ppo.eqx")
+    parser.add_argument("--model-path", default="runs/generals-adaptive-ppo.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--keep-checkpoints", type=int, default=0)
@@ -1026,6 +1026,7 @@ def main():
             )
 
     final_network = ema_network if args.eval_ema and ema_network is not None else network
+    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, final_network)
     print(f"\nModel saved to: {args.model_path}")
 

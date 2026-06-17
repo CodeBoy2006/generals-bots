@@ -1145,6 +1145,124 @@ def test_adaptive_soft_loss_can_add_search_outcome_target():
     assert jnp.isfinite(outcome_metrics["search_outcome_accuracy"])
 
 
+def test_strategy_aux_targets_include_finish_intent_and_enemy_general_belief():
+    from examples._experimental.ppo.adaptive_search_distill import OUTCOME_DRAW, OUTCOME_LOSS, OUTCOME_WIN
+    from examples._experimental.ppo.adaptive_strategy_aux import (
+        STRATEGY_INTENT_EXPAND,
+        STRATEGY_INTENT_FINISH,
+        strategy_aux_targets,
+    )
+
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    search_scores = jnp.array([1.0, 5.0, 2.0], dtype=jnp.float32)
+    search_outcomes = jnp.array([OUTCOME_DRAW, OUTCOME_WIN, OUTCOME_LOSS], dtype=jnp.int32)
+
+    targets = strategy_aux_targets(
+        state,
+        obs,
+        learner_player=0,
+        effective_size=4,
+        pad_size=6,
+        search_scores=search_scores,
+        search_outcomes=search_outcomes,
+    )
+
+    assert targets.intent == STRATEGY_INTENT_FINISH
+    assert targets.finish == 1
+    assert targets.enemy_general_heatmap.shape == (6, 6)
+    assert targets.enemy_general_heatmap[3, 3] == 1.0
+    assert jnp.sum(targets.enemy_general_heatmap) == 1.0
+
+    no_finish_targets = strategy_aux_targets(
+        state,
+        obs,
+        learner_player=0,
+        effective_size=4,
+        pad_size=6,
+        search_scores=jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32),
+        search_outcomes=jnp.array([OUTCOME_DRAW, OUTCOME_LOSS, OUTCOME_DRAW], dtype=jnp.int32),
+    )
+
+    assert no_finish_targets.intent == STRATEGY_INTENT_EXPAND
+    assert no_finish_targets.finish == 0
+
+
+def test_adaptive_network_strategy_aux_outputs_expected_shapes():
+    from examples._experimental.ppo.adaptive_common import (
+        adaptive_obs_to_array,
+        compute_adaptive_valid_move_mask,
+    )
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+
+    pad_size = 6
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=pad_size,
+        channels=(16, 16, 16, 8),
+        strategy_aux=True,
+    )
+    state = make_padded_state(size=4, pad_to=pad_size)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=pad_size)
+    mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, 4, pad_size)
+
+    outputs = network.strategy_auxiliary(obs_arr, mask, active)
+
+    assert outputs.intent_logits.shape == (8,)
+    assert outputs.finish_logits.shape == (2,)
+    assert outputs.enemy_general_logits.shape == (pad_size, pad_size)
+    assert outputs.action_q_values.shape == (8 * pad_size * pad_size + 1,)
+
+
+def test_strategy_aux_loss_uses_q_intent_finish_and_belief_targets():
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import compute_strategy_aux_loss
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        strategy_aux=True,
+    )
+    obs = jnp.zeros((2, ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
+    masks = jnp.ones((2, 6, 6, 4), dtype=bool)
+    active = jnp.ones((2, 6, 6), dtype=bool)
+    candidate_indices = jnp.array([[0, 1], [2, 3]], dtype=jnp.int32)
+    candidate_q_targets = jnp.array([[0.5, -0.25], [0.1, 0.2]], dtype=jnp.float32)
+    sample_weights = jnp.ones((2,), dtype=jnp.float32)
+    intent_targets = jnp.array([0, 6], dtype=jnp.int32)
+    finish_targets = jnp.array([0, 1], dtype=jnp.int32)
+    enemy_general_targets = jnp.zeros((2, 6, 6), dtype=jnp.float32).at[:, 1, 2].set(1.0)
+
+    loss, metrics = compute_strategy_aux_loss(
+        network,
+        obs,
+        masks,
+        active,
+        candidate_indices,
+        candidate_q_targets,
+        sample_weights,
+        intent_targets,
+        sample_weights,
+        finish_targets,
+        sample_weights,
+        enemy_general_targets,
+        sample_weights,
+        q_weight=0.5,
+        intent_weight=0.25,
+        finish_weight=0.25,
+        belief_weight=0.1,
+    )
+
+    assert float(loss) > 0.0
+    assert float(metrics["strategy_q_loss"]) > 0.0
+    assert float(metrics["strategy_intent_loss"]) > 0.0
+    assert float(metrics["strategy_finish_loss"]) > 0.0
+    assert float(metrics["strategy_belief_loss"]) > 0.0
+
+
 def test_soft_search_weights_can_select_only_search_improvements():
     from examples._experimental.ppo.adaptive_search_distill import (
         SOFT_WEIGHT_MODE_NAME_TO_ID,
@@ -1290,6 +1408,14 @@ def test_collect_adaptive_soft_batch_returns_expected_shapes():
         search_outcome_targets,
         search_outcome_weights,
         kl_weights,
+        strategy_candidate_q_targets,
+        strategy_q_weights,
+        strategy_intent_targets,
+        strategy_intent_weights,
+        strategy_finish_targets,
+        strategy_finish_weights,
+        strategy_enemy_general_targets,
+        strategy_belief_weights,
     ) = batch
     assert obs.shape[:2] == (1, num_envs)
     assert masks.shape == (1, num_envs, pad_size, pad_size, 4)
@@ -1306,6 +1432,14 @@ def test_collect_adaptive_soft_batch_returns_expected_shapes():
     assert search_outcome_targets.shape == (1, num_envs)
     assert search_outcome_weights.shape == (1, num_envs)
     assert kl_weights.shape == (1, num_envs)
+    assert strategy_candidate_q_targets.shape == (1, num_envs, 2)
+    assert strategy_q_weights.shape == (1, num_envs)
+    assert strategy_intent_targets.shape == (1, num_envs)
+    assert strategy_intent_weights.shape == (1, num_envs)
+    assert strategy_finish_targets.shape == (1, num_envs)
+    assert strategy_finish_weights.shape == (1, num_envs)
+    assert strategy_enemy_general_targets.shape == (1, num_envs, pad_size, pad_size)
+    assert strategy_belief_weights.shape == (1, num_envs)
     assert jnp.allclose(jnp.sum(target_probs, axis=-1), jnp.ones((1, num_envs), dtype=jnp.float32))
 
 
@@ -1534,6 +1668,14 @@ def test_adaptive_search_distill_cli_smoke_saves_and_prunes_checkpoints(tmp_path
         "0.1",
         "--search-outcome-weight",
         "0.1",
+        "--strategy-q-weight",
+        "0.1",
+        "--strategy-intent-weight",
+        "0.05",
+        "--strategy-finish-weight",
+        "0.05",
+        "--strategy-belief-weight",
+        "0.02",
         "--learner-player",
         "mixed",
         "--num-steps",

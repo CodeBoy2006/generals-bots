@@ -182,8 +182,8 @@ rollout-search GUI 目前只支持 9 通道 observation checkpoint，当前
 ```bash
 uv run python examples/play_against_model.py \
   --machine-vs-machine \
-  --model-0-path /tmp/generals-ppo-a.eqx \
-  --model-1-path /tmp/generals-ppo-b.eqx \
+  --model-0-path runs/generals-ppo-a.eqx \
+  --model-1-path runs/generals-ppo-b.eqx \
   --model-0-policy-input augmented-full-state \
   --model-1-policy-input observation \
   --grid-size 8 \
@@ -210,7 +210,7 @@ uv run python examples/play_against_model.py generals-ppo-8x8-expander-gpu-v5.eq
 手动指定 checkpoint 和参数：
 
 ```bash
-uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx \
+uv run python examples/play_against_model.py runs/generals-ppo-8x8-generated.eqx \
   --grid-size 8 \
   --map-generator generated \
   --policy-mode sample \
@@ -235,7 +235,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 - `--machine-vs-machine` 会关闭人类输入流程，让两个 PPO agent 按自动 tick 对战；`--model-0-path` 和 `--model-1-path` 可分别指定两个 checkpoint。
 - `--opponent-model-path` 仍可作为 `--model-1-path` 的兼容别名。
 
-加载 checkpoint 时，`--grid-size` 必须与保存该 `.eqx` 模型时使用的网络尺寸一致。`.eqx` 属于实验产物，建议放在 `/tmp` 或其他实验目录，不要提交进 Git。
+加载 checkpoint 时，`--grid-size` 必须与保存该 `.eqx` 模型时使用的网络尺寸一致。`.eqx` 属于实验产物，建议放在项目内已忽略的 `runs/` 或其他非缓存实验目录，不要提交进 Git。
 
 4x4 PPO smoke test：
 
@@ -243,7 +243,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 uv run python examples/_experimental/ppo/train.py 64 \
   --num-steps 64 \
   --num-iterations 10 \
-  --model-path /tmp/generals-ppo-4x4.eqx
+  --model-path runs/generals-ppo-4x4.eqx
 ```
 
 8x8 generated 地图 PPO：
@@ -260,7 +260,7 @@ uv run python examples/_experimental/ppo/train.py 64 \
   --num-steps 64 \
   --num-iterations 10 \
   --pool-size 512 \
-  --model-path /tmp/generals-ppo-8x8-generated.eqx
+  --model-path runs/generals-ppo-8x8-generated.eqx
 ```
 
 从已有 checkpoint 继续 PPO，并使用多 epoch/minibatch 更新：
@@ -282,8 +282,8 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
-  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v4.eqx \
-  --model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx
+  --init-model-path runs/generals-ppo-8x8-expander-gpu-v4.eqx \
+  --model-path runs/generals-ppo-8x8-expander-gpu-v5.eqx
 ```
 
 冻结 checkpoint 自博弈训练：
@@ -304,12 +304,12 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --num-epochs 4 \
   --minibatch-size 4096 \
   --lr 0.000005 \
-  --init-model-path /tmp/generals-ppo-current.eqx \
-  --opponent-policy-path /tmp/generals-ppo-best-frozen.eqx \
+  --init-model-path runs/generals-ppo-current.eqx \
+  --opponent-policy-path runs/generals-ppo-best-frozen.eqx \
   --opponent-policy-mode sample \
   --learner-player 0 \
   --terminal-reward-scale 1.0 \
-  --model-path /tmp/generals-ppo-selfplay-next.eqx
+  --model-path runs/generals-ppo-selfplay-next.eqx
 ```
 
 当前策略自博弈训练：
@@ -330,12 +330,12 @@ uv run python examples/_experimental/ppo/train.py 256 \
   --num-epochs 2 \
   --minibatch-size 4096 \
   --lr 0.000002 \
-  --init-model-path /tmp/generals-ppo-current.eqx \
+  --init-model-path runs/generals-ppo-current.eqx \
   --self-play-opponent \
   --opponent-policy-mode sample \
   --learner-player 0 \
   --terminal-reward-scale 1.0 \
-  --model-path /tmp/generals-ppo-current-selfplay.eqx
+  --model-path runs/generals-ppo-current-selfplay.eqx
 ```
 
 `--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 或 `--opponent-policy-pool` 同时使用。`--opponent-policy-pool a.eqx,b.eqx` 会让普通 PPO 从多个同架构 frozen checkpoint 中采样对手，适合 checkpoint league best-response；可用 `--opponent-policy-pool-modes sample,greedy` 指定各自执行模式。`--checkpoint-dir`、`--checkpoint-every` 和 `--keep-checkpoints` 可周期保存并保留中间模型，便于后续 league 评估选模。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。`--general-target-reward-scale` 会用完整状态奖励强兵靠近敌方 general 的势能变化，可配合 `--general-target-min-army` 和 `--general-target-max-distance` 控制触发条件。`--path-assignment-reward-scale` 会在 reward 内缓存 passable shortest-path 距离场，并把强兵分配到敌方 general、非己方城市或前线目标，可用 `--path-assignment-*-weight` 控制目标优先级。`--policy-input augmented-full-state` 可让 PPO learner 使用 18 通道输入，通常与 `--init-input-channels 9` 一起从 v5 这类 9 通道 checkpoint 扩展。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
@@ -353,10 +353,10 @@ uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
   --num-iterations 2000 \
   --lr 0.0007 \
   --channels 64,64,64,32 \
-  --checkpoint-dir /tmp/generals-adaptive-bc-checkpoints \
+  --checkpoint-dir runs/generals-adaptive-bc-checkpoints \
   --checkpoint-every 100 \
   --keep-checkpoints 10 \
-  --model-path /tmp/generals-adaptive-bc-8-12-16.eqx
+  --model-path runs/generals-adaptive-bc-8-12-16.eqx
 ```
 
 ```bash
@@ -376,17 +376,17 @@ uv run python examples/_experimental/ppo/train_adaptive.py 256 \
   --learner-player mixed \
   --terminal-reward-scale 1.0 \
   --truncation-reward-scale 0.5 \
-  --init-model-path /tmp/generals-adaptive-bc-8-12-16.eqx \
+  --init-model-path runs/generals-adaptive-bc-8-12-16.eqx \
   --init-channels 64,64,64,32 \
-  --checkpoint-dir /tmp/generals-adaptive-ppo-checkpoints \
+  --checkpoint-dir runs/generals-adaptive-ppo-checkpoints \
   --checkpoint-every 50 \
   --keep-checkpoints 10 \
-  --model-path /tmp/generals-adaptive-ppo-8-12-16.eqx
+  --model-path runs/generals-adaptive-ppo-8-12-16.eqx
 ```
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/generals-adaptive-ppo-8-12-16.eqx \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py runs/generals-adaptive-ppo-8-12-16.eqx \
   --grid-sizes 8,12,16 \
   --pad-to 16 \
   --num-games 2048 \
@@ -394,12 +394,12 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py /tmp/genera
   --opponent expander \
   --policy-mode sample \
   --map-generator generated \
-  --json-output /tmp/generals-adaptive-ppo-8-12-16-eval.json \
+  --json-output runs/generals-adaptive-ppo-8-12-16-eval.json \
   --require-win-rate 0.90
 ```
 
 `behavior_clone_adaptive.py`、`train_adaptive.py` 和 `evaluate_adaptive_policy.py` 使用固定 `--pad-to` 画布保存一个 checkpoint，并通过 `--grid-sizes` 在 8x8、12x12、16x16 等有效棋盘之间切换。评估器会自动跑每个尺寸的 player 0 和 player 1 两个座位，`--require-win-rate 0.90` 会在任一尺寸或座位未达标时返回非零退出码。当前 GUI 和固定尺寸 `evaluate_policy.py` 仍只支持普通 `PolicyValueNetwork` checkpoint，不能直接加载 adaptive checkpoint。
-`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--channels` 指定 adaptive 网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 按 training iteration 交替更新两个座位；`--learner-player mixed` 会把总 `num_envs` 拆成 player 0 和 player 1 两半，并把两侧轨迹拼进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。`--value-loss hl-gauss --value-bins 128 --value-sigma 0.04` 会把 PPO value loss 从 scalar MSE 切换为 HL-Gauss categorical CE。`--outcome-aux-weight` 会启用 loss/draw/win 辅助头，只用同一 rollout 内已知结局的 episode segment 做监督；`--global-context` 会把 land/army/time scoreboard 标量追加为 20 通道输入，`--scoreboard-history` 进一步追加 previous scoreboard 和 one-step delta，形成 30 通道输入，并通过零初始化上下文分支 warm start 旧 15 通道 checkpoint，旧 checkpoint 通常配 `--init-input-channels 15`。如果 checkpoint 使用 categorical/per-size value head、outcome head、global context 或 scoreboard history，评估时也要给 `evaluate_adaptive_policy.py` 传匹配的 `--value-heads`、value-loss 模板参数、`--outcome-head`、`--global-context` 或 `--scoreboard-history`。
+`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--channels` 指定 adaptive 网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 按 training iteration 交替更新两个座位；`--learner-player mixed` 会把总 `num_envs` 拆成 player 0 和 player 1 两半，并把两侧轨迹拼进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练。`--value-loss hl-gauss --value-bins 128 --value-sigma 0.04` 会把 PPO value loss 从 scalar MSE 切换为 HL-Gauss categorical CE。`--outcome-aux-weight` 会启用 loss/draw/win 辅助头，只用同一 rollout 内已知结局的 episode segment 做监督；`--global-context` 会把 land/army/time scoreboard 标量追加为 20 通道输入，`--scoreboard-history` 进一步追加 previous scoreboard 和 one-step delta，形成 30 通道输入，并通过零初始化上下文分支 warm start 旧 15 通道 checkpoint，旧 checkpoint 通常配 `--init-input-channels 15`。`adaptive_search_distill.py` 的 `--strategy-q-weight`、`--strategy-intent-weight`、`--strategy-finish-weight` 和 `--strategy-belief-weight` 会启用 top-k Q、弱 intent、finish 和敌方 general belief 辅助头；从已有 strategy checkpoint 续训时用 `--init-strategy-aux`。如果 checkpoint 使用 categorical/per-size value head、outcome head、strategy aux、global context 或 scoreboard history，评估时也要给 `evaluate_adaptive_policy.py` 传匹配的 `--value-heads`、value-loss 模板参数、`--outcome-head`、`--strategy-aux`、`--global-context` 或 `--scoreboard-history`。
 
 下一轮 adaptive PPO v3-outcome continuation 建议从当前最强候选启动；本地 16GB GPU 已验证 512 envs x 256 steps 会 OOM，先用 256 envs 和 1024 minibatch 做 256 games/row triage：
 
@@ -432,11 +432,11 @@ uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adapti
   --value-bins 128 \
   --value-sigma 0.04 \
   --outcome-aux-weight 0.05 \
-  --init-model-path /tmp/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
-  --checkpoint-dir /tmp/generals-adaptive-ppo-v3-outcome-ckpts \
+  --init-model-path runs/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir runs/generals-adaptive-ppo-v3-outcome-ckpts \
   --checkpoint-every 10 \
   --keep-checkpoints 8 \
-  --model-path /tmp/generals-adaptive-ppo-v3-outcome.eqx \
+  --model-path runs/generals-adaptive-ppo-v3-outcome.eqx \
   --seed 68000
 ```
 
@@ -447,11 +447,11 @@ JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
 uv run python examples/_experimental/ppo/train_recurrent.py 512 \
   --grid-size 8 \
   --map-generator generated \
-  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
-  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path runs/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --init-model-path runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --hidden-size 64 \
   --freeze-base \
-  --model-path /tmp/generals-recurrent-ppo-8x8-v5.eqx
+  --model-path runs/generals-recurrent-ppo-8x8-v5.eqx
 ```
 
 `train_recurrent.py` 会在 CNN policy 上叠加 GRU hidden state 和 residual logits/value delta；`--freeze-base` 会冻结 warm-start 的 CNN，只训练记忆适配器，适合保护 v5 或行为克隆基线。用 `evaluate_recurrent_policy.py` 可评估 recurrent checkpoint；没有 `--opponent-policy-path` 时也可直接测 `--opponent expander`。
@@ -473,13 +473,13 @@ uv run python examples/_experimental/ppo/outcome_clone.py 256 \
   --num-cities-min 4 \
   --num-cities-max 8 \
   --min-generals-distance 5 \
-  --init-model-path /tmp/generals-ppo-current.eqx \
-  --opponent-policy-path /tmp/generals-ppo-best-frozen.eqx \
+  --init-model-path runs/generals-ppo-current.eqx \
+  --opponent-policy-path runs/generals-ppo-best-frozen.eqx \
   --policy-mode sample \
   --opponent-policy-mode sample \
   --winner-source both \
   --negative-weight 0.0 \
-  --model-path /tmp/generals-ppo-outcome-clone.eqx
+  --model-path runs/generals-ppo-outcome-clone.eqx
 ```
 
 `outcome_clone.py` 会完整 rollout 对局，并只用最终胜者视角的动作做监督样本；`--winner-source learner` 只保留 learner 赢局，`--negative-weight` 可额外压低败者动作概率。
@@ -488,7 +488,7 @@ rollout-search 强辅助评估：
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/search_policy.py /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+uv run python examples/_experimental/ppo/search_policy.py runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --num-games 512 \
   --grid-size 8 \
   --map-generator generated \
@@ -512,7 +512,7 @@ uv run python examples/_experimental/ppo/search_policy.py /tmp/generals-ppo-8x8-
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
 uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
-  --base-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --base-model-path runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --target-mode soft \
   --num-steps 64 \
   --num-iterations 80 \
@@ -521,7 +521,7 @@ uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
   --improve-weight 0.02 \
   --kl-weight 1.0 \
   --lr 0.000001 \
-  --model-path /tmp/generals-ppo-8x8-conservative-search.eqx
+  --model-path runs/generals-ppo-8x8-conservative-search.eqx
 ```
 
 该脚本用固定 base checkpoint 做 rollout-search teacher，并用 KL 约束学生贴近 base。`--target-mode hard` 只在 search 最优动作明显优于 base top-prior 动作时加入小权重动作监督；`--target-mode soft` 会把 top-k rollout 分数转成软目标，避免把近似并列候选强行压成单标签。`--policy-input full-state` 会用 privileged 完整状态替换标准 observation；`--policy-input augmented-full-state` 会保留原 9 个 observation 通道，并追加 9 个 full-state 通道。augmented 模式默认使用 18 输入通道，并支持从 9 通道 checkpoint 自动扩展 conv1 权重。评估时也要给 `evaluate_policy.py` 传同名 `--policy-input`，必要时传 `--input-channels` 和 `--opponent-input-channels`。它适合继续研究 search distillation，不应把训练 loss 当成棋力指标；仍需用 `evaluate_policy.py --opponent-policy-path` 独立评估。
@@ -538,14 +538,14 @@ uv run python examples/_experimental/ppo/behavior_clone.py 128 \
   --num-steps 32 \
   --num-iterations 2000 \
   --lr 0.0007 \
-  --model-path /tmp/generals-bc-8x8-soft.eqx
+  --model-path runs/generals-bc-8x8-soft.eqx
 ```
 
 批量评估 checkpoint：
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+uv run python examples/_experimental/ppo/evaluate_policy.py runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --num-games 2048 \
   --grid-size 8 \
   --map-generator generated \
@@ -586,5 +586,5 @@ git status
 
 - 4x4 训练命令主要用于 smoke test，不适合作为策略质量结论。
 - 更有意义的实验建议使用 8x8 或更大 generated 地图，并在独立 seed 上批量评估。
-- `.eqx` checkpoint 属于实验产物，建议放在 `/tmp` 或其他实验目录，不要提交进 Git。
+- `.eqx` checkpoint 属于实验产物，建议放在项目内已忽略的 `runs/` 或其他非缓存实验目录，不要提交进 Git。
 - `bench.py` 和 `examples/_experimental/benchmark_performance.py` 仍含旧版环境接口痕迹，使用前应先按当前 `reset(key) -> (pool, state)` 和 `step(state, actions, pool)` 接口修复。

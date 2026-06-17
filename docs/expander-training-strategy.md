@@ -2568,3 +2568,85 @@ PPO fine-tune 后有效提升主要来自：
 - 用 v5 自采样数据做 DAgger 式 teacher 修正。
 - 增加 anti-Expander 专门 reward，例如更强的终局速度奖励和 loss 风险惩罚。
 - 引入 checkpoint league，避免只针对一个 Expander 分布过拟合。
+
+## 2026-06-17 Strategy Aux Phase 1 转向
+
+根据前面 adaptive 结果，plain PPO continuation、global/history 输入、search-value/outcome、truncation、扩容、weighted/alternate 都没有稳定突破 `71.29%` 六行 minimum。下一轮不继续扫 PPO 权重，转向 Phase 1：保留 primitive policy/value 头，给 adaptive search distillation 加 intent/Q/finish/belief auxiliary heads，让 search teacher 和 full `GameState` 先教“局面表示”，少教单步 argmax 动作。
+
+本轮实现内容：
+
+- `AdaptivePolicyValueNetwork(strategy_aux=True)` 新增四类辅助输出：8-way intent、finish binary、enemy-general belief heatmap、active-action Q values。
+- `adaptive_strategy_aux.py` 生成弱 intent 标签和 full-state enemy general one-hot belief 标签；finish 来自 top-k search rollout outcome。
+- `adaptive_search_distill.py` 新增 `--strategy-q-weight`、`--strategy-intent-weight`、`--strategy-finish-weight`、`--strategy-belief-weight` 和 `--init-strategy-aux`。训练 batch 现在额外保存 top-k search score Q target、intent、finish、enemy-general heatmap，并在 soft distill loss 中混合这些 auxiliary losses。
+- `evaluate_adaptive_policy.py --strategy-aux` 可加载带辅助头的 checkpoint；评估仍只使用旧 policy/value 行为。
+- 新训练输出默认落在项目内 `runs/`，并且 `runs/` 已加入 `.gitignore`。后续不要把模型写到 `/tmp` 或缓存目录。
+
+CUDA smoke 使用合成 4/6 padded 小模型，只验证训练、保存、加载和 auxiliary loss 链路：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/adaptive_search_distill.py 8 \
+  --grid-sizes 4,6 \
+  --grid-size-weights 4:1,6:1 \
+  --pad-to 6 \
+  --map-generator simple \
+  --pool-size 32 \
+  --base-model-path runs/strategy-aux-smoke/adaptive-base.eqx \
+  --model-path runs/strategy-aux-smoke-postpatch/generals-adaptive-strategy-aux-smoke.eqx \
+  --target-mode soft \
+  --soft-weight-mode active \
+  --soft-improvement-extra-weight 0.0 \
+  --search-value-weight 0.0 \
+  --search-outcome-weight 0.0 \
+  --strategy-q-weight 0.1 \
+  --strategy-intent-weight 0.05 \
+  --strategy-finish-weight 0.05 \
+  --strategy-belief-weight 0.02 \
+  --learner-player mixed \
+  --num-steps 1 \
+  --num-iterations 1 \
+  --num-epochs 1 \
+  --minibatch-size 8 \
+  --top-k 2 \
+  --rollout-steps 1 \
+  --rollouts-per-action 1 \
+  --channels 16,16,16,8 \
+  --base-channels 16,16,16,8 \
+  --init-channels 16,16,16,8 \
+  --scoreboard-history \
+  --init-input-channels 15 \
+  --freeze-legacy-weights \
+  --checkpoint-dir runs/strategy-aux-smoke-postpatch/ckpts \
+  --checkpoint-every 1 \
+  --keep-checkpoints 1 \
+  --seed 73102
+```
+
+Smoke result on `cuda:0`:
+
+```text
+iter 1: loss=0.19085, StratQ=0.4628, Intent=2.0550, Belief=0.5982
+saved: runs/strategy-aux-smoke-postpatch/generals-adaptive-strategy-aux-smoke.eqx
+```
+
+Load/eval smoke:
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/evaluate_adaptive_policy.py \
+  runs/strategy-aux-smoke-postpatch/generals-adaptive-strategy-aux-smoke.eqx \
+  --grid-sizes 4,6 \
+  --pad-to 6 \
+  --num-games 4 \
+  --max-steps 30 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator simple \
+  --scoreboard-history \
+  --strategy-aux \
+  --channels 16,16,16,8 \
+  --json-output runs/strategy-aux-smoke-postpatch/eval-smoke.json \
+  --seed 73103
+```
+
+注意：这不是强度结果。当前工作区里历史 best adaptive checkpoint 已不在原 `/tmp` 路径，尝试从 `generals-adaptive-search-distill-p1-v1-iter-000040.eqx` warm start 会失败。因此本轮只完成 Phase 1 训练机制转向和 CUDA smoke。下一步应把真实 71.29% 候选迁移到 `runs/` 后，启动 mixed-seat scoreboard-history strategy-aux distill；若 256 games/row triage 超过当前 71.29%/512-row 候选，再做 512-row promotion。

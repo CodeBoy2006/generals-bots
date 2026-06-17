@@ -157,7 +157,7 @@ def parse_args():
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--init-model-path", default=None)
-    parser.add_argument("--model-path", default="/tmp/generals-bc-8x8.eqx")
+    parser.add_argument("--model-path", default="runs/generals-bc-8x8.eqx")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -244,6 +244,7 @@ def main():
                 f"SPS: {samples / elapsed:8.0f} | Time: {elapsed:.2f}s"
             )
 
+    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, network)
     print(f"\nModel saved to: {args.model_path}")
 

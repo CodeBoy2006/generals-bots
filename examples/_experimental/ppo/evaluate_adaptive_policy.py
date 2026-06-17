@@ -214,6 +214,7 @@ def parse_args():
     parser.add_argument("--value-max", type=float, default=1.0)
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-head", action="store_true")
+    parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -282,6 +283,7 @@ def main():
         value_max=args.value_max,
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_head,
+        strategy_aux=args.strategy_aux,
         global_context=network_global_context,
         init_global_context=network_global_context,
     )
@@ -305,6 +307,8 @@ def main():
         )
     if args.outcome_head:
         print("Outcome:    auxiliary head loaded")
+    if args.strategy_aux:
+        print("Strategy:   auxiliary heads loaded")
     if network_global_context:
         print(f"Global ctx: {input_channels} input channels")
     if args.scoreboard_history:
