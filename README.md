@@ -842,6 +842,8 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
 
 Plan action labels use the standard adaptive action index, including the single global pass index. The action-Q loss aggregates duplicate plan slots onto their shared primitive action before applying ranking CE, then can be probed with `evaluate_adaptive_policy.py --strategy-q-rerank-scale <scale>`.
 
+`--plan-policy-weight` uses the same aggregated Plan-Q action target to update policy logits directly. Use it only with `--update-scope all` and a positive `--policy-kl-weight`; early probes showed it can damage seat balance even when KL anchored.
+
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
 
 ```bash

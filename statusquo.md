@@ -807,3 +807,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-plan-q-action-q-v1` or continue Q-rerank scale sweeps. Next useful route is a target-conditioned Worker/mixture policy or larger decisive Plan-Q data so the learned plan signal affects execution more structurally than centered logit bias.
 - **Context:** Corrected worker v2 shard had no invalid action indices (`16..2048`), 512 states, 8192 plans, `3138 loss / 4917 draw / 137 win`, best-plan outcomes `36 loss / 419 draw / 57 win`, and mean `plan_q_gap=0.4299`. Action-Q v1 training improved `AQ rank/MSE/action-acc` from `12.9955 / 9.8694 / 9.7%` to `5.8049 / 5.3826 / 27.1%`. Fixed-v5 max250 Q-rerank did not confirm: 256-row scale `0.01` scored `10.55%` min vs scale `0` at `10.94%`.
+
+## [2026-06-17 18:58] Plan-Q Policy Distillation Probe
+- **Changes:** Added `adaptive_plan_q_supervised.py --plan-policy-weight`, which applies corrected worker Plan-Q action targets directly to policy logits under `--update-scope all` and a positive policy KL anchor. Documented the probe and negative result.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-plan-q-plan-policy-v0`. The next aligned implementation should separate plan choice from execution with a target-conditioned Worker or mixture policy instead of forcing plan actions into the primitive policy distribution.
+- **Context:** Plan-policy v0 used `policy_kl_weight=1.0`, `plan_policy_weight=0.05`, `lr=2e-5`, 60 epochs on corrected worker v2. Training reduced plan-policy CE `8.8217 -> 4.9325` with KL around `0.035`, but fixed-v5 max250 128-row regressed to `6.25%` min (`p0 10.94%`, `p1 6.25%`). This mirrors earlier action-distill seat tradeoff failures.

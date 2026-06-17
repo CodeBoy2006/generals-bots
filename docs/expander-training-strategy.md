@@ -5411,3 +5411,56 @@ Direct Q-rerank still fails fixed-v5 promotion: the 128-row weak positive at sca
 Do not promote adaptive-plan-q-action-q-v1.
 Next step should make the learned plan signal execute through a target-conditioned Worker/mixture policy or train on larger, more decisive Plan-Q data; do not continue q-rerank scale sweeps.
 ```
+
+## 2026-06-17 Plan-Q Policy Distillation Probe
+
+Added a direct policy loss to `adaptive_plan_q_supervised.py`:
+
+```text
+--plan-policy-weight
+```
+
+Mechanism:
+
+```text
+Use the same corrected worker Plan-Q action target distribution as action-Q supervision.
+Apply CE to policy logits directly.
+Require --update-scope all and a positive --policy-kl-weight so the original policy remains an anchor.
+```
+
+Probe:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz
+init: runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+output: runs/adaptive-plan-q-plan-policy-v0/generals-adaptive-plan-q-plan-policy-v0.eqx
+policy_kl_weight: 1.0
+plan_policy_weight: 0.05
+lr: 2e-5
+epochs: 60
+update_scope: all
+```
+
+Training:
+
+| epoch | KL | plan-policy CE / top action acc | teacher action acc |
+| ---: | ---: | ---: | ---: |
+| 1 | `0.0002` | `8.8217 / 9.9%` | `99.4%` |
+| 30 | `0.0412` | `5.3374 / 8.9%` | `91.8%` |
+| 60 | `0.0348` | `4.9325 / 9.7%` | `94.3%` |
+
+Fixed-v5 max250 128-row:
+
+| seat | wins/losses/draws | win | draw |
+| ---: | ---: | ---: | ---: |
+| p0 | `14 / 54 / 60` | `10.94%` | `46.88%` |
+| p1 | `8 / 49 / 71` | `6.25%` | `55.47%` |
+
+Conclusion:
+
+```text
+Direct Plan-Q policy CE is not stable enough on this small shard.
+It reduced draw for p0 but damaged p1 badly, matching earlier action-distill/seat-tradeoff failures.
+Do not promote adaptive-plan-q-plan-policy-v0.
+Next step should be an explicit target-conditioned Worker or mixture policy, where plan choice and execution are separated rather than forcing plan actions into the primitive policy distribution.
+```
