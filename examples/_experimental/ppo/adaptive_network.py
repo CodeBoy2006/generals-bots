@@ -105,6 +105,8 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     strategy_q_conv: eqx.nn.Conv2d | None
     strategy_q_pass_linear: eqx.nn.Linear | None
     strategy_enemy_general_conv: eqx.nn.Conv2d | None
+    context_conv1: eqx.nn.Conv2d | None
+    context_conv2: eqx.nn.Conv2d | None
     global_linear1: eqx.nn.Linear | None
     global_linear2: eqx.nn.Linear | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
@@ -119,6 +121,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     outcome_head: bool = eqx.field(static=True)
     strategy_aux: bool = eqx.field(static=True)
     global_context: bool = eqx.field(static=True)
+    context_residual: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -134,6 +137,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         outcome_head: bool = False,
         strategy_aux: bool = False,
         global_context: bool = False,
+        context_residual: bool = False,
     ):
         if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
             input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
@@ -143,9 +147,16 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         outcome_keys = 1 if outcome_head else 0
         strategy_keys = 5 if strategy_aux else 0
         global_keys = 2 if global_context else 0
+        context_keys = 2 if context_residual else 0
         keys = jrandom.split(
             key,
-            8 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys + global_keys + strategy_keys,
+            8
+            + 2 * len(parsed_value_head_sizes)
+            + categorical_keys
+            + outcome_keys
+            + global_keys
+            + strategy_keys
+            + context_keys,
         )
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
@@ -156,6 +167,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.outcome_head = bool(outcome_head)
         self.strategy_aux = bool(strategy_aux)
         self.global_context = bool(global_context)
+        self.context_residual = bool(context_residual)
         self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
         self.conv3 = eqx.nn.Conv2d(channels[1], channels[2], kernel_size=3, padding=1, key=keys[2])
@@ -215,12 +227,32 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             self.strategy_q_conv = None
             self.strategy_q_pass_linear = None
             self.strategy_enemy_general_conv = None
+        context_offset = strategy_offset + strategy_keys
+        if context_residual:
+            self.context_conv1 = eqx.nn.Conv2d(channels[3], channels[3], kernel_size=5, padding=2, key=keys[context_offset])
+            context_conv2 = eqx.nn.Conv2d(
+                channels[3],
+                channels[3],
+                kernel_size=5,
+                padding=2,
+                key=keys[context_offset + 1],
+            )
+            self.context_conv2 = eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                context_conv2,
+                (jnp.zeros_like(context_conv2.weight), jnp.zeros_like(context_conv2.bias)),
+            )
+        else:
+            self.context_conv1 = None
+            self.context_conv2 = None
 
     def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.conv1(obs))
         x = jax.nn.relu(self.conv2(x))
         x = jax.nn.relu(self.conv3(x))
         x = jax.nn.relu(self.conv4(x))
+        if self.context_conv1 is not None and self.context_conv2 is not None:
+            x = x + self.context_conv2(jax.nn.relu(self.context_conv1(x)))
         if self.global_context:
             x = x + self._global_context_vector(obs)[:, None, None]
         return x
@@ -409,6 +441,8 @@ def load_or_create_adaptive_network(
     init_strategy_aux: bool | None = None,
     global_context: bool = False,
     init_global_context: bool | None = None,
+    context_residual: bool = False,
+    init_context_residual: bool | None = None,
 ) -> AdaptivePolicyValueNetwork:
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
     parsed_channels = parse_policy_channels(channels)
@@ -427,6 +461,7 @@ def load_or_create_adaptive_network(
         outcome_head=outcome_head,
         strategy_aux=strategy_aux,
         global_context=global_context,
+        context_residual=context_residual,
     )
     if init_model_path is None:
         return network
@@ -453,6 +488,9 @@ def load_or_create_adaptive_network(
     parsed_init_outcome_head = outcome_head if init_outcome_head is None else bool(init_outcome_head)
     parsed_init_strategy_aux = strategy_aux if init_strategy_aux is None else bool(init_strategy_aux)
     parsed_init_global_context = global_context if init_global_context is None else bool(init_global_context)
+    parsed_init_context_residual = (
+        context_residual if init_context_residual is None else bool(init_context_residual)
+    )
     needs_expansion = (
         parsed_init_channels != parsed_channels
         or parsed_init_input_channels != input_channels
@@ -464,6 +502,7 @@ def load_or_create_adaptive_network(
         or parsed_init_outcome_head != outcome_head
         or parsed_init_strategy_aux != strategy_aux
         or parsed_init_global_context != global_context
+        or parsed_init_context_residual != context_residual
     )
     if needs_expansion:
         source_network = AdaptivePolicyValueNetwork(
@@ -479,6 +518,7 @@ def load_or_create_adaptive_network(
             outcome_head=parsed_init_outcome_head,
             strategy_aux=parsed_init_strategy_aux,
             global_context=parsed_init_global_context,
+            context_residual=parsed_init_context_residual,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
         return expand_adaptive_network_channels(network, source_network)
@@ -697,6 +737,18 @@ def expand_adaptive_network_channels(
             lambda net: net.strategy_enemy_general_conv,
             target,
             _copy_conv_prefix(target.strategy_enemy_general_conv, source.strategy_enemy_general_conv),
+        )
+    if target.context_conv1 is not None and source.context_conv1 is not None:
+        target = eqx.tree_at(
+            lambda net: net.context_conv1,
+            target,
+            _copy_conv_prefix(target.context_conv1, source.context_conv1),
+        )
+    if target.context_conv2 is not None and source.context_conv2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.context_conv2,
+            target,
+            _copy_conv_prefix(target.context_conv2, source.context_conv2),
         )
     if (
         target.global_linear1 is not None

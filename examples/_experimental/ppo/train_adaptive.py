@@ -127,6 +127,21 @@ def update_ema_network(ema_network, network, decay: float):
     return jax.tree.map(update_leaf, ema_network, network)
 
 
+def zero_inexact_tree(tree):
+    """Return a tree with trainable floating-point leaves zeroed."""
+    return jax.tree.map(lambda x: jnp.zeros_like(x) if eqx.is_inexact_array(x) else x, tree)
+
+
+def context_only_grad_tree(grads):
+    """Keep gradients only for the optional residual context branch."""
+    zeroed = zero_inexact_tree(grads)
+    return eqx.tree_at(
+        lambda net: (net.context_conv1, net.context_conv2),
+        zeroed,
+        (grads.context_conv1, grads.context_conv2),
+    )
+
+
 def resolve_learner_player(value: str, iteration: int) -> int:
     """Resolve fixed or alternating learner seat for one training iteration."""
     if value == "alternate":
@@ -459,7 +474,14 @@ def ppo_loss(network, obs, mask, active, action, old_logprob, advantage, ret, cl
 
 
 @eqx.filter_jit
-def train_minibatch_step(network, opt_state, minibatch, optimizer, outcome_aux_weight: float = 0.0):
+def train_minibatch_step(
+    network,
+    opt_state,
+    minibatch,
+    optimizer,
+    outcome_aux_weight: float = 0.0,
+    context_only_update: bool = False,
+):
     """Run one PPO update on a flattened adaptive minibatch."""
     (
         obs,
@@ -508,6 +530,8 @@ def train_minibatch_step(network, opt_state, minibatch, optimizer, outcome_aux_w
         return policy_loss + value_loss + entropy_loss + outcome_aux_weight * outcome_loss
 
     loss, grads = eqx.filter_value_and_grad(loss_fn)(network)
+    if context_only_update:
+        grads = context_only_grad_tree(grads)
     params = eqx.filter(network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     return eqx.apply_updates(network, updates), opt_state, loss
@@ -547,7 +571,17 @@ def flatten_training_batch(batch):
     )
 
 
-def train_epoch(network, opt_state, batch, optimizer, key, num_epochs=1, minibatch_size=None, outcome_aux_weight=0.0):
+def train_epoch(
+    network,
+    opt_state,
+    batch,
+    optimizer,
+    key,
+    num_epochs=1,
+    minibatch_size=None,
+    outcome_aux_weight=0.0,
+    context_only_update=False,
+):
     """Run adaptive PPO epochs with optional minibatching."""
     flat_batch = flatten_training_batch(batch)
     batch_size = flat_batch[0].shape[0]
@@ -570,6 +604,7 @@ def train_epoch(network, opt_state, batch, optimizer, key, num_epochs=1, minibat
                 minibatch,
                 optimizer,
                 outcome_aux_weight,
+                context_only_update,
             )
             epoch_loss += loss
         avg_loss = epoch_loss / num_complete_batches
@@ -613,6 +648,9 @@ def parse_args():
     parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--init-global-context", action="store_true")
+    parser.add_argument("--context-residual", action="store_true")
+    parser.add_argument("--init-context-residual", action="store_true")
+    parser.add_argument("--context-only-update", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default="shared")
@@ -698,6 +736,8 @@ def parse_args():
         parser.error("--init-value-bins requires --init-value-loss hl-gauss")
     if args.outcome_aux_weight < 0.0:
         parser.error("--outcome-aux-weight must be non-negative")
+    if args.context_only_update and not args.context_residual:
+        parser.error("--context-only-update requires --context-residual")
     if args.checkpoint_every < 0:
         parser.error("--checkpoint-every cannot be negative")
     if args.keep_checkpoints < 0:
@@ -745,6 +785,12 @@ def main():
             print(f"Warm inputs:   {args.init_input_channels} channels")
         if args.init_global_context:
             print("Warm global:   enabled")
+        if args.init_context_residual:
+            print("Warm context:  enabled")
+    if args.context_residual:
+        print("Context res:   5x5 zero-init residual branch")
+    if args.context_only_update:
+        print("Update scope:  context residual branch only")
     network_global_context = args.global_context or args.scoreboard_history
     if network_global_context:
         print(f"Global ctx:    scoreboard channels ({ADAPTIVE_GLOBAL_INPUT_CHANNELS})")
@@ -808,6 +854,8 @@ def main():
         init_outcome_head=args.init_outcome_head,
         global_context=network_global_context,
         init_global_context=args.init_global_context,
+        context_residual=args.context_residual,
+        init_context_residual=args.init_context_residual,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
@@ -996,6 +1044,7 @@ def main():
             args.num_epochs,
             args.minibatch_size,
             args.outcome_aux_weight,
+            args.context_only_update,
         )
         jax.block_until_ready(network)
         if ema_network is not None:

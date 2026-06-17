@@ -510,6 +510,41 @@ def test_load_or_create_adaptive_network_expands_channels_without_changing_outpu
     assert jnp.allclose(expanded.policy_conv.weight[:, source_channels[3] :], 0.0)
 
 
+def test_load_or_create_adaptive_network_adds_zero_context_residual_without_changing_outputs(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    channels = (16, 16, 16, 8)
+    source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=channels)
+    model_path = tmp_path / "adaptive-source.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    expected_logits, expected_value = source.logits_value(obs_arr, mask, active)
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=channels,
+        init_channels=channels,
+        context_residual=True,
+        init_context_residual=False,
+    )
+    actual_logits, actual_value = loaded.logits_value(obs_arr, mask, active)
+
+    assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+    assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+    assert loaded.context_residual
+    assert jnp.allclose(loaded.context_conv2.weight, 0.0)
+    assert jnp.allclose(loaded.context_conv2.bias, 0.0)
+
+
 def test_load_or_create_adaptive_network_warm_starts_global_context_from_legacy_input(tmp_path):
     import equinox as eqx
 

@@ -3310,3 +3310,74 @@ Accepted policy samples remained sparse (`0.4-4.1%` selected rows). Even with ti
 | accepted-policy v1 | `60.94%` | 16p0 |
 
 Conclusion: direct accepted action distillation is still unsafe in the current CNN policy. It helps 8x rows on some seeds but pushes failure into 16p0, matching the broader seat/size tradeoff pattern. Do not continue action-level accepted distill without either a safer replay-balanced objective or a different architecture.
+
+## 2026-06-17 Context Residual PPO Probes
+
+Implemented an optional adaptive CNN residual context branch:
+
+```text
+train_adaptive.py --context-residual
+evaluate_adaptive_policy.py --context-residual
+train_adaptive.py --context-only-update
+```
+
+The branch is two 5x5 convs after the existing four-layer CNN trunk. The second conv is zero-initialized, so adding the branch to a legacy checkpoint preserves initial policy/value outputs. `--context-only-update` keeps PPO gradients only on this branch for the first-stage probe.
+
+### v1: context branch only
+
+Run:
+
+```text
+runs/adaptive-context-residual-only-v1/
+base: legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx
+rollout: 128 envs x 256 steps
+learner: mixed p0+p1
+lr=1e-4
+ema_decay=0.99, eval_ema
+context_only_update=true
+```
+
+Training rollout stayed alive:
+
+```text
+iter 1:  Episodes 48, Wins 40, Draws 0
+iter 10: Episodes 86, Wins 65, Draws 9
+iter 20: Episodes 99, Wins 77, Draws 6
+```
+
+64 games/row on seed `77580` looked promising:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| context final | `73.44%` | 16p0/16p1 |
+| same-seed base | `68.75%` | 8p0 |
+
+The 256 games/row confirmation on seed `77600` rejected promotion:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| context final | `70.70%` | 16p1 |
+| same-seed base | `71.88%` | 16p0 |
+
+Additional 64-row seed `77620` showed that all retained context-only checkpoints were noisy and weak (`57.81%` to `62.50%` min), matching the same-seed base bottleneck at `62.50%` rather than improving it.
+
+### v2: low-LR joint update
+
+Run:
+
+```text
+runs/adaptive-context-residual-joint-v2/
+same base and rollout
+lr=1e-5
+context residual enabled
+all trainable weights updated
+```
+
+64 games/row on seed `77780`:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| joint context final | `65.62%` | 16p0 |
+| same-seed base | `71.88%` | 16p0/16p1 |
+
+Conclusion: the zero-init context branch and context-only update path are implemented and runnable on GPU, but these PPO probes do not promote. v1 can improve a favorable 64-row seed but fails 256-row control; v2 drifts below the base immediately. This suggests the architecture hook alone is insufficient under the current PPO objective. The next representation step should either train the context branch from supervised belief/finish/intent targets before PPO, or move to an explicit U-Net/Transformer-style torso instead of another small residual PPO continuation.

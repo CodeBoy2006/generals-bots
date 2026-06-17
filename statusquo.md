@@ -675,3 +675,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote raw Q replay or accepted action distill. The next aligned branch should change representation/architecture or build a safer accepted-replacement objective, not directly bias policy logits from the current Q head.
 - **Context:** Q replay raised effective Q samples to about `1030` per update, but 256-row scale `0.001` still scored only `68.75%` min; the scale-0 `73.05%` matched the init policy exactly and was seed variance. Accepted policy distill hurt 16p0, scoring `60.94%` min versus same-seed base `70.31%`.
+
+## [2026-06-17 13:21] Context Residual PPO Probe
+- **Changes:** Added optional zero-output 5x5 residual context branch to `AdaptivePolicyValueNetwork`, with `train_adaptive.py --context-residual`, `--context-only-update`, evaluator loading via `--context-residual`, README docs, and a focused warm-start invariance test. Ran GPU probes in `runs/adaptive-context-residual-only-v1/` and `runs/adaptive-context-residual-joint-v2/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote these context PPO checkpoints. Next branch should pretrain representation heads with belief/finish/intent supervision or move to a real U-Net/Transformer torso rather than more small residual PPO continuation.
+- **Context:** Context-only v1 had a favorable 64-row seed at `73.44%` min versus base `68.75%`, but 256-row confirmation was `70.70%` versus same-seed base `71.88%`. Low-LR joint v2 scored only `65.62%` min over 64 games/row while same-seed base was `71.88%`.
