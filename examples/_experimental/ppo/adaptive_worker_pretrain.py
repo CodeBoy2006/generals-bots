@@ -44,6 +44,12 @@ WORKER_INPUT_CHANNELS = ADAPTIVE_INPUT_CHANNELS + WORKER_EXTRA_CHANNELS
 WORKER_TARGET_NAMES = ("general", "city", "frontier", "random")
 WORKER_TARGET_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_TARGET_NAMES)}
 WORKER_TARGET_RANDOM = WORKER_TARGET_NAME_TO_ID["random"]
+WORKER_COMMAND_NAMES = ("auto", "visible-general", "city", "frontier")
+WORKER_COMMAND_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_COMMAND_NAMES)}
+WORKER_COMMAND_AUTO = WORKER_COMMAND_NAME_TO_ID["auto"]
+WORKER_COMMAND_VISIBLE_GENERAL = WORKER_COMMAND_NAME_TO_ID["visible-general"]
+WORKER_COMMAND_CITY = WORKER_COMMAND_NAME_TO_ID["city"]
+WORKER_COMMAND_FRONTIER = WORKER_COMMAND_NAME_TO_ID["frontier"]
 
 
 def worker_target_mask(state, player: int, effective_size: int, pad_size: int, target_family: int) -> jnp.ndarray:
@@ -97,6 +103,49 @@ def worker_obs_to_array(
     extra = jnp.stack(
         [
             target_mask.astype(jnp.float32) * active_f,
+            source_heatmap,
+            route_potential,
+        ],
+        axis=0,
+    )
+    return jnp.concatenate([base, extra], axis=0), active
+
+
+def worker_command_target_mask(obs, effective_size: int, pad_size: int, command_mode: int) -> jnp.ndarray:
+    """Build a command target mask from fogged observation only."""
+    active = active_cells_for_size(effective_size, pad_size)
+    visible_general = obs.generals & obs.opponent_cells & active
+    city_targets = ((obs.cities & ~obs.owned_cells) | obs.structures_in_fog) & active
+    frontier_targets = (obs.opponent_cells | obs.neutral_cells | obs.fog_cells | obs.structures_in_fog) & active
+    fallback = jnp.where(jnp.any(frontier_targets), frontier_targets, active & ~obs.owned_cells)
+    general_or_frontier = jnp.where(jnp.any(visible_general), visible_general, fallback)
+    city_or_frontier = jnp.where(jnp.any(city_targets), city_targets, fallback)
+    auto_targets = jnp.where(jnp.any(visible_general), visible_general, city_or_frontier)
+    options = jnp.stack([auto_targets, general_or_frontier, city_or_frontier, fallback], axis=0)
+    return options[command_mode]
+
+
+def worker_command_obs_to_array(
+    obs,
+    effective_size: int,
+    pad_size: int,
+    command_mode: int,
+    min_army: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Append observation-only Worker command channels for policy execution."""
+    base, active = adaptive_obs_to_array(obs, effective_size, pad_size)
+    target_mask = worker_command_target_mask(obs, effective_size, pad_size, command_mode)
+    passable = active & ~obs.mountains
+    distance = shortest_path_distance_map(passable, target_mask)
+    eligible = obs.owned_cells & active & (obs.armies >= min_army)
+    army_scale = jnp.maximum(jnp.log1p(jnp.max(obs.armies.astype(jnp.float32))), 1.0)
+    source_heatmap = jnp.where(eligible, jnp.log1p(obs.armies.astype(jnp.float32)) / army_scale, 0.0)
+    max_distance = jnp.maximum(jnp.asarray(effective_size * effective_size, dtype=jnp.float32), 1.0)
+    route_potential = 1.0 - jnp.minimum(distance.astype(jnp.float32), max_distance) / max_distance
+    route_potential = jnp.where(active, route_potential, 0.0)
+    extra = jnp.stack(
+        [
+            target_mask.astype(jnp.float32) * active.astype(jnp.float32),
             source_heatmap,
             route_potential,
         ],

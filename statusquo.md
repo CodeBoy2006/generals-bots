@@ -597,3 +597,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not treat Worker checkpoints as promotion policies yet. Next step is to split Worker outputs into source and direction heads or wire a thin Commander/route wrapper that supplies target/route channels, then test whether Worker execution reduces 16x draw rate.
 - **Context:** Hard one-hot Worker labels were too fragmented despite being legal; label top share was only about `2.1%`. After switching to soft BFS-progress targets, `runs/adaptive-worker-pretrain-general-v2/` improved Useful support accuracy from `7.1%` to `62.7%` over 100 GPU iterations on `cuda:0`. The checkpoint is stored under `runs/`, not a cache directory.
+
+## [2026-06-17 11:50] Worker Command Wrapper Evaluation
+- **Changes:** Added `evaluate_worker_policy.py`, which supplies Worker target/source/route channels from fogged observation and can optionally hybridize a Worker checkpoint with a fallback adaptive policy using visible-general/contact/turn triggers. Added observation-command tests and documented GPU wrapper evaluations.
+- **Status:** Completed
+- **Next Steps:** Stop hard-switching to the flat-action Worker. Next Worker branch should split source selection and direction prediction, or use Worker logits only as a candidate reranker under the adaptive policy rather than replacing policy actions.
+- **Context:** Pure Worker `general-v2` scored `0.00%` min over 64 games/row on seed 74710. Hybrid fallback with Worker never triggered stayed in base range (`64.06%` min), validating the evaluator path, but visible-general/contact/turn Worker takeover collapsed to `0.00-15.62%` min. The negative result shows the current flat action head learned route support but cannot execute finish moves precisely.

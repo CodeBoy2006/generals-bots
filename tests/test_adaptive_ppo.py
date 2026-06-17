@@ -1567,6 +1567,32 @@ def test_worker_bfs_label_moves_toward_general_target():
     assert action.tolist() == [0, 0, 0, 1, 0]
 
 
+def test_worker_command_obs_to_array_uses_observation_command_channels():
+    from examples._experimental.ppo.adaptive_worker_pretrain import (
+        WORKER_COMMAND_NAME_TO_ID,
+        WORKER_INPUT_CHANNELS,
+        worker_command_obs_to_array,
+    )
+
+    pad_size = 6
+    state = make_padded_state(size=4, pad_to=pad_size)
+    obs = game.get_observation(state, 0)
+
+    obs_arr, active = worker_command_obs_to_array(
+        obs,
+        effective_size=4,
+        pad_size=pad_size,
+        command_mode=WORKER_COMMAND_NAME_TO_ID["frontier"],
+        min_army=2,
+    )
+
+    assert obs_arr.shape == (WORKER_INPUT_CHANNELS, pad_size, pad_size)
+    assert active.shape == (pad_size, pad_size)
+    assert jnp.any(obs_arr[-3] > 0)
+    assert jnp.all(obs_arr[-3, 4:, :] == 0)
+    assert jnp.all(obs_arr[-3, :, 4:] == 0)
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess

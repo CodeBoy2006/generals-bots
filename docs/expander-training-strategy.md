@@ -2789,3 +2789,44 @@ Iter 99 | Loss 3.7667 | Acc 9.9% | Useful 62.7% | Mass 0.089 | Valid 97.8%
 ```
 
 This is not a promotion model: the Worker checkpoint expects target/source/route command channels and is not wired into `evaluate_adaptive_policy.py`. The result is a usable execution-layer pretraining path. Next engineering step is to split Worker into explicit `source_heatmap` + `direction` heads or add a thin Commander wrapper that supplies target/route channels, then evaluate whether Worker-controlled finish attempts reduce 16x draw rate.
+
+### Worker command wrapper evaluation
+
+2026-06-17 added `evaluate_worker_policy.py`, which supplies 18-channel Worker commands from fogged observation only:
+
+```text
+auto:
+  visible enemy general if observed
+  else visible/fogged city-like structures
+  else frontier/fog
+
+hybrid:
+  fallback adaptive checkpoint handles normal play
+  Worker can take over on always / visible-general / contact / turn trigger
+```
+
+Pure Worker with the `general-v2` checkpoint is not viable as a policy: `auto`, `frontier`, and `visible-general` all produced six-row min `0.00%` over 64 games/row on seed `74710`.
+
+Hybrid evaluation used `composite-balanced` history checkpoint as fallback:
+
+| mode | min win rate | conclusion |
+| --- | ---: | --- |
+| Worker never triggers | `64.06%` | fallback path is functional and same order as base |
+| trigger on contact | `0.00%` | Worker destroys normal play after contact |
+| trigger on turn 80 | `1.56%` | Worker cannot replace policy after opening |
+| trigger on visible general, greedy Worker | `1.56%` | Worker fails at finish execution |
+| trigger on visible general, sampled Worker | `15.62%` | less catastrophic but still far below fallback |
+
+This validates the negative result: the current Worker single flat action head learned a broad BFS support signal (`Useful`), but it is not precise enough to take over actual moves. Next Worker iteration should not be another flat-action CE run. It should split the problem:
+
+```text
+source head:
+  supervised by soft source heatmap over eligible owned cells
+
+direction head:
+  conditioned on selected/source cell, supervised by BFS-progress direction mask
+
+execution:
+  only use Worker as action reranker/candidate proposer at first
+  do not hard-switch control from the adaptive policy
+```
