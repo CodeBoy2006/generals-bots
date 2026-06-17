@@ -699,3 +699,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the current U-Net checkpoints. Build a dedicated offline teacher-imitation/search-to-strategy dataset so the U-Net can match the legacy CNN teacher at 256 games/row before sparse PPO fine-tuning.
 - **Context:** GPU probes ran under `runs/adaptive-unet-v1*/`. EMA bootstrap v1 saved a near-random policy (`0.00%` min). Best checkpoint v1d reached `62.50%` min on 64-row smoke, but 256-row triage scored `66.41%` min versus same-seed base `69.14%`. U-Net large-map rows are close (`16p0=70.70%`, `16p1=71.09%`), but 8/12 rows remain under-cloned.
+
+## [2026-06-17 14:47] Adaptive U-Net Teacher Imitation
+- **Changes:** Added `adaptive_teacher_imitation.py`, a pure teacher-imitation trainer for adaptive trunks using teacher-driven mixed-seat rollouts, all-action KL, greedy/sampled teacher action CE, fog-memory inputs, and checkpoint pruning. Updated README and training strategy docs.
+- **Status:** Completed
+- **Next Steps:** Treat `runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx` as the current U-Net promotion candidate. Next run should fine-tune this checkpoint with sparse PPO/search-to-strategy auxiliary and then require 2048 games/row before replacing the legacy CNN base.
+- **Context:** Sampled-action imitation v2 stayed weak (`59.38%` 64-row min). Greedy-action imitation v3 passed promotion-candidate gates: 256-row min `72.66%` vs same-seed base `69.92%`, and 512-row min `75.00%` vs base `70.12%`. Large-map draw rates improved versus base: `16p0/16p1` draw `15.04%/16.21%` vs `18.36%/18.55%`.

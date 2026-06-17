@@ -3626,3 +3626,119 @@ then add belief/finish auxiliary targets and only then resume sparse PPO
 ```
 
 This result also confirms that trunk replacement should be staged differently from add-on branches: first clone the existing policy distribution well enough, then fine-tune strategic behavior. PPO bootstrap alone still shifts weak rows before the new trunk has a stable policy prior.
+
+## 2026-06-17 Adaptive U-Net Teacher Imitation v2/v3
+
+Implemented `adaptive_teacher_imitation.py`, a dedicated policy-checkpoint imitation trainer for adaptive trunks. Unlike `train_adaptive.py --teacher-rollout-actions`, this script removes PPO reward/value/advantage from the update and trains the student only from teacher behavior:
+
+```text
+teacher-driven mixed-seat rollouts
+student input: 35 channels with fog memory + scoreboard history
+teacher input: 30-channel legacy history observation
+loss = all-action KL(teacher || student) + teacher action CE - entropy bonus
+multiple shuffled epochs per collected rollout
+```
+
+This directly tests the staging hypothesis from the previous section: first make the new U-Net trunk match the old CNN policy, then use PPO/search/belief losses.
+
+### Imitation v2: sampled teacher actions
+
+Run:
+
+```text
+runs/adaptive-unet-imitation-v2/
+init: runs/adaptive-unet-v1d/generals-adaptive-unet-v1d.eqx
+teacher: legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx
+teacher_policy_mode=sample
+loss: KL 1.0 + CE 3.0
+rollout/update: 128 envs x 128 steps x 30 iters x 3 epochs
+weights: 8:2,12:2,16:1
+```
+
+Training metrics did not improve cleanly because sampled teacher actions are noisy labels:
+
+```text
+iter 1:  KL 0.0580, CE 1.3094, Acc 57.2%
+iter 30: KL 0.0652, CE 2.0977, Acc 42.9%
+```
+
+64 games/row on seed `78760`:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| imitation v2 | `59.38%` | 8p1 |
+
+Conclusion: sampled teacher action CE is too noisy. It can improve individual rows but keeps moving the bottleneck.
+
+### Imitation v3: greedy teacher actions + KL distribution anchor
+
+Run:
+
+```text
+runs/adaptive-unet-imitation-v3/
+init: runs/adaptive-unet-v1d/generals-adaptive-unet-v1d.eqx
+teacher_policy_mode=greedy
+loss: KL 1.0 + CE 5.0
+rollout/update: 128 envs x 128 steps x 40 iters x 3 epochs
+weights: 8:2,12:2,16:1
+```
+
+Greedy labels gave a much cleaner behavioral target:
+
+```text
+iter 1:  KL 0.1398, CE 0.7332, Acc 78.4%
+iter 40: KL 0.4862, CE 0.6900, Acc 79.3%
+```
+
+64 games/row on seed `78800`:
+
+| row | win rate |
+| --- | ---: |
+| 8p0 | `84.38%` |
+| 8p1 | `70.31%` |
+| 12p0 | `84.38%` |
+| 12p1 | `78.12%` |
+| 16p0 | `73.44%` |
+| 16p1 | `79.69%` |
+| min | `70.31%` |
+
+256 games/row on seed `78820`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base CNN | `69.92%` | `72.66%` | `85.55%` | `76.95%` | `71.88%` | `72.27%` | `69.92%` |
+| U-Net imitation v3 | `72.66%` | `76.95%` | `80.86%` | `83.20%` | `79.30%` | `76.17%` | `72.66%` |
+
+512 games/row on seed `78840`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base CNN | `75.00%` | `70.12%` | `80.27%` | `82.42%` | `71.68%` | `72.07%` | `70.12%` |
+| U-Net imitation v3 | `77.73%` | `75.00%` | `79.69%` | `81.45%` | `75.20%` | `75.98%` | `75.00%` |
+
+Draw rates also improved on the large rows:
+
+```text
+base 16p0/16p1 draw: 18.36% / 18.55%
+v3   16p0/16p1 draw: 15.04% / 16.21%
+```
+
+Conclusion: offline teacher imitation with greedy action labels is the first U-Net trunk replacement route that clears the 512 games/row promotion-candidate gate. It does not yet prove final replacement over 2048 games/row, but it is strong enough to become the new U-Net base for the next branch.
+
+Recommended next branch:
+
+```text
+init: runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx
+train: sparse PPO / search-to-strategy auxiliary
+keep: fog memory + scoreboard history + per-size HL-Gauss value
+avoid: high-decay EMA from random init
+gate: 512-row first, then 2048-row final evidence
+```
+
+This also resolves the prior uncertainty: trunk replacement should not start from PPO bootstrap. The practical sequence is now:
+
+```text
+1. teacher-imitation U-Net until 256/512-row >= legacy CNN
+2. add belief/finish/intent/search-value heads
+3. sparse PPO or search-to-strategy fine-tune from the imitated U-Net
+```

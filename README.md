@@ -564,9 +564,10 @@ Adaptive strategic trunk experiments can now use a real U-Net backbone instead o
 
 ```bash
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/train_adaptive.py 128 \
+uv run python examples/_experimental/ppo/adaptive_teacher_imitation.py 128 \
   --grid-sizes 8,12,16 \
   --pad-to 16 \
+  --grid-size-weights 8:2,12:2,16:1 \
   --network-arch unet \
   --channels 64,96,128,64 \
   --global-context \
@@ -578,13 +579,13 @@ uv run python examples/_experimental/ppo/train_adaptive.py 128 \
   --teacher-global-context \
   --teacher-scoreboard-history \
   --teacher-input-channels 30 \
-  --teacher-rollout-actions \
-  --teacher-kl-weight 1.0 \
-  --teacher-action-ce-weight 3.0 \
-  --model-path runs/adaptive-unet-v1/generals-adaptive-unet-v1.eqx
+  --teacher-policy-mode greedy \
+  --kl-weight 1.0 \
+  --action-ce-weight 5.0 \
+  --model-path runs/adaptive-unet-imitation/generals-adaptive-unet-imitation.eqx
 ```
 
-`--fog-memory` appends explored-ever, last-seen enemy ownership, last-seen enemy army, seen city, and seen general planes. `--teacher-rollout-actions` lets a legacy adaptive CNN drive bootstrap rollouts while the U-Net records student logprobs; `--teacher-kl-weight` and `--teacher-action-ce-weight` preserve teacher behavior during trunk replacement. U-Net checkpoints must be evaluated with matching `--network-arch unet`, `--channels`, `--scoreboard-history`, `--fog-memory`, and value-head flags.
+`--fog-memory` appends explored-ever, last-seen enemy ownership, last-seen enemy army, seen city, and seen general planes. `adaptive_teacher_imitation.py` lets the legacy adaptive CNN drive mixed-seat rollouts and trains the U-Net with all-action teacher KL plus action CE. Greedy teacher action labels are much less noisy than sampled labels, while KL still preserves the teacher distribution. U-Net checkpoints must be evaluated with matching `--network-arch unet`, `--channels`, `--scoreboard-history`, `--fog-memory`, and value-head flags.
 
 ## 验证
 
