@@ -95,6 +95,7 @@ def _policy_action(
     strategy_worker_finish_gate: bool,
     strategy_worker_policy_margin: float,
     strategy_plan_worker_rerank_scale: float,
+    strategy_plan_worker_min_margin: float,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     needs_aux = (
@@ -136,7 +137,13 @@ def _policy_action(
             network.pad_size,
         )
         worker_logits = plan_worker_network.logits_value(worker_obs, mask, active)[0]
-        logits = strategy_q_rerank_logits(logits[None, :], worker_logits[None, :], strategy_plan_worker_rerank_scale)[0]
+        effective_scale = jnp.asarray(strategy_plan_worker_rerank_scale)
+        if strategy_plan_worker_min_margin >= 0.0:
+            legal_worker_logits = jnp.where(logits > -1.0e8, worker_logits, -1.0e9)
+            top2 = jax.lax.top_k(legal_worker_logits, 2)[0]
+            worker_margin = top2[0] - top2[1]
+            effective_scale = jnp.where(worker_margin >= strategy_plan_worker_min_margin, effective_scale, 0.0)
+        logits = strategy_q_rerank_logits(logits[None, :], worker_logits[None, :], effective_scale)[0]
     action_key, worker_key = jrandom.split(key)
     index = jax.lax.cond(
         policy_mode == 0,
@@ -427,6 +434,7 @@ def evaluate_batch(
     strategy_worker_finish_gate=False,
     strategy_worker_policy_margin=-1.0,
     strategy_plan_worker_rerank_scale=0.0,
+    strategy_plan_worker_min_margin=-1.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -536,6 +544,7 @@ def evaluate_batch(
                 strategy_worker_finish_gate,
                 strategy_worker_policy_margin,
                 strategy_plan_worker_rerank_scale,
+                strategy_plan_worker_min_margin,
             )
         )(
             obs_arr,
@@ -590,6 +599,7 @@ def evaluate_policy_opponent_batch(
     strategy_worker_finish_gate=False,
     strategy_worker_policy_margin=-1.0,
     strategy_plan_worker_rerank_scale=0.0,
+    strategy_plan_worker_min_margin=-1.0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -700,6 +710,7 @@ def evaluate_policy_opponent_batch(
                 strategy_worker_finish_gate,
                 strategy_worker_policy_margin,
                 strategy_plan_worker_rerank_scale,
+                strategy_plan_worker_min_margin,
             )
         )(
             obs_arr,
@@ -777,6 +788,7 @@ def parse_args():
     parser.add_argument("--strategy-plan-worker-channels", default=None)
     parser.add_argument("--strategy-plan-worker-network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--strategy-plan-worker-rerank-scale", type=float, default=0.0)
+    parser.add_argument("--strategy-plan-worker-min-margin", type=float, default=-1.0)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -859,6 +871,10 @@ def parse_args():
         parser.error("--strategy-plan-worker-rerank-scale requires --strategy-plan-worker-path")
     if args.strategy_plan_worker_rerank_scale > 0.0 and not (args.strategy_aux and args.strategy_spatial_aux):
         parser.error("--strategy-plan-worker-rerank-scale requires --strategy-aux --strategy-spatial-aux")
+    if args.strategy_plan_worker_min_margin < 0.0 and args.strategy_plan_worker_min_margin != -1.0:
+        parser.error("--strategy-plan-worker-min-margin must be non-negative, or -1 to disable")
+    if args.strategy_plan_worker_min_margin >= 0.0 and args.strategy_plan_worker_rerank_scale <= 0.0:
+        parser.error("--strategy-plan-worker-min-margin requires --strategy-plan-worker-rerank-scale")
     try:
         args.strategy_plan_worker_channels = parse_policy_channels(args.strategy_plan_worker_channels)
     except ValueError as exc:
@@ -989,6 +1005,8 @@ def main():
             "Plan worker: "
             f"arch={args.strategy_plan_worker_network_arch}, scale={args.strategy_plan_worker_rerank_scale:g}"
         )
+        if args.strategy_plan_worker_min_margin >= 0.0:
+            print(f"Plan worker: min_margin={args.strategy_plan_worker_min_margin:g}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -1043,6 +1061,7 @@ def main():
                     args.strategy_worker_finish_gate,
                     args.strategy_worker_policy_margin,
                     args.strategy_plan_worker_rerank_scale,
+                    args.strategy_plan_worker_min_margin,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -1071,6 +1090,7 @@ def main():
                     args.strategy_worker_finish_gate,
                     args.strategy_worker_policy_margin,
                     args.strategy_plan_worker_rerank_scale,
+                    args.strategy_plan_worker_min_margin,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -1122,6 +1142,7 @@ def main():
         "strategy_plan_worker_path": args.strategy_plan_worker_path,
         "strategy_plan_worker_network_arch": args.strategy_plan_worker_network_arch,
         "strategy_plan_worker_rerank_scale": args.strategy_plan_worker_rerank_scale,
+        "strategy_plan_worker_min_margin": args.strategy_plan_worker_min_margin,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

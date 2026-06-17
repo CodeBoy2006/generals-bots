@@ -5963,3 +5963,114 @@ Next data/training variant should mix best plans with all accepted/improved
 candidate plans and train a separate confidence/gate target, so the Worker is
 used only when the command is likely to be outcome-improving.
 ```
+
+## 2026-06-17 Plan-Worker Accepted/Mixed Probe
+
+Extended `adaptive_plan_worker_supervised.py` with two additional selection
+modes:
+
+```text
+--selection accepted
+  keep candidate plans whose primitive action differs from the teacher/base
+  action and improves outcome, or preserves outcome while improving score by
+  --accepted-score-margin.
+
+--selection mixed
+  concatenate each row's best plan with accepted plans, using
+  --mixed-best-weight and --accepted-weight.
+```
+
+Also added `evaluate_adaptive_policy.py --strategy-plan-worker-min-margin`,
+which only applies Worker rerank bias when the Worker's legal top-1/top-2 logit
+margin clears the requested threshold.
+
+Mixed Worker v0:
+
+```text
+dataset:   runs/adaptive-plan-q-fixed-v5-worker-v3/plan-q-*.npz
+selection: mixed
+examples:  2369
+init:      runs/adaptive-plan-worker-best-v0/generals-adaptive-plan-worker-best-v0.eqx
+output:    runs/adaptive-plan-worker-mixed-v0/generals-adaptive-plan-worker-mixed-v0.eqx
+weights:   best=0.5, accepted=1.0, accepted_score_margin=25
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| loss | `3.4783` | `0.7753` |
+| action accuracy | `23.0%` | `77.2%` |
+| source accuracy | `35.7%` | `100.0%` |
+| direction accuracy | `52.2%` | `77.5%` |
+
+Fixed-v5 max250, 128 games/row on seed `84100`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `8.59%` | `7.81%` | `7.81%` | `50.00%` | `59.38%` |
+| scale `0.01` | `11.72%` | `10.16%` | `10.16%` | `46.88%` | `55.47%` |
+| scale `0.02` | `14.84%` | `7.81%` | `7.81%` | `46.88%` | `53.91%` |
+| scale `0.02`, margin `1` | `11.72%` | `8.59%` | `8.59%` | `48.44%` | `57.03%` |
+| scale `0.02`, margin `2` | `12.50%` | `10.16%` | `10.16%` | `48.44%` | `57.03%` |
+| scale `0.05`, margin `2` | `8.59%` | `9.38%` | `8.59%` | `53.12%` | `57.03%` |
+
+The two best 128-row settings failed 256-row confirmation on seed `84120`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `10.55%` | `13.28%` | `10.55%` | `53.12%` | `52.73%` |
+| scale `0.01` | `8.59%` | `12.89%` | `8.59%` | `56.25%` | `53.12%` |
+| scale `0.02`, margin `2` | `8.98%` | `12.11%` | `8.98%` | `54.69%` | `53.52%` |
+
+Accepted-only Worker v0:
+
+```text
+dataset:   runs/adaptive-plan-q-fixed-v5-worker-v3/plan-q-*.npz
+selection: accepted
+examples:  749
+init:      runs/adaptive-plan-worker-best-v0/generals-adaptive-plan-worker-best-v0.eqx
+output:    runs/adaptive-plan-worker-accepted-v0/generals-adaptive-plan-worker-accepted-v0.eqx
+weights:   accepted=1.0, accepted_score_margin=25
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| loss | `3.9273` | `2.4577` |
+| action accuracy | `17.5%` | `44.4%` |
+| source accuracy | `29.3%` | `62.6%` |
+| direction accuracy | `43.4%` | `59.6%` |
+
+Fixed-v5 max250, 128 games/row on seed `84160`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `12.50%` | `16.41%` | `12.50%` | `62.50%` | `55.47%` |
+| scale `0.01` | `12.50%` | `15.62%` | `12.50%` | `63.28%` | `57.81%` |
+| scale `0.02` | `12.50%` | `16.41%` | `12.50%` | `62.50%` | `58.59%` |
+| scale `0.02`, margin `1` | `14.84%` | `16.41%` | `14.84%` | `60.94%` | `56.25%` |
+| scale `0.02`, margin `2` | `13.28%` | `16.41%` | `13.28%` | `63.28%` | `56.25%` |
+
+The best accepted-only 128-row setting also failed 256-row confirmation on
+seed `84180`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `12.89%` | `8.98%` | `8.98%` | `53.91%` | `51.17%` |
+| scale `0.02`, margin `1` | `12.11%` | `8.20%` | `8.20%` | `55.86%` | `52.34%` |
+
+Conclusion:
+
+```text
+The Worker can fit best, mixed, and accepted Plan-Q commands offline, but
+offline command accuracy still does not translate into stable fixed-v5 gains.
+Mixed and accepted-only Workers both produced 128-row false positives and then
+regressed under 256-row confirmation.
+
+Stop spending runs on Plan-Worker rerank-scale and confidence-margin sweeps.
+The next Plan-Q route should either learn an explicit command/gate scorer on
+model-generated source-target candidates, or collect stronger decisive
+counterfactuals before letting Worker logits affect primitive inference.
+```

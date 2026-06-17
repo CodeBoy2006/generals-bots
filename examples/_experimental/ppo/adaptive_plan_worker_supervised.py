@@ -81,6 +81,9 @@ def select_plan_examples(
     selection: str,
     score_temperature: float,
     drop_pass_labels: bool,
+    accepted_score_margin: float,
+    mixed_best_weight: float,
+    accepted_weight: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return selected row ids, source ids, target ids, labels, and weights."""
     plan_actions = shard["plan_action_indices"].astype(np.int32)
@@ -96,6 +99,7 @@ def select_plan_examples(
     flat_q = plan_q.reshape(num_rows, -1)
     flat_scores = plan_scores.reshape(num_rows, -1)
     flat_outcomes = plan_outcomes.reshape(num_rows, -1)
+    teacher_actions = shard["teacher_action_index"].astype(np.int32)
     source_grid = np.broadcast_to(source_indices[:, :, None], (num_rows, source_count, target_count)).reshape(
         num_rows,
         -1,
@@ -105,10 +109,23 @@ def select_plan_examples(
         -1,
     )
 
+    best_key = flat_outcomes * 100000.0 + flat_scores
+    best_pos = np.argmax(best_key, axis=1)
+    row_ids = np.arange(num_rows, dtype=np.int32)
+
+    teacher_matches = flat_actions == teacher_actions[:, None]
+    has_teacher_plan = np.any(teacher_matches, axis=1)
+    teacher_pos = np.argmax(teacher_matches.astype(np.int32), axis=1)
+    teacher_scores = flat_scores[row_ids, teacher_pos]
+    teacher_outcomes = flat_outcomes[row_ids, teacher_pos]
+    switched = flat_actions != teacher_actions[:, None]
+    outcome_improved = flat_outcomes > teacher_outcomes[:, None]
+    score_improved = (flat_outcomes == teacher_outcomes[:, None]) & (
+        (flat_scores - teacher_scores[:, None]) >= accepted_score_margin
+    )
+    accepted = has_teacher_plan[:, None] & switched & (outcome_improved | score_improved)
+
     if selection == "best":
-        best_key = flat_outcomes * 100000.0 + flat_scores
-        best_pos = np.argmax(best_key, axis=1)
-        row_ids = np.arange(num_rows, dtype=np.int32)
         selected_sources = source_grid[row_ids, best_pos]
         selected_targets = target_grid[row_ids, best_pos]
         labels = flat_actions[row_ids, best_pos]
@@ -122,6 +139,33 @@ def select_plan_examples(
         probs = np.exp(centered_q / score_temperature)
         probs = probs / np.maximum(np.sum(probs, axis=1, keepdims=True), 1.0e-6)
         weights = (probs * source_count * target_count).reshape(-1).astype(np.float32)
+    elif selection == "accepted":
+        accepted_rows, accepted_pos = np.nonzero(accepted)
+        row_ids = accepted_rows.astype(np.int32)
+        selected_sources = source_grid[row_ids, accepted_pos]
+        selected_targets = target_grid[row_ids, accepted_pos]
+        labels = flat_actions[row_ids, accepted_pos]
+        weights = np.full((row_ids.shape[0],), accepted_weight, dtype=np.float32)
+    elif selection == "mixed":
+        accepted_rows, accepted_pos = np.nonzero(accepted)
+        best_rows = row_ids
+        row_ids = np.concatenate([best_rows, accepted_rows.astype(np.int32)], axis=0)
+        selected_sources = np.concatenate(
+            [source_grid[best_rows, best_pos], source_grid[accepted_rows, accepted_pos]],
+            axis=0,
+        )
+        selected_targets = np.concatenate(
+            [target_grid[best_rows, best_pos], target_grid[accepted_rows, accepted_pos]],
+            axis=0,
+        )
+        labels = np.concatenate([flat_actions[best_rows, best_pos], flat_actions[accepted_rows, accepted_pos]], axis=0)
+        weights = np.concatenate(
+            [
+                np.full((best_rows.shape[0],), mixed_best_weight, dtype=np.float32),
+                np.full((accepted_rows.shape[0],), accepted_weight, dtype=np.float32),
+            ],
+            axis=0,
+        )
     else:
         raise ValueError(f"unknown selection mode: {selection}")
 
@@ -140,6 +184,9 @@ def load_plan_worker_dataset(
     selection: str,
     score_temperature: float,
     drop_pass_labels: bool,
+    accepted_score_margin: float,
+    mixed_best_weight: float,
+    accepted_weight: float,
     max_examples: int | None,
     seed: int,
 ) -> dict[str, jnp.ndarray]:
@@ -158,7 +205,12 @@ def load_plan_worker_dataset(
             selection,
             score_temperature,
             drop_pass_labels,
+            accepted_score_margin,
+            mixed_best_weight,
+            accepted_weight,
         )
+        if row_ids.shape[0] == 0:
+            continue
         base_obs = shard["obs"][row_ids].astype(np.float32)
         active = shard["active"][row_ids].astype(np.bool_)
         command = plan_command_planes(sources, targets, active, base_obs.shape[-1])
@@ -168,6 +220,8 @@ def load_plan_worker_dataset(
         chunks["labels"].append(labels)
         chunks["weights"].append(weights)
 
+    if not chunks["obs"]:
+        raise ValueError("No Plan-Worker examples selected; relax selection or accepted margins")
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
     if max_examples is not None and arrays["obs"].shape[0] > max_examples:
         rng = np.random.default_rng(seed)
@@ -267,8 +321,11 @@ def train_epoch(
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a target-conditioned Worker from Plan-Q shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
-    parser.add_argument("--selection", choices=("best", "all"), default="best")
+    parser.add_argument("--selection", choices=("best", "all", "accepted", "mixed"), default="best")
     parser.add_argument("--score-temperature", type=float, default=0.25)
+    parser.add_argument("--accepted-score-margin", type=float, default=25.0)
+    parser.add_argument("--mixed-best-weight", type=float, default=0.5)
+    parser.add_argument("--accepted-weight", type=float, default=1.0)
     parser.add_argument("--keep-pass-labels", action="store_true")
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--pad-to", type=int, default=16)
@@ -291,6 +348,14 @@ def parse_args():
 
     if args.score_temperature <= 0.0:
         parser.error("--score-temperature must be positive")
+    if args.accepted_score_margin < 0.0:
+        parser.error("--accepted-score-margin must be non-negative")
+    if args.mixed_best_weight < 0.0 or args.accepted_weight < 0.0:
+        parser.error("--mixed-best-weight and --accepted-weight must be non-negative")
+    if args.selection == "mixed" and args.mixed_best_weight + args.accepted_weight <= 0.0:
+        parser.error("mixed selection requires a positive best or accepted weight")
+    if args.selection == "accepted" and args.accepted_weight <= 0.0:
+        parser.error("accepted selection requires --accepted-weight > 0")
     if args.max_examples is not None and args.max_examples <= 0:
         parser.error("--max-examples must be positive")
     if args.pad_to <= 0:
@@ -319,6 +384,9 @@ def main():
         args.selection,
         args.score_temperature,
         not args.keep_pass_labels,
+        args.accepted_score_margin,
+        args.mixed_best_weight,
+        args.accepted_weight,
         args.max_examples,
         args.seed,
     )
@@ -331,6 +399,10 @@ def main():
     print(f"Datasets:     {len(paths)} shard(s)")
     print(f"Examples:     {dataset['obs'].shape[0]}")
     print(f"Selection:    {args.selection}")
+    if args.selection in ("accepted", "mixed"):
+        print(f"Accepted:     score_margin={args.accepted_score_margin:g}, weight={args.accepted_weight:g}")
+    if args.selection == "mixed":
+        print(f"Mixed best:   weight={args.mixed_best_weight:g}")
     print(f"Input chans:  {input_channels}")
     print(f"Arch:         {args.network_arch}")
     print(

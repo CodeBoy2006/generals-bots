@@ -855,3 +855,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop scaling best-only Worker data. Train the next Worker on mixed best/all accepted plans and add an explicit confidence/gate label before stronger inference influence.
 - **Context:** v1 used 1620 best non-pass plans and fit them much better (`Act 29.4% -> 73.8%`, `Src 44.5% -> 97.0%`, `Dir 56.2% -> 76.0%`), but fixed-v5 max250 128-row only improved min from `7.03%` to `7.81%`; p1 remains the bottleneck, so better command imitation alone is not enough.
+
+## [2026-06-17 20:12] Plan-Worker Accepted Mixed Probe
+- **Changes:** Added `adaptive_plan_worker_supervised.py --selection accepted|mixed` with accepted-plan score margins and sample weights; added `evaluate_adaptive_policy.py --strategy-plan-worker-min-margin` to gate Worker rerank by legal top1/top2 logit confidence; documented mixed and accepted-only training/eval results.
+- **Status:** Completed
+- **Next Steps:** Stop Plan-Worker rerank-scale and confidence-margin sweeps. Next Plan-Q work should train an explicit command/gate scorer on model-generated source-target candidates, or collect stronger decisive counterfactuals before Worker logits affect primitive inference.
+- **Context:** Mixed v0 fit 2369 examples well (`Act 23.0% -> 77.2%`) but failed 256-row fixed-v5 confirmation (`10.55%` baseline min to `8.59%` at scale `0.01`, `8.98%` at scale `0.02` margin `2`). Accepted-only v0 fit 749 examples modestly (`Act 17.5% -> 44.4%`); its 128-row scale `0.02` margin `1` signal (`12.50% -> 14.84%` min) also failed 256-row confirmation (`8.98% -> 8.20%` min).
