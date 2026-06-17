@@ -783,3 +783,9 @@
 - **Status:** Completed
 - **Next Steps:** Use this collector for longer fixed-v5 max250 shards, then train source_q/target_q from `source_score_probs` and `target_score_probs`. Do not return to spatial rerank scale sweeps.
 - **Context:** CUDA smoke compiled and wrote ignored `runs/` shards. With `score_scale=10`, the 8-env/16-step/4x4-plan smoke produced 128 samples with mean `plan_q_gap=0.0689`, source max-prob mean `0.2700`, and target max-prob mean `0.2704`. The 8-step horizon still yielded all draw outcomes, so anti-draw supervision needs longer fixed-v5 plan rollouts.
+
+## [2026-06-17 18:27] Plan-Q Source Target Supervision v0
+- **Changes:** Added `adaptive_plan_q_supervised.py`, a frozen-head trainer that learns source/target spatial heads from Plan-Q shard marginals instead of static source/target CE labels. Updated README and strategy docs with usage and smoke curve.
+- **Status:** Completed
+- **Next Steps:** Collect longer fixed-v5 max250 Plan-Q shards and rerun this trainer with `--gap-weighting`; only then evaluate whether Plan-Q target maps can support a Worker/mixture policy.
+- **Context:** CUDA smoke on `runs/adaptive-plan-q-v0-scale10/*.npz` trained 8 epochs from `adaptive-strategy-spatial-v1`. Source loss improved `3.0467 -> 2.8660` and source top1 `19.5% -> 28.1%`; target loss improved `4.3221 -> 4.1629` but target top1 stayed weak (`~2%`). The checkpoint only updates auxiliary heads and is not a promotion candidate.

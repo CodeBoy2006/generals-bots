@@ -5092,3 +5092,59 @@ Acceptance:
   best_plan win/loss outcome is not all draw
   source/target marginals have enough entropy to train, but enough peak to rank
 ```
+
+## 2026-06-17 Plan-Q Source/Target Supervision v0
+
+Added `adaptive_plan_q_supervised.py`, a frozen-head trainer for Plan-Q shards.
+
+Inputs:
+
+```text
+obs
+legal_mask
+active
+source_indices
+target_indices
+source_score_probs
+target_score_probs
+teacher_logits / teacher_action_index
+plan_q_gap
+```
+
+Loss:
+
+```text
+source_loss = sparse CE over candidate source indices using source_score_probs
+target_loss = sparse CE over candidate target indices using target_score_probs
+optional policy_kl/action_ce anchors are available for future joint updates
+default update_scope=strategy-heads, so trunk/policy stay frozen
+```
+
+Smoke command:
+
+```text
+dataset: runs/adaptive-plan-q-v0-scale10/*.npz
+init:    runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+output:  runs/adaptive-plan-q-supervised-v0/generals-adaptive-plan-q-supervised-v0.eqx
+epochs:  8
+batch:   64
+lr:      3e-4
+device:  cuda:0
+```
+
+Training curve:
+
+| epoch | source loss / acc | target loss / acc |
+| ---: | ---: | ---: |
+| 1 | `3.0467 / 19.5%` | `4.3221 / 2.3%` |
+| 4 | `2.9552 / 22.7%` | `4.2447 / 2.3%` |
+| 8 | `2.8660 / 28.1%` | `4.1629 / 1.6%` |
+
+Interpretation:
+
+```text
+Plan-Q source marginals are learnable even on the tiny 128-row smoke shard.
+Plan-Q target marginals also reduce CE but top1 accuracy remains weak, matching the earlier diagnosis that target choice is the harder strategic variable.
+This checkpoint is not a promotion candidate because only auxiliary heads changed and the dataset lacks decisive outcome labels.
+The next useful training data should be longer fixed-v5 max250 Plan-Q shards, then rerun this trainer with gap-weighting or stronger target supervision.
+```

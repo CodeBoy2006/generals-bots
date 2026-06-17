@@ -776,6 +776,36 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_dataset.py 8 \
 
 The first smoke shard is intentionally small. It validates the data path and produces non-uniform Plan-Q marginals, but does not yet provide anti-draw outcome labels because the 8-step rollout horizon remains nonterminal. Longer fixed-v5 max250 shards are the next data step.
 
+Train source/target heads from Plan-Q marginals with `adaptive_plan_q_supervised.py`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
+  --dataset 'runs/adaptive-plan-q-v0-scale10/*.npz' \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --strategy-aux \
+  --init-strategy-aux \
+  --strategy-spatial-aux \
+  --init-strategy-spatial-aux \
+  --init-model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
+  --source-weight 0.5 \
+  --target-weight 0.5 \
+  --model-path runs/adaptive-plan-q-supervised-v0/generals-adaptive-plan-q-supervised-v0.eqx
+```
+
+This trainer defaults to frozen trunk/policy updates and only moves the source/target strategy heads. It is a data-quality and representation probe until the Plan-Q shards include longer-horizon fixed-v5 outcome labels.
+
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
 
 ```bash
