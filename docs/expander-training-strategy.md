@@ -4211,3 +4211,167 @@ Outcome weighting and sample-teacher KL both help a little, but action-distribut
 The bottleneck is now explicit finish/search outcome selection, not merely matching v5 logits.
 Next experiment should add finish/draw-risk supervision or search-labeled finish actions on v5-vs-v5 states.
 ```
+
+## 2026-06-17 Fixed-v5 Finish/Draw-Risk Follow-up
+
+This round added three trainer capabilities:
+
+```text
+1. U-Net adaptive checkpoints can now warm start into structurally expanded U-Net templates.
+   This is needed when adding outcome/strategy heads to an existing U-Net checkpoint.
+
+2. adaptive_teacher_imitation.py can train the 3-class loss/draw/win outcome head:
+   --outcome-head --outcome-aux-weight W
+
+3. action KL/CE outcome weighting now supports:
+   --terminal-action-window N
+   --p0-action-weight / --p1-action-weight
+```
+
+The immediate target was the fixed 8x8 v5 gate at `max_steps=250`, where the best previous artifact remained:
+
+```text
+runs/adaptive-fixed-v5-imitation-v5/ckpts/generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx
+512 games/seat seed 79940: min 14.65%, draw 67.77% / 66.60%
+```
+
+### Outcome auxiliary fine-tune
+
+```text
+runs/adaptive-fixed-v5-outcome-v1/
+init: fixed-v5 imitation v5 iter030
+teacher/opponent: fixed v5 sample
+loss: KL 2.0 + CE 1.0 + entropy 0.001 + outcome aux 0.05
+outcome class weights: win=3, loss=3, draw=1
+rollout/update: 64 envs x 256 steps x 30 iters x 2 epochs
+```
+
+Training was healthy but only affected representation:
+
+```text
+iter 1:  KL 0.0926, CE 0.9036, Acc 68.1%, Out 1.3617 / 46.2%
+iter 20: KL 0.0724, CE 0.9108, Acc 68.0%, Out 0.9817 / 53.1%
+iter 30: KL 0.0681, CE 0.8528, Acc 69.7%, Out 0.9767 / 49.5%
+```
+
+Evaluation:
+
+| model | seed | games/seat | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base iter030 | 80240 | 256 | `12.50%` | `14.45%` | `12.50%` | `66.41%` | `69.14%` |
+| outcome-v1 | 80240 | 256 | `13.67%` | `15.62%` | `13.67%` | `66.02%` | `67.19%` |
+| outcome-v1 | 80300 | 512 | `12.30%` | `13.28%` | `12.30%` | `71.09%` | `65.62%` |
+
+Conclusion: outcome CE is wired and learnable, but it does not reliably improve policy decisions. Do not promote.
+
+### Terminal-window action weighting
+
+The next attempt weighted action imitation toward known terminal windows:
+
+```text
+runs/adaptive-fixed-v5-terminal-window-v1/
+init: fixed-v5 imitation v5 iter030
+loss: KL 2.0 + CE 1.0 + entropy 0.001 + outcome aux 0.02
+action weights: win=4, loss=0.5, draw=0.05, unknown=0.2
+terminal window: last 64 rollout steps before known done
+```
+
+Training stayed numerically stable:
+
+```text
+iter 1:  KL 0.0734, CE 0.8548, Acc 69.5%, Out 4.0858 / 24.0%, W 0.12
+iter 20: KL 0.0932, CE 0.8558, Acc 69.7%, Out 0.8993 / 65.2%, W 0.22
+iter 40: KL 0.0650, CE 0.8903, Acc 68.2%, Out 0.9441 / 56.0%, W 0.20
+```
+
+But the gate exposed a seat tradeoff:
+
+| model | seed | games/seat | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base iter030 | 80480 | 256 | `14.06%` | `11.33%` | `11.33%` | `72.66%` | `71.09%` |
+| terminal-window-v1 | 80480 | 256 | `17.97%` | `8.98%` | `8.98%` | `68.36%` | `68.75%` |
+
+`terminal-window-v1` made player 0 more decisive but damaged player 1.
+
+### P1-focused terminal-window weighting
+
+```text
+runs/adaptive-fixed-v5-terminal-window-p1-v2/
+same as v1, plus:
+  --p0-action-weight 0.5
+  --p1-action-weight 3.0
+```
+
+Training stayed stable:
+
+```text
+iter 1:  KL 0.0787, CE 0.8006, Acc 69.4%, Out 4.5599 / 20.8%, W 0.19
+iter 20: KL 0.0661, CE 0.9423, Acc 67.4%, Out 0.9796 / 56.4%, W 0.32
+iter 40: KL 0.0706, CE 0.8376, Acc 70.4%, Out 0.9921 / 50.8%, W 0.29
+```
+
+But same-seed evaluation showed clear regression:
+
+| model | seed | games/seat | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base iter030 | 80560 | 256 | `19.14%` | `19.14%` | `19.14%` | `59.77%` | `60.16%` |
+| terminal-window-p1-v2 | 80560 | 256 | `14.84%` | `12.89%` | `12.89%` | `67.19%` | `65.23%` |
+
+Conclusion: terminal-window imitation creates another seat tradeoff and should not be continued by simple reweighting.
+
+### KL-anchored PPO against fixed v5
+
+One final online-credit probe used terminal-only PPO with a teacher KL anchor to the best imitation checkpoint:
+
+```text
+runs/adaptive-fixed-v5-ppo-kl-v1/
+init/teacher: fixed-v5 imitation v5 iter030
+opponent: fixed v5 sample
+reward: terminal only, terminal_reward_scale=1.0
+PPO: 64 envs x 256 steps x 20 iters, epochs=1
+top advantage: stratified 0.25
+teacher KL: 0.05
+outcome aux: 0.01
+lr: 2e-6
+```
+
+Rollout signal was weak:
+
+```text
+iter 1:  Episodes 66, Wins 12, Draws 42
+iter 10: Episodes 80, Wins 12, Draws 51
+iter 20: Episodes 71, Wins 9, Draws 56
+```
+
+256 games/seat seed `80660`:
+
+| model | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PPO-KL-v1 | `9.77%` | `12.89%` | `9.77%` | `63.28%` | `68.75%` |
+
+Conclusion: low-LR PPO + outcome aux + KL anchor still cannot repair the fixed-v5 gate.
+
+### Updated decision
+
+Do not continue these sub-branches:
+
+```text
+pure outcome-head fine-tune
+terminal-window action reweighting
+seat-specific terminal-window action reweighting
+KL-anchored low-LR PPO against fixed v5
+```
+
+The new negative evidence is specific: fixed-v5 action traces contain useful local finish moves, but reweighting them by outcome/window/seat still shifts weakness between rows. The next useful branch should construct actual replacement-outcome/search data:
+
+```text
+state
+legal top-k actions
+base action
+candidate action
+full policy replacement outcome under fixed v5 opponent
+time-to-terminal / draw-risk delta
+seat
+```
+
+Then train a dedicated rerank/finish head or policy correction on accepted replacement rows, rather than globally changing the primitive policy with weighted imitation.

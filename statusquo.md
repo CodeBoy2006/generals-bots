@@ -729,3 +729,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue pure action-distribution imitation as the main route. The next aligned branch should train finish/draw-risk or search-labeled finish actions on v5-vs-v5 states, because the best imitation checkpoint still fails the fixed-v5 gate.
 - **Context:** Winner-biased v4 improved same-seed min only from v3 `12.70%` to `13.48%`. Sample-teacher/KL v5 produced the best artifact so far, `runs/adaptive-fixed-v5-imitation-v5/ckpts/generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx`, at `14.65%` min over 512 games/seat max250. KL-heavy v6 regressed to `12.70%` min. Draw remains the core bottleneck (`~66-70%` at max250).
+
+## [2026-06-17 16:39] Fixed-v5 Finish Reweighting Probe
+- **Changes:** Added U-Net structural warm-start expansion, outcome-head supervision in `adaptive_teacher_imitation.py`, terminal-window action weighting, and p0/p1 action sample weights. Updated README and strategy docs with GPU outcome/terminal-window/PPO probes.
+- **Status:** Completed
+- **Next Steps:** Stop simple outcome/window/seat reweighting for the fixed-v5 gate. Build a replacement-outcome/search dataset with accepted candidate actions, time-to-terminal deltas, draw-risk deltas, and seat labels, then train a dedicated rerank/finish correction head.
+- **Context:** Outcome aux v1 learned (`Out 1.36 -> 0.98`) but 512-row min was only `12.30%`. Terminal-window v1 improved p0 to `17.97%` but collapsed p1 to `8.98%`; p1-weighted v2 regressed versus same-seed base (`12.89%` min vs base `19.14%`). KL-anchored PPO against fixed v5 scored only `9.77%` min. Current best fixed-v5 artifact remains imitation v5 iter030 at `14.65%` min over 512 games/seat max250.

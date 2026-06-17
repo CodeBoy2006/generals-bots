@@ -952,10 +952,9 @@ def load_or_create_adaptive_network(
         or parsed_init_pyramid_context != pyramid_context
     )
     if needs_expansion:
-        if network_arch != "cnn":
-            raise ValueError("Only cnn adaptive checkpoints support structural expansion warm starts")
-        source_network = AdaptivePolicyValueNetwork(
+        source_network = _create_adaptive_network(
             key,
+            parsed_init_network_arch,
             pad_size=pad_size,
             channels=parsed_init_channels,
             input_channels=parsed_init_input_channels,
@@ -971,7 +970,11 @@ def load_or_create_adaptive_network(
             pyramid_context=parsed_init_pyramid_context,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
-        return expand_adaptive_network_channels(network, source_network)
+        if network_arch == "cnn":
+            return expand_adaptive_network_channels(network, source_network)
+        if network_arch == "unet":
+            return expand_adaptive_unet_network(network, source_network)
+        raise ValueError(f"unknown adaptive network architecture: {network_arch}")
     return eqx.tree_deserialise_leaves(path, network)
 
 
@@ -1239,5 +1242,135 @@ def expand_adaptive_network_channels(
             lambda net: net.global_linear2,
             target,
             _copy_linear_prefix(target.global_linear2, source.global_linear2),
+        )
+    return target
+
+
+def expand_adaptive_unet_network(
+    target: AdaptiveUNetPolicyValueNetwork,
+    source: AdaptiveUNetPolicyValueNetwork,
+) -> AdaptiveUNetPolicyValueNetwork:
+    """Initialize a U-Net adaptive network from a structurally smaller U-Net checkpoint."""
+    target_channels = target.dec2.weight.shape[0]
+    source_channels = source.dec2.weight.shape[0]
+    target = eqx.tree_at(lambda net: net.enc1, target, _copy_conv_prefix(target.enc1, source.enc1))
+    target = eqx.tree_at(lambda net: net.enc2, target, _copy_conv_prefix(target.enc2, source.enc2))
+    target = eqx.tree_at(lambda net: net.bottleneck, target, _copy_conv_prefix(target.bottleneck, source.bottleneck))
+    target = eqx.tree_at(lambda net: net.dec1, target, _copy_conv_prefix(target.dec1, source.dec1))
+    target = eqx.tree_at(lambda net: net.dec2, target, _copy_conv_prefix(target.dec2, source.dec2))
+    target = eqx.tree_at(lambda net: net.policy_conv, target, _copy_conv_prefix(target.policy_conv, source.policy_conv))
+    target = eqx.tree_at(
+        lambda net: net.pass_linear,
+        target,
+        _copy_pooled_linear_prefix(target.pass_linear, source.pass_linear, target_channels, source_channels),
+    )
+    target = eqx.tree_at(
+        lambda net: net.value_linear1,
+        target,
+        _copy_pooled_linear_prefix(target.value_linear1, source.value_linear1, target_channels, source_channels),
+    )
+    target = eqx.tree_at(
+        lambda net: net.value_linear2,
+        target,
+        _copy_linear_prefix(target.value_linear2, source.value_linear2),
+    )
+    if target.value_head_sizes:
+        source_size_heads = {
+            size: (linear1, linear2)
+            for size, linear1, linear2 in zip(
+                source.value_head_sizes,
+                source.size_value_linear1,
+                source.size_value_linear2,
+                strict=True,
+            )
+        }
+        target_size_linear1 = []
+        target_size_linear2 = []
+        for size, target_linear1, target_linear2 in zip(
+            target.value_head_sizes,
+            target.size_value_linear1,
+            target.size_value_linear2,
+            strict=True,
+        ):
+            source_linear1, source_linear2 = source_size_heads.get(size, (source.value_linear1, source.value_linear2))
+            target_size_linear1.append(
+                _copy_pooled_linear_prefix(target_linear1, source_linear1, target_channels, source_channels)
+            )
+            target_size_linear2.append(_copy_linear_prefix(target_linear2, source_linear2))
+        target = eqx.tree_at(lambda net: net.size_value_linear1, target, tuple(target_size_linear1))
+        target = eqx.tree_at(lambda net: net.size_value_linear2, target, tuple(target_size_linear2))
+    if target.categorical_value_linear2 is not None and source.categorical_value_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.categorical_value_linear2,
+            target,
+            _copy_linear_prefix(target.categorical_value_linear2, source.categorical_value_linear2),
+        )
+    if target.value_head_sizes and target.categorical_value_linear2 is not None:
+        source_categorical_heads = {}
+        if source.categorical_value_linear2 is not None:
+            source_categorical_heads = {
+                size: linear2
+                for size, linear2 in zip(
+                    source.value_head_sizes,
+                    source.size_categorical_value_linear2,
+                    strict=True,
+                )
+            }
+        target_size_categorical_linear2 = []
+        for size, target_linear2 in zip(
+            target.value_head_sizes,
+            target.size_categorical_value_linear2,
+            strict=True,
+        ):
+            source_linear2 = source_categorical_heads.get(size, source.categorical_value_linear2)
+            if source_linear2 is None:
+                target_size_categorical_linear2.append(target_linear2)
+            else:
+                target_size_categorical_linear2.append(_copy_linear_prefix(target_linear2, source_linear2))
+        target = eqx.tree_at(
+            lambda net: net.size_categorical_value_linear2,
+            target,
+            tuple(target_size_categorical_linear2),
+        )
+    if target.outcome_linear2 is not None and source.outcome_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.outcome_linear2,
+            target,
+            _copy_linear_prefix(target.outcome_linear2, source.outcome_linear2),
+        )
+    if target.strategy_intent_linear2 is not None and source.strategy_intent_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_intent_linear2,
+            target,
+            _copy_linear_prefix(target.strategy_intent_linear2, source.strategy_intent_linear2),
+        )
+    if target.strategy_finish_linear2 is not None and source.strategy_finish_linear2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_finish_linear2,
+            target,
+            _copy_linear_prefix(target.strategy_finish_linear2, source.strategy_finish_linear2),
+        )
+    if target.strategy_q_conv is not None and source.strategy_q_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_q_conv,
+            target,
+            _copy_conv_prefix(target.strategy_q_conv, source.strategy_q_conv),
+        )
+    if target.strategy_q_pass_linear is not None and source.strategy_q_pass_linear is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_q_pass_linear,
+            target,
+            _copy_pooled_linear_prefix(
+                target.strategy_q_pass_linear,
+                source.strategy_q_pass_linear,
+                target_channels,
+                source_channels,
+            ),
+        )
+    if target.strategy_enemy_general_conv is not None and source.strategy_enemy_general_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_enemy_general_conv,
+            target,
+            _copy_conv_prefix(target.strategy_enemy_general_conv, source.strategy_enemy_general_conv),
         )
     return target
