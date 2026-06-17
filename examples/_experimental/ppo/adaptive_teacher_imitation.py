@@ -39,8 +39,10 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
+from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action, policy_network_action
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array, parse_policy_channels
 from generals.core import game
+from generals.core.action import compute_valid_move_mask
 from train import checkpoint_path_for_iteration, prune_old_checkpoints, random_action, stack_learner_actions
 from train_adaptive import split_mixed_env_counts, teacher_obs_from_student_obs
 
@@ -64,6 +66,38 @@ def policy_action_from_logits(logits: jnp.ndarray, key: jnp.ndarray, policy_mode
     return adaptive_index_to_action(index, pad_size)
 
 
+def crop_observation(obs, size: int):
+    """Crop padded adaptive observations before feeding a fixed-size policy."""
+    return obs._replace(
+        armies=obs.armies[:size, :size],
+        generals=obs.generals[:size, :size],
+        cities=obs.cities[:size, :size],
+        mountains=obs.mountains[:size, :size],
+        neutral_cells=obs.neutral_cells[:size, :size],
+        owned_cells=obs.owned_cells[:size, :size],
+        opponent_cells=obs.opponent_cells[:size, :size],
+        fog_cells=obs.fog_cells[:size, :size],
+        structures_in_fog=obs.structures_in_fog[:size, :size],
+    )
+
+
+def fixed_policy_logits_to_adaptive_logits(logits: jnp.ndarray, grid_size: int, pad_size: int) -> jnp.ndarray:
+    """Place fixed-size policy logits onto the padded adaptive action lattice."""
+    planes = logits.reshape(9, grid_size, grid_size)
+    padded_moves = jnp.full((8, pad_size, pad_size), -1.0e9, dtype=logits.dtype)
+    padded_moves = padded_moves.at[:, :grid_size, :grid_size].set(planes[:8])
+    pass_logit = jax.nn.logsumexp(planes[8].reshape(-1))
+    return jnp.concatenate([padded_moves.reshape(-1), pass_logit[None]], axis=0)
+
+
+def fixed_policy_teacher_logits(network, obs, grid_size: int, pad_size: int) -> jnp.ndarray:
+    """Return fixed-policy logits in the adaptive padded action space."""
+    cropped = crop_observation(obs, grid_size)
+    mask = compute_valid_move_mask(cropped.armies, cropped.owned_cells, cropped.mountains)
+    logits, _ = network.logits_value(obs_to_array(cropped), mask)
+    return fixed_policy_logits_to_adaptive_logits(logits, grid_size, pad_size)
+
+
 @eqx.filter_jit
 def collect_teacher_imitation_step(
     states,
@@ -82,6 +116,11 @@ def collect_teacher_imitation_step(
     fog_memory=None,
     fog_memory_enabled=False,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    fixed_teacher_network=None,
+    fixed_teacher_grid_size: int = 0,
+    opponent_policy_network=None,
+    opponent_policy_mode: int = 1,
+    opponent_policy_grid_size: int = 0,
 ):
     """Collect one vectorized teacher-driven imitation step."""
     num_envs = states.armies.shape[0]
@@ -153,12 +192,17 @@ def collect_teacher_imitation_step(
         )
     )(learner_obs_prior, effective_sizes)
 
-    teacher_obs_arr = jax.vmap(lambda obs: teacher_obs_from_student_obs(obs, teacher_input_channels))(obs_arr)
-    teacher_logits = jax.vmap(lambda obs, mask, active: teacher_network.logits_value(obs, mask, active)[0])(
-        teacher_obs_arr,
-        masks,
-        active,
-    )
+    if fixed_teacher_network is not None:
+        teacher_logits = jax.vmap(
+            lambda obs: fixed_policy_teacher_logits(fixed_teacher_network, obs, fixed_teacher_grid_size, pad_size)
+        )(learner_obs_prior)
+    else:
+        teacher_obs_arr = jax.vmap(lambda obs: teacher_obs_from_student_obs(obs, teacher_input_channels))(obs_arr)
+        teacher_logits = jax.vmap(lambda obs, mask, active: teacher_network.logits_value(obs, mask, active)[0])(
+            teacher_obs_arr,
+            masks,
+            active,
+        )
     key, teacher_key, opponent_key = jrandom.split(key, 3)
     teacher_keys = jrandom.split(teacher_key, num_envs)
     learner_actions = jax.vmap(lambda logits, sample_key: policy_action_from_logits(logits, sample_key, teacher_policy_mode_id, pad_size))(
@@ -168,10 +212,20 @@ def collect_teacher_imitation_step(
     teacher_indices = jax.vmap(lambda action: adaptive_action_to_index(action, pad_size))(learner_actions)
 
     opponent_keys = jrandom.split(opponent_key, num_envs)
-    opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
-        opponent_keys,
-        opponent_obs_prior,
-    )
+    if opponent_policy_network is not None:
+        opponent_actions = jax.vmap(
+            lambda k, obs: policy_network_action(
+                opponent_policy_network,
+                k,
+                crop_observation(obs, opponent_policy_grid_size),
+                opponent_policy_mode,
+            )
+        )(opponent_keys, opponent_obs_prior)
+    else:
+        opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
+            opponent_keys,
+            opponent_obs_prior,
+        )
     actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
     new_states, infos = jax.vmap(game.step)(states, actions)
 
@@ -199,7 +253,7 @@ def collect_teacher_imitation_step(
         final_sizes,
         final_scoreboard_history,
         final_fog_memory,
-        (obs_arr, masks, active, learner_actions, teacher_indices, dones, infos),
+        (obs_arr, masks, active, learner_actions, teacher_indices, teacher_logits, dones, infos),
         key,
     )
 
@@ -222,6 +276,11 @@ def collect_teacher_imitation_rollout(
     fog_memory=None,
     fog_memory_enabled=False,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    fixed_teacher_network=None,
+    fixed_teacher_grid_size: int = 0,
+    opponent_policy_network=None,
+    opponent_policy_mode: int = 1,
+    opponent_policy_grid_size: int = 0,
 ):
     """Collect a teacher-driven imitation rollout using a Python loop."""
     step_data = []
@@ -243,6 +302,11 @@ def collect_teacher_imitation_rollout(
             fog_memory,
             fog_memory_enabled,
             teacher_input_channels,
+            fixed_teacher_network,
+            fixed_teacher_grid_size,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
         step_data.append(data)
     return states, effective_sizes, scoreboard_history, fog_memory, jax.tree.map(lambda *xs: jnp.stack(xs), *step_data), key
@@ -269,6 +333,11 @@ def collect_mixed_teacher_imitation_rollout(
     fog_memory_p1=None,
     fog_memory_enabled=False,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    fixed_teacher_network=None,
+    fixed_teacher_grid_size: int = 0,
+    opponent_policy_network=None,
+    opponent_policy_mode: int = 1,
+    opponent_policy_grid_size: int = 0,
 ):
     """Collect and concatenate both learner seats for one imitation update."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -291,6 +360,11 @@ def collect_mixed_teacher_imitation_rollout(
             fog_memory_p0,
             fog_memory_enabled,
             teacher_input_channels,
+            fixed_teacher_network,
+            fixed_teacher_grid_size,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = (
@@ -312,6 +386,11 @@ def collect_mixed_teacher_imitation_rollout(
             fog_memory_p1,
             fog_memory_enabled,
             teacher_input_channels,
+            fixed_teacher_network,
+            fixed_teacher_grid_size,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
@@ -331,7 +410,7 @@ def collect_mixed_teacher_imitation_rollout(
 
 def flatten_imitation_batch(batch):
     """Flatten time/environment axes for imitation training."""
-    obs, masks, active, actions, teacher_indices, dones, infos = batch
+    obs, masks, active, actions, teacher_indices, teacher_logits, dones, infos = batch
     batch_size = obs.shape[0] * obs.shape[1]
     return (
         obs.reshape(batch_size, *obs.shape[2:]),
@@ -339,33 +418,26 @@ def flatten_imitation_batch(batch):
         active.reshape(batch_size, *active.shape[2:]),
         actions.reshape(batch_size, -1),
         teacher_indices.reshape(batch_size),
+        teacher_logits.reshape(batch_size, teacher_logits.shape[-1]),
     )
 
 
 @eqx.filter_jit
 def train_imitation_minibatch(
     network,
-    teacher_network,
     opt_state,
     minibatch,
     optimizer,
-    teacher_input_channels: int,
     kl_weight: float,
     action_ce_weight: float,
     entropy_weight: float,
     temperature: float,
 ):
     """Train one shuffled imitation minibatch."""
-    obs, masks, active, actions, teacher_indices = minibatch
+    obs, masks, active, actions, teacher_indices, teacher_logits = minibatch
 
     def loss_fn(net):
         student_logits = jax.vmap(lambda o, m, ac: net.logits_value(o, m, ac)[0])(obs, masks, active)
-        teacher_obs = jax.vmap(lambda o: teacher_obs_from_student_obs(o, teacher_input_channels))(obs)
-        teacher_logits = jax.vmap(lambda o, m, ac: teacher_network.logits_value(o, m, ac)[0])(
-            teacher_obs,
-            masks,
-            active,
-        )
         teacher_log_probs = jax.lax.stop_gradient(jax.nn.log_softmax(teacher_logits / temperature, axis=-1))
         teacher_probs = jax.lax.stop_gradient(jax.nn.softmax(teacher_logits / temperature, axis=-1))
         student_log_probs_for_kl = jax.nn.log_softmax(student_logits / temperature, axis=-1)
@@ -392,14 +464,12 @@ def train_imitation_minibatch(
 
 def train_imitation_epoch(
     network,
-    teacher_network,
     opt_state,
     batch,
     optimizer,
     key,
     num_epochs,
     minibatch_size,
-    teacher_input_channels,
     kl_weight,
     action_ce_weight,
     entropy_weight,
@@ -424,11 +494,9 @@ def train_imitation_epoch(
             minibatch = tuple(array[start:end] for array in shuffled)
             network, opt_state, loss, metrics = train_imitation_minibatch(
                 network,
-                teacher_network,
                 opt_state,
                 minibatch,
                 optimizer,
-                teacher_input_channels,
                 kl_weight,
                 action_ce_weight,
                 entropy_weight,
@@ -456,6 +524,10 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=4096)
     parser.add_argument("--truncation", type=int, default=750)
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="expander")
+    parser.add_argument("--opponent-policy-path", default=None)
+    parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--opponent-channels", default=None)
+    parser.add_argument("--opponent-input-channels", type=int, default=9)
     parser.add_argument("--teacher-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
@@ -476,6 +548,8 @@ def parse_args():
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--value-head-sizes", default=None)
+    parser.add_argument("--init-value-head-sizes", default=None)
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--init-value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
@@ -485,12 +559,15 @@ def parse_args():
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--init-outcome-head", action="store_true")
-    parser.add_argument("--teacher-model-path", required=True)
+    parser.add_argument("--teacher-model-path", default=None)
     parser.add_argument("--teacher-network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--teacher-channels", default=None)
     parser.add_argument("--teacher-input-channels", type=int, default=None)
     parser.add_argument("--teacher-global-context", action="store_true")
     parser.add_argument("--teacher-scoreboard-history", action="store_true")
+    parser.add_argument("--fixed-teacher-model-path", default=None)
+    parser.add_argument("--fixed-teacher-channels", default=None)
+    parser.add_argument("--fixed-teacher-input-channels", type=int, default=9)
     parser.add_argument("--kl-weight", type=float, default=1.0)
     parser.add_argument("--action-ce-weight", type=float, default=3.0)
     parser.add_argument("--entropy-weight", type=float, default=0.0)
@@ -509,6 +586,20 @@ def parse_args():
         parser.error(str(exc))
     try:
         args.grid_size_weights = parse_grid_size_weights(args.grid_size_weights, args.grid_sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.value_head_sizes = (
+            parse_grid_sizes(args.value_head_sizes) if args.value_head_sizes is not None else args.grid_sizes
+        )
+        args.init_value_head_sizes = (
+            parse_grid_sizes(args.init_value_head_sizes) if args.init_value_head_sizes is not None else args.grid_sizes
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.fixed_teacher_channels = parse_policy_channels(args.fixed_teacher_channels)
+        args.opponent_channels = parse_policy_channels(args.opponent_channels)
     except ValueError as exc:
         parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
@@ -531,6 +622,16 @@ def parse_args():
         parser.error("--init-input-channels must be positive")
     if args.teacher_input_channels is not None and args.teacher_input_channels <= 0:
         parser.error("--teacher-input-channels must be positive")
+    if args.fixed_teacher_input_channels <= 0:
+        parser.error("--fixed-teacher-input-channels must be positive")
+    if args.opponent_input_channels <= 0:
+        parser.error("--opponent-input-channels must be positive")
+    if (args.teacher_model_path is None) == (args.fixed_teacher_model_path is None):
+        parser.error("provide exactly one of --teacher-model-path or --fixed-teacher-model-path")
+    if args.fixed_teacher_model_path is not None and len(args.grid_sizes) != 1:
+        parser.error("--fixed-teacher-model-path requires exactly one --grid-sizes value")
+    if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
+        parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.kl_weight < 0.0 or args.action_ce_weight < 0.0 or args.entropy_weight < 0.0:
         parser.error("loss weights must be non-negative")
     if args.kl_weight == 0.0 and args.action_ce_weight == 0.0:
@@ -568,11 +669,13 @@ def main():
     student_global_context = args.global_context or args.scoreboard_history
     teacher_global_context = args.teacher_global_context or args.teacher_scoreboard_history
     input_channels = adaptive_input_channel_count(student_global_context, args.scoreboard_history, args.fog_memory)
-    teacher_input_channels = (
-        args.teacher_input_channels
-        if args.teacher_input_channels is not None
-        else adaptive_input_channel_count(teacher_global_context, args.teacher_scoreboard_history, False)
-    )
+    teacher_input_channels = ADAPTIVE_INPUT_CHANNELS
+    if args.teacher_model_path is not None:
+        teacher_input_channels = (
+            args.teacher_input_channels
+            if args.teacher_input_channels is not None
+            else adaptive_input_channel_count(teacher_global_context, args.teacher_scoreboard_history, False)
+        )
     init_input_channels = args.init_input_channels
     if init_input_channels is None and args.init_model_path is not None and student_global_context and not args.init_global_context:
         init_input_channels = ADAPTIVE_INPUT_CHANNELS
@@ -595,8 +698,16 @@ def main():
     print(f"Student:       arch={args.network_arch} channels={args.channels or 'default'} inputs={input_channels}")
     if args.init_model_path is not None:
         print(f"Warm start:    {args.init_model_path}")
-    print(f"Teacher:       {args.teacher_model_path} arch={args.teacher_network_arch} inputs={teacher_input_channels}")
-    print(f"Opponent:      {args.opponent}")
+    if args.teacher_model_path is not None:
+        print(f"Teacher:       {args.teacher_model_path} arch={args.teacher_network_arch} inputs={teacher_input_channels}")
+    else:
+        print(f"Teacher:       fixed policy {args.fixed_teacher_model_path}")
+        print(f"Teacher arch:  PolicyValueNetwork channels={args.fixed_teacher_channels} inputs={args.fixed_teacher_input_channels}")
+    if args.opponent_policy_path is None:
+        print(f"Opponent:      {args.opponent}")
+    else:
+        print(f"Opponent:      fixed policy {args.opponent_policy_path}")
+        print(f"Opponent mode: {args.opponent_policy_mode}")
     print(f"Teacher mode:  {args.teacher_policy_mode}")
     print(f"Iterations:    {args.num_iterations} x {args.num_steps} steps x {args.num_epochs} epochs")
     print(f"Minibatch:     {args.minibatch_size or args.num_envs * args.num_steps}")
@@ -623,8 +734,8 @@ def main():
         init_channels=args.init_channels,
         input_channels=input_channels,
         init_input_channels=init_input_channels,
-        value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
-        init_value_head_sizes=args.grid_sizes if args.init_value_heads == "per-size" else (),
+        value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+        init_value_head_sizes=args.init_value_head_sizes if args.init_value_heads == "per-size" else (),
         value_bins=value_bins,
         init_value_bins=init_value_bins,
         value_min=args.value_min,
@@ -637,19 +748,42 @@ def main():
         network_arch=args.network_arch,
         init_network_arch=args.init_network_arch,
     )
-    teacher_network = load_or_create_adaptive_network(
-        teacher_key,
-        pad_size=args.pad_to,
-        init_model_path=args.teacher_model_path,
-        channels=args.teacher_channels,
-        input_channels=teacher_input_channels,
-        init_input_channels=teacher_input_channels,
-        global_context=teacher_global_context,
-        init_global_context=teacher_global_context,
-        network_arch=args.teacher_network_arch,
-        init_network_arch=args.teacher_network_arch,
-    )
-    teacher_input_channels = adaptive_network_input_channels(teacher_network)
+    teacher_network = None
+    fixed_teacher_network = None
+    fixed_teacher_grid_size = args.grid_sizes[0]
+    if args.teacher_model_path is not None:
+        teacher_network = load_or_create_adaptive_network(
+            teacher_key,
+            pad_size=args.pad_to,
+            init_model_path=args.teacher_model_path,
+            channels=args.teacher_channels,
+            input_channels=teacher_input_channels,
+            init_input_channels=teacher_input_channels,
+            global_context=teacher_global_context,
+            init_global_context=teacher_global_context,
+            network_arch=args.teacher_network_arch,
+            init_network_arch=args.teacher_network_arch,
+        )
+        teacher_input_channels = adaptive_network_input_channels(teacher_network)
+    else:
+        fixed_teacher_network = PolicyValueNetwork(
+            teacher_key,
+            grid_size=fixed_teacher_grid_size,
+            channels=args.fixed_teacher_channels,
+            input_channels=args.fixed_teacher_input_channels,
+        )
+        fixed_teacher_network = eqx.tree_deserialise_leaves(args.fixed_teacher_model_path, fixed_teacher_network)
+    opponent_policy_network = None
+    opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
+    opponent_policy_grid_size = args.grid_sizes[0]
+    if args.opponent_policy_path is not None:
+        opponent_policy_network = PolicyValueNetwork(
+            teacher_key,
+            grid_size=opponent_policy_grid_size,
+            channels=args.opponent_channels,
+            input_channels=args.opponent_input_channels,
+        )
+        opponent_policy_network = eqx.tree_deserialise_leaves(args.opponent_policy_path, opponent_policy_network)
 
     optimizer = optax.adamw(args.lr, weight_decay=args.weight_decay)
     opt_state = optimizer.init(eqx.filter(student_network, eqx.is_inexact_array))
@@ -717,19 +851,22 @@ def main():
             fog_memory_p1,
             args.fog_memory,
             teacher_input_channels,
+            fixed_teacher_network,
+            fixed_teacher_grid_size,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
         student_network, opt_state, loss, metrics, key = train_imitation_epoch(
             student_network,
-            teacher_network,
             opt_state,
             batch,
             optimizer,
             train_key,
             args.num_epochs,
             args.minibatch_size,
-            teacher_input_channels,
             args.kl_weight,
             args.action_ce_weight,
             args.entropy_weight,
@@ -745,7 +882,7 @@ def main():
             prune_old_checkpoints(checkpoint_paths, args.keep_checkpoints)
 
         if iteration == 1 or iteration % 10 == 0 or iteration == args.num_iterations:
-            _, _, _, _, teacher_indices, dones, infos = batch
+            _, _, _, _, teacher_indices, _, dones, infos = batch
             episodes = int(jnp.sum(dones))
             wins = int(jnp.sum(dones & (infos.winner >= 0)))
             elapsed = time.time() - t0

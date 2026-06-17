@@ -42,9 +42,10 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, hl_gauss_value_loss, load_or_create_adaptive_network
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
+from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
 from generals.core import game
 from generals.core.rewards import composite_reward_fn
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from train import (
     apply_terminal_reward,
     checkpoint_path_for_iteration,
@@ -211,6 +212,21 @@ def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
     return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
+def crop_observation(obs, size: int):
+    """Crop padded adaptive observations before feeding a fixed-size policy."""
+    return obs._replace(
+        armies=obs.armies[:size, :size],
+        generals=obs.generals[:size, :size],
+        cities=obs.cities[:size, :size],
+        mountains=obs.mountains[:size, :size],
+        neutral_cells=obs.neutral_cells[:size, :size],
+        owned_cells=obs.owned_cells[:size, :size],
+        opponent_cells=obs.opponent_cells[:size, :size],
+        fog_cells=obs.fog_cells[:size, :size],
+        structures_in_fog=obs.structures_in_fog[:size, :size],
+    )
+
+
 @eqx.filter_jit
 def rollout_step(
     states,
@@ -233,6 +249,9 @@ def rollout_step(
     teacher_network=None,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     teacher_rollout_actions: bool = False,
+    opponent_policy_network=None,
+    opponent_policy_mode: int = 1,
+    opponent_policy_grid_size: int = 0,
 ):
     """Collect one vectorized adaptive PPO rollout step."""
     num_envs = states.armies.shape[0]
@@ -348,10 +367,20 @@ def rollout_step(
 
     key, opponent_key = jrandom.split(key)
     opponent_keys = jrandom.split(opponent_key, num_envs)
-    opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
-        opponent_keys,
-        opponent_obs_prior,
-    )
+    if opponent_policy_network is not None:
+        opponent_actions = jax.vmap(
+            lambda k, obs: policy_network_action(
+                opponent_policy_network,
+                k,
+                crop_observation(obs, opponent_policy_grid_size),
+                opponent_policy_mode,
+            )
+        )(opponent_keys, opponent_obs_prior)
+    else:
+        opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
+            opponent_keys,
+            opponent_obs_prior,
+        )
 
     actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
     new_states, infos = jax.vmap(game.step)(states, actions)
@@ -415,6 +444,9 @@ def collect_rollout(
     teacher_network=None,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     teacher_rollout_actions: bool = False,
+    opponent_policy_network=None,
+    opponent_policy_mode: int = 1,
+    opponent_policy_grid_size: int = 0,
 ):
     """Collect a Python-loop rollout, stacking step data on axis 0."""
     step_data = []
@@ -440,6 +472,9 @@ def collect_rollout(
             teacher_network,
             teacher_input_channels,
             teacher_rollout_actions,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
         step_data.append(data)
     rollout_data = jax.tree.map(lambda *xs: jnp.stack(xs), *step_data)
@@ -471,6 +506,9 @@ def collect_mixed_rollout(
     teacher_network=None,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     teacher_rollout_actions: bool = False,
+    opponent_policy_network=None,
+    opponent_policy_mode: int = 1,
+    opponent_policy_grid_size: int = 0,
 ):
     """Collect P0 and P1 learner trajectories, then combine them for one PPO update."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -496,6 +534,9 @@ def collect_mixed_rollout(
         teacher_network,
         teacher_input_channels,
         teacher_rollout_actions,
+        opponent_policy_network,
+        opponent_policy_mode,
+        opponent_policy_grid_size,
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_rollout(
         states_p1,
@@ -519,6 +560,9 @@ def collect_mixed_rollout(
         teacher_network,
         teacher_input_channels,
         teacher_rollout_actions,
+        opponent_policy_network,
+        opponent_policy_mode,
+        opponent_policy_grid_size,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
@@ -836,6 +880,10 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=4096)
     parser.add_argument("--truncation", type=int, default=750)
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="random")
+    parser.add_argument("--opponent-policy-path", default=None)
+    parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--opponent-channels", default=None)
+    parser.add_argument("--opponent-input-channels", type=int, default=9)
     parser.add_argument("--learner-player", choices=("0", "1", "alternate", "mixed"), default="0")
     parser.add_argument("--reward-mode", choices=REWARD_MODE_NAMES, default="composite")
     parser.add_argument("--terminal-reward-scale", type=float, default=0.0)
@@ -865,6 +913,8 @@ def parse_args():
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--value-head-sizes", default=None)
+    parser.add_argument("--init-value-head-sizes", default=None)
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--init-value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
@@ -900,6 +950,19 @@ def parse_args():
         args.grid_size_weights = parse_grid_size_weights(args.grid_size_weights, args.grid_sizes)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        args.value_head_sizes = (
+            parse_grid_sizes(args.value_head_sizes) if args.value_head_sizes is not None else args.grid_sizes
+        )
+        args.init_value_head_sizes = (
+            parse_grid_sizes(args.init_value_head_sizes) if args.init_value_head_sizes is not None else args.grid_sizes
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.opponent_channels = parse_policy_channels(args.opponent_channels)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_envs <= 0:
@@ -928,6 +991,10 @@ def parse_args():
         parser.error("--eval-ema requires --ema-decay > 0")
     if args.pool_size < args.num_envs:
         parser.error("--pool-size must be at least num_envs")
+    if args.opponent_input_channels <= 0:
+        parser.error("--opponent-input-channels must be positive")
+    if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
+        parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.truncation <= 0:
         parser.error("--truncation must be positive")
     if args.terminal_reward_scale < 0.0:
@@ -994,7 +1061,14 @@ def main():
     else:
         learner_label = f"player {args.learner_player}"
     print(f"Learner:       {learner_label}")
-    print(f"Opponent:      {args.opponent}")
+    if args.opponent_policy_path is None:
+        print(f"Opponent:      {args.opponent}")
+    else:
+        print("Opponent:      policy checkpoint")
+        print(f"Opp model:     {args.opponent_policy_path}")
+        print(f"Opp mode:      {args.opponent_policy_mode}")
+        print(f"Opp channels:  {args.opponent_channels}")
+        print(f"Opp inputs:    {args.opponent_input_channels}")
     print(f"Reward mode:   {args.reward_mode}")
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Network arch:  {args.network_arch}")
@@ -1042,8 +1116,10 @@ def main():
         print("Fog memory:    explored/enemy/city/general planes")
     if args.value_heads != "shared":
         print(f"Value heads:   {args.value_heads}")
+        print(f"Value sizes:   {','.join(str(size) for size in args.value_head_sizes)}")
         if args.init_model_path is not None:
             print(f"Init values:   {args.init_value_heads}")
+            print(f"Init sizes:    {','.join(str(size) for size in args.init_value_head_sizes)}")
     if args.value_loss == "hl-gauss":
         print(
             "Value loss:    "
@@ -1090,8 +1166,8 @@ def main():
         init_channels=args.init_channels,
         input_channels=input_channels,
         init_input_channels=init_input_channels,
-        value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
-        init_value_head_sizes=args.grid_sizes if args.init_value_heads == "per-size" else (),
+        value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+        init_value_head_sizes=args.init_value_head_sizes if args.init_value_heads == "per-size" else (),
         value_bins=value_bins,
         init_value_bins=init_value_bins,
         value_min=args.value_min,
@@ -1131,6 +1207,17 @@ def main():
             init_network_arch=args.teacher_network_arch,
         )
         teacher_input_channels = adaptive_network_input_channels(teacher_network)
+    opponent_policy_network = None
+    opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
+    opponent_policy_grid_size = args.grid_sizes[0]
+    if args.opponent_policy_path is not None:
+        opponent_policy_network = PolicyValueNetwork(
+            net_key,
+            grid_size=opponent_policy_grid_size,
+            channels=args.opponent_channels,
+            input_channels=args.opponent_input_channels,
+        )
+        opponent_policy_network = eqx.tree_deserialise_leaves(args.opponent_policy_path, opponent_policy_network)
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
     ema_network = network if args.ema_decay > 0.0 else None
@@ -1197,6 +1284,9 @@ def main():
             teacher_network,
             teacher_input_channels,
             args.teacher_rollout_actions,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
         states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, _, _ = rollout_step(
             states_p1,
@@ -1219,6 +1309,9 @@ def main():
             teacher_network,
             teacher_input_channels,
             args.teacher_rollout_actions,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
@@ -1245,6 +1338,9 @@ def main():
             teacher_network,
             teacher_input_channels,
             args.teacher_rollout_actions,
+            opponent_policy_network,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
         )
         jax.block_until_ready(states)
 
@@ -1289,6 +1385,9 @@ def main():
                 teacher_network,
                 teacher_input_channels,
                 args.teacher_rollout_actions,
+                opponent_policy_network,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
             )
             jax.block_until_ready(states_p0)
             jax.block_until_ready(states_p1)
@@ -1316,6 +1415,9 @@ def main():
                 teacher_network,
                 teacher_input_channels,
                 args.teacher_rollout_actions,
+                opponent_policy_network,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
             )
             jax.block_until_ready(states)
         obs, masks, active, actions, logprobs, values, rewards, dones, infos = rollout_data

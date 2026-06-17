@@ -37,7 +37,8 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
+from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from generals.core import game
 from train import random_action, stack_learner_actions
 
@@ -98,6 +99,21 @@ def strategy_q_rerank_logits(
     legal_mean = jnp.sum(jnp.where(legal, action_q_values, 0.0), axis=-1, keepdims=True) / legal_count
     q_bias = jnp.where(legal, action_q_values - legal_mean, 0.0)
     return policy_logits + scale * q_bias
+
+
+def crop_observation(obs, size: int):
+    """Crop padded adaptive observations before feeding a fixed-size policy."""
+    return obs._replace(
+        armies=obs.armies[:size, :size],
+        generals=obs.generals[:size, :size],
+        cities=obs.cities[:size, :size],
+        mountains=obs.mountains[:size, :size],
+        neutral_cells=obs.neutral_cells[:size, :size],
+        owned_cells=obs.owned_cells[:size, :size],
+        opponent_cells=obs.opponent_cells[:size, :size],
+        fog_cells=obs.fog_cells[:size, :size],
+        structures_in_fog=obs.structures_in_fog[:size, :size],
+    )
 
 
 def summarize_row(info, grid_size: int, policy_player: int, num_games: int) -> AdaptiveEvalRow:
@@ -248,6 +264,138 @@ def evaluate_batch(
     return jax.vmap(game.get_info)(states)
 
 
+@eqx.filter_jit
+def evaluate_policy_opponent_batch(
+    network,
+    opponent_network,
+    states,
+    effective_size,
+    key,
+    max_steps,
+    policy_mode,
+    policy_player,
+    pad_size,
+    opponent_policy_mode,
+    global_context=False,
+    scoreboard_history=False,
+    fog_memory=False,
+    strategy_q_rerank_scale=0.0,
+):
+    """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
+    num_envs = states.armies.shape[0]
+    effective_sizes = jnp.full((num_envs,), effective_size, dtype=jnp.int32)
+    initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
+    initial_fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
+
+    def body(carry, _):
+        states, key, history, memory = carry
+        obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
+        obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
+        policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
+        opponent_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
+        if fog_memory:
+            current_memory = jax.vmap(update_adaptive_fog_memory)(memory, policy_obs)
+        else:
+            current_memory = memory
+
+        if scoreboard_history:
+            current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
+                policy_obs,
+                effective_sizes,
+            )
+            history_context = adaptive_scoreboard_history_context(history, current_scoreboard)
+            if fog_memory:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size, row_history, row_memory: adaptive_obs_to_array(
+                        obs,
+                        size,
+                        pad_size,
+                        include_global_context=True,
+                        scoreboard_history=row_history,
+                        fog_memory=row_memory,
+                    )
+                )(
+                    policy_obs,
+                    effective_sizes,
+                    history_context,
+                    current_memory,
+                )
+            else:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size, row_history: adaptive_obs_to_array(
+                        obs,
+                        size,
+                        pad_size,
+                        include_global_context=True,
+                        scoreboard_history=row_history,
+                    )
+                )(
+                    policy_obs,
+                    effective_sizes,
+                    history_context,
+                )
+        else:
+            current_scoreboard = history
+            if fog_memory:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size, row_memory: adaptive_obs_to_array(
+                        obs,
+                        size,
+                        pad_size,
+                        include_global_context=global_context,
+                        fog_memory=row_memory,
+                    )
+                )(
+                    policy_obs,
+                    effective_sizes,
+                    current_memory,
+                )
+            else:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+                )(
+                    policy_obs,
+                    effective_sizes,
+                )
+        masks = jax.vmap(
+            lambda obs, size: compute_adaptive_valid_move_mask(
+                obs.armies,
+                obs.owned_cells,
+                obs.mountains,
+                size,
+                pad_size,
+            )
+        )(policy_obs, effective_sizes)
+
+        key, policy_key, opponent_key = jrandom.split(key, 3)
+        policy_keys = jrandom.split(policy_key, num_envs)
+        opponent_keys = jrandom.split(opponent_key, num_envs)
+        policy_actions = jax.vmap(
+            lambda o, m, a, k: _policy_action(network, o, m, a, k, policy_mode, strategy_q_rerank_scale)
+        )(
+            obs_arr,
+            masks,
+            active,
+            policy_keys,
+        )
+        opponent_actions = jax.vmap(
+            lambda k, obs: policy_network_action(opponent_network, k, crop_observation(obs, effective_size), opponent_policy_mode)
+        )(opponent_keys, opponent_obs)
+        actions = stack_learner_actions(policy_actions, opponent_actions, policy_player)
+        new_states, infos = jax.vmap(game.step)(states, actions)
+        keep_old = jax.vmap(game.get_info)(states).is_done
+        final_states = jax.tree.map(
+            lambda old, new: jnp.where(keep_old.reshape(num_envs, *([1] * (old.ndim - 1))), old, new),
+            states,
+            new_states,
+        )
+        final_memory = current_memory
+        return (final_states, key, current_scoreboard, final_memory), infos
+
+    (states, key, _, _), _ = jax.lax.scan(body, (states, key, initial_history, initial_fog_memory), None, length=max_steps)
+    return jax.vmap(game.get_info)(states)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate an adaptive multisize PPO checkpoint.")
     parser.add_argument("model_path")
@@ -256,6 +404,10 @@ def parse_args():
     parser.add_argument("--num-games", type=int, default=1024)
     parser.add_argument("--max-steps", type=int, default=750)
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="expander")
+    parser.add_argument("--opponent-policy-path", default=None)
+    parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--opponent-channels", default=None)
+    parser.add_argument("--opponent-input-channels", type=int, default=9)
     parser.add_argument("--policy-mode", choices=("greedy", "sample"), default="sample")
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
@@ -273,6 +425,7 @@ def parse_args():
     parser.add_argument("--context-residual", action="store_true")
     parser.add_argument("--pyramid-context", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--value-head-sizes", default=None)
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
     parser.add_argument("--value-min", type=float, default=-1.0)
@@ -290,12 +443,26 @@ def parse_args():
         args.grid_sizes = parse_grid_sizes(args.grid_sizes)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        args.value_head_sizes = (
+            parse_grid_sizes(args.value_head_sizes) if args.value_head_sizes is not None else args.grid_sizes
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_games <= 0:
         parser.error("--num-games must be positive")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
+    if args.opponent_input_channels <= 0:
+        parser.error("--opponent-input-channels must be positive")
+    if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
+        parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
+    try:
+        args.opponent_channels = parse_policy_channels(args.opponent_channels)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
         parser.error("mountain density must satisfy 0 <= min <= max <= 1")
     if not (2 <= args.num_cities_min <= args.num_cities_max):
@@ -342,7 +509,7 @@ def main():
         channels=args.channels,
         input_channels=input_channels,
         init_input_channels=input_channels,
-        value_head_sizes=args.grid_sizes if args.value_heads == "per-size" else (),
+        value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
         value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
         value_min=args.value_min,
         value_max=args.value_max,
@@ -358,15 +525,32 @@ def main():
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
     )
+    opponent_network = None
+    if args.opponent_policy_path is not None:
+        opponent_network = PolicyValueNetwork(
+            net_key,
+            grid_size=args.grid_sizes[0],
+            channels=args.opponent_channels,
+            input_channels=args.opponent_input_channels,
+        )
+        opponent_network = eqx.tree_deserialise_leaves(args.opponent_policy_path, opponent_network)
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
+    opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
     rows = []
 
     print("Adaptive policy evaluation")
     print(f"Model:       {args.model_path}")
     print(f"Device:      {jax.devices()[0]}")
     print(f"Grid sizes:  {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
-    print(f"Opponent:    {args.opponent}")
+    if opponent_network is None:
+        print(f"Opponent:    {args.opponent}")
+    else:
+        print("Opponent:    policy checkpoint")
+        print(f"Opp model:   {args.opponent_policy_path}")
+        print(f"Opp mode:    {args.opponent_policy_mode}")
+        print(f"Opp channels:{args.opponent_channels}")
+        print(f"Opp inputs:  {args.opponent_input_channels}")
     print(f"Mode:        {args.policy_mode}")
     print(f"Arch:        {args.network_arch}")
     if args.value_heads != "shared":
@@ -411,21 +595,39 @@ def main():
             )
             states = pool.states
             t0 = time.time()
-            info = evaluate_batch(
-                network,
-                states,
-                grid_size,
-                eval_key,
-                args.max_steps,
-                opponent_id,
-                policy_mode,
-                policy_player,
-                args.pad_to,
-                network_global_context,
-                args.scoreboard_history,
-                args.fog_memory,
-                args.strategy_q_rerank_scale,
-            )
+            if opponent_network is None:
+                info = evaluate_batch(
+                    network,
+                    states,
+                    grid_size,
+                    eval_key,
+                    args.max_steps,
+                    opponent_id,
+                    policy_mode,
+                    policy_player,
+                    args.pad_to,
+                    network_global_context,
+                    args.scoreboard_history,
+                    args.fog_memory,
+                    args.strategy_q_rerank_scale,
+                )
+            else:
+                info = evaluate_policy_opponent_batch(
+                    network,
+                    opponent_network,
+                    states,
+                    grid_size,
+                    eval_key,
+                    args.max_steps,
+                    policy_mode,
+                    policy_player,
+                    args.pad_to,
+                    opponent_policy_mode,
+                    network_global_context,
+                    args.scoreboard_history,
+                    args.fog_memory,
+                    args.strategy_q_rerank_scale,
+                )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
             row = AdaptiveEvalRow(
@@ -447,6 +649,11 @@ def main():
         "grid_sizes": list(args.grid_sizes),
         "pad_to": args.pad_to,
         "opponent": args.opponent,
+        "opponent_policy_path": args.opponent_policy_path,
+        "opponent_policy_mode": args.opponent_policy_mode,
+        "opponent_channels": args.opponent_channels,
+        "opponent_input_channels": args.opponent_input_channels,
+        "value_head_sizes": list(args.value_head_sizes) if args.value_heads == "per-size" else [],
         "policy_mode": args.policy_mode,
         "num_games": args.num_games,
         "max_steps": args.max_steps,

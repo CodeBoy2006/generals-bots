@@ -3958,3 +3958,152 @@ Next direction:
 2. Use stratified top-advantage only when paired with a stronger trust region, row-wise KL cap, or row-balanced replay.
 3. Prefer the next hard shift: belief/finish auxiliary heads trained from full state, or search-to-strategy supervision that teaches finish/draw risk rather than direct policy replay.
 ```
+
+## 2026-06-17 Adaptive U-Net vs Fixed 8x8 v5 Gate
+
+### Evaluation support
+
+Added policy-checkpoint opponent support to the adaptive evaluator and trainer:
+
+```text
+evaluate_adaptive_policy.py --opponent-policy-path <fixed-policy.eqx>
+train_adaptive.py --opponent-policy-path <fixed-policy.eqx>
+adaptive_teacher_imitation.py --fixed-teacher-model-path <fixed-policy.eqx>
+adaptive_teacher_imitation.py --opponent-policy-path <fixed-policy.eqx>
+```
+
+Because adaptive checkpoints may store per-size value heads for `8,12,16` while a v5 gate evaluates only `8`, the scripts also accept:
+
+```text
+--value-head-sizes 8,12,16
+--init-value-head-sizes 8,12,16
+```
+
+Fixed 8x8 policy logits use `9*8*8` actions; adaptive policy logits use `8*pad*pad + 1` actions. The fixed-teacher imitation path maps the first 8 move planes into the padded adaptive lattice and combines the fixed pass plane with `logsumexp` into the adaptive global pass logit.
+
+### Current U-Net v4 against fixed v5
+
+512 games/seat on seed `79220`, `max_steps=250`, fixed v5 sample opponent:
+
+| model | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| U-Net PPO v4 | `10.55%` | `9.57%` | `9.57%` | `52.34%` | `57.42%` |
+
+Conclusion: v4 is an Expander specialist, not a v5 beater. The explicit 8x8-vs-v5 requirement is still far from satisfied.
+
+### Direct PPO against fixed v5
+
+Run:
+
+```text
+runs/adaptive-unet-v5br-v1/
+init: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+opponent: fixed generals-ppo-8x8-expander-gpu-v5.eqx sample
+rollout: 128 envs x 256 steps x 40 iters
+reward: composite + terminal_reward_scale=1.0
+lr=1e-5
+```
+
+Training stayed in the same weak band:
+
+```text
+iter 1:  Loss 3.8458, Episodes 138, Wins 15, Draws 62
+iter 20: Loss 3.4732, Episodes 153, Wins 9,  Draws 95
+iter 40: Loss 3.4294, Episodes 153, Wins 10, Draws 98
+```
+
+512 games/seat on seed `79280`, `max_steps=250`:
+
+| model | 8p0 | 8p1 | min |
+| --- | ---: | ---: | ---: |
+| U-Net PPO v4 | `11.33%` | `7.42%` | `7.42%` |
+| v5br-v1 final | `10.55%` | `7.62%` | `7.62%` |
+
+128-row checkpoint sweep on seed `79300` found no useful intermediate checkpoint; min stayed around `9.38-10.94%`.
+
+Conclusion: direct PPO from a v5-weak U-Net policy does not create a v5 best response. It mostly moves losses/draws around.
+
+### Fixed-v5 imitation bootstrap
+
+`adaptive_teacher_imitation.py` now supports fixed 8x8 policy teachers. v1 used fixed v5 as teacher but Expander as rollout opponent:
+
+```text
+runs/adaptive-fixed-v5-imitation-v1/
+teacher: fixed v5 greedy labels + full-logit KL
+opponent: Expander
+init: U-Net PPO v4
+rollout/update: 128 envs x 128 steps x 40 iters x 3 epochs
+loss: KL 1.0 + CE 5.0
+```
+
+Training reached `82.1%` action accuracy. It improved decisive behavior against v5 but produced many 250-step draws:
+
+| model | max steps | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| fixed-v5 imitation v1 | 250 | `11.52%` | `11.33%` | `11.33%` | `74.22%` | `73.44%` |
+| fixed-v5 imitation v1 | 750 | `48.05%` | `42.77%` | `42.77%` | `2.34%` | `2.15%` |
+
+Conclusion: v1 learned a slow v5-like policy. It can survive to near-decisive v5-vs-v5 strength by 750 steps, but fails the 250-step gate because it finishes too slowly.
+
+v2 changed the data distribution so both teacher and opponent are fixed v5:
+
+```text
+runs/adaptive-fixed-v5-imitation-v2/
+teacher: fixed v5 greedy labels + full-logit KL
+opponent: fixed v5 sample
+init: U-Net PPO v4
+rollout/update: 128 envs x 128 steps x 40 iters x 3 epochs
+loss: KL 1.0 + CE 5.0
+```
+
+Training reached `83.1%` action accuracy and improved the 250-step gate:
+
+| model | max steps | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| fixed-v5 imitation v2 | 250 | `15.23%` | `12.89%` | `12.89%` | `64.65%` | `68.16%` |
+| fixed-v5 imitation v2 | 750 | `45.51%` | `40.43%` | `40.43%` | `0.39%` | `1.95%` |
+
+v3 continued from v2 with longer self-distribution imitation:
+
+```text
+runs/adaptive-fixed-v5-imitation-v3/
+init: fixed-v5 imitation v2
+rollout/update: 128 envs x 128 steps x 80 iters x 4 epochs
+loss: KL 1.0 + CE 8.0
+```
+
+Training reached only `85.9%` action accuracy. Final 512 games/seat on seed `79740`, `max_steps=250`:
+
+| model | 8p0 | 8p1 | min | p0 decisive | p1 decisive | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fixed-v5 imitation v3 | `16.02%` | `13.48%` | `13.48%` | `51.90%` | `48.25%` | `69.14%` | `72.07%` |
+
+Intermediate checkpoints did not beat final in a 128-row sweep.
+
+### Finish fine-tunes
+
+Two short PPO finish fine-tunes with `truncation_reward_scale=0.05` were tested:
+
+| model | init | 512-row max250 result |
+| --- | --- | --- |
+| `adaptive-unet-v5finish-v1` | imitation v1 | `11.52%` min, worse than same-seed imitation v1 `12.50%` |
+| `adaptive-unet-v5finish-v2` | imitation v2 | `12.11%` min, worse than imitation v2's best observed `12.89%` |
+
+Conclusion: the fixed-v5 imitation path is useful bootstrap infrastructure, but the current clone is still too slow and inaccurate to beat v5. Plain PPO finish fine-tuning with a small timeout penalty does not solve the anti-draw problem.
+
+Current state:
+
+```text
+Expander base remains: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+Best fixed-v5 gate artifact so far: runs/adaptive-fixed-v5-imitation-v3/generals-adaptive-fixed-v5-imitation-v3.eqx
+Best fixed-v5 250-step min observed: 13.48%
+Best fixed-v5 750-step min observed: 42.77% from imitation v1
+```
+
+Next direction:
+
+```text
+1. Train explicit finish/draw-risk heads from v5-vs-v5 rollouts, not just action CE.
+2. Use search teacher or outcome-labeled replacement actions to teach earlier general capture.
+3. Preserve v4 as the Expander large-map base; do not promote fixed-v5 imitation checkpoints yet.
+```

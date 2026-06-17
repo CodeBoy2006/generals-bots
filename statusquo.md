@@ -717,3 +717,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep `runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx` as the active base. Do not promote v5/v6/v7. Next useful branch should change the learning signal, e.g. belief/finish heads or search-to-strategy supervision with row-wise trust control, rather than another plain low-LR continuation.
 - **Context:** v5 global top-advantage failed 256-row triage (`67.97%` min vs v4 `73.83%`). v6 stratified looked strong at 256/512 rows but failed 2048-row confirmation (`70.80%` min vs same-seed v4 `72.17%`). v7 EMA stratified failed 512-row triage (`70.70%` min vs same-seed v4 `71.48%`). Training/eval used `cuda:0`; all checkpoints and JSON artifacts are under ignored `runs/`, not cache directories.
+
+## [2026-06-17 15:58] Adaptive Fixed-v5 Gate
+- **Changes:** Added fixed `PolicyValueNetwork` opponent support to `evaluate_adaptive_policy.py` and `train_adaptive.py`, plus fixed-policy teacher/opponent support in `adaptive_teacher_imitation.py`. Added `--value-head-sizes` / `--init-value-head-sizes` so single-size gates can load multi-size per-value-head checkpoints. Updated README and strategy docs with GPU v5-gate results.
+- **Status:** Completed
+- **Next Steps:** Do not promote the fixed-v5 imitation or finish checkpoints. Keep U-Net PPO v4 as the Expander base. Next branch should train explicit finish/draw-risk or search-to-outcome targets on v5-vs-v5 rollouts; plain PPO timeout fine-tuning did not solve the 250-step draw bottleneck.
+- **Context:** U-Net PPO v4 scored only `9.57%` min over 512 games/seat against fixed 8x8 v5 sample at max250. Direct PPO vs v5 stayed at `7.62%` min. Fixed-v5 imitation improved the gate, with best final v3 at `13.48%` min and roughly `48-52%` decisive rate, but draw stayed near `70%`. At max750, imitation v1 reached `42.77%` min, showing the clone is slow rather than purely losing. All training/eval used `cuda:0`; model artifacts stayed under ignored `runs/`.
