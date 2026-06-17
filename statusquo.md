@@ -777,3 +777,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx`. Keep the spatial heads as diagnostics, then improve target labels or train replacement-outcome/search target heads before using source/target bias in policy selection.
 - **Context:** CUDA training on 24576 offline samples learned source/target labels (`Src CE 6.19 -> 3.17`, `Tgt CE 5.18 -> 4.34`). Expander 128-row scale `0.05` looked good (`75.00%` min vs `70.31%`), but 256-row confirmation regressed (`73.05%` vs scale-0 `73.83%`). Fixed-v5 max250 also regressed (`9.38%` min vs `10.94%`) and draw did not fall.
+
+## [2026-06-17 18:23] Adaptive Plan-Q Dataset v0
+- **Changes:** Added `adaptive_plan_q_dataset.py`, which collects source-target candidate plans, forces each plan's first action, scores short counterfactual rollouts, and saves `plan_q`, `plan_scores`, `plan_outcomes`, `source_score_probs`, and `target_score_probs` shards. Documented commands and smoke results.
+- **Status:** Completed
+- **Next Steps:** Use this collector for longer fixed-v5 max250 shards, then train source_q/target_q from `source_score_probs` and `target_score_probs`. Do not return to spatial rerank scale sweeps.
+- **Context:** CUDA smoke compiled and wrote ignored `runs/` shards. With `score_scale=10`, the 8-env/16-step/4x4-plan smoke produced 128 samples with mean `plan_q_gap=0.0689`, source max-prob mean `0.2700`, and target max-prob mean `0.2704`. The 8-step horizon still yielded all draw outcomes, so anti-draw supervision needs longer fixed-v5 plan rollouts.

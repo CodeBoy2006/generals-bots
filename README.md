@@ -745,6 +745,37 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 Evaluate explicit source/target inference bias with `evaluate_adaptive_policy.py --strategy-aux --strategy-spatial-aux --strategy-spatial-rerank-scale <scale>`. This is still a probe; the current spatial v1 run learned the labels offline but did not pass 256-row Expander or fixed-v5 promotion.
 
+`adaptive_plan_q_dataset.py` collects source-target plan-Q shards. It samples candidate source cells and target cells from privileged state, forces each plan's first primitive action, rolls out the base adaptive policy briefly, and saves plan scores plus source/target score marginals. This is the replacement path for direct spatial rerank scale sweeps.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_plan_q_dataset.py 8 \
+  --grid-sizes 8 \
+  --num-steps 16 \
+  --num-shards 1 \
+  --pool-size 128 \
+  --model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --input-channels 35 \
+  --scoreboard-history \
+  --fog-memory \
+  --value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --outcome-head \
+  --strategy-aux \
+  --strategy-spatial-aux \
+  --source-count 4 \
+  --target-count 4 \
+  --plan-rollout-steps 8 \
+  --rollouts-per-plan 1 \
+  --output-dir runs/adaptive-plan-q-v0 \
+  --shard-prefix plan-q
+```
+
+The first smoke shard is intentionally small. It validates the data path and produces non-uniform Plan-Q marginals, but does not yet provide anti-draw outcome labels because the 8-step rollout horizon remains nonterminal. Longer fixed-v5 max250 shards are the next data step.
+
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
 
 ```bash

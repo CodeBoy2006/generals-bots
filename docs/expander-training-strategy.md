@@ -5005,3 +5005,90 @@ Next aligned step:
   improve target labels from true-general one-hot to richer target/intent maps,
   or train replacement-outcome/search target heads before using spatial bias in inference.
 ```
+
+## 2026-06-17 Adaptive Plan-Q Dataset v0
+
+Added `adaptive_plan_q_dataset.py`, a source-target counterfactual shard collector.
+
+Purpose:
+
+```text
+Stop training source/target as static CE labels.
+Score source-target plans by short replacement rollout.
+Save plan_q, plan_scores, plan_outcomes, source_score_probs, and target_score_probs.
+Use these shards for source_q / target_q / plan_q supervision next.
+```
+
+Mechanism:
+
+```text
+1. Collect mixed-seat adaptive states from a base checkpoint rollout.
+2. Pick source candidates from owned movable cells ranked by army mass.
+3. Pick target candidates from enemy general, enemy cells, cities, and passable cells.
+4. For each source-target pair:
+     force the first primitive move toward the target
+     roll out the base adaptive policy for a short horizon
+     score final material/land/terminal state
+5. Convert scores to plan_q = tanh(score / score_scale).
+6. Save source/target marginals from softmax(plan_q / temperature).
+```
+
+The first implementation deliberately keeps execution simple: only the first action is plan-conditioned; subsequent actions use the base policy and the configured opponent. This isolates plan scoring from a new Worker head.
+
+Smoke 1:
+
+```text
+command: 4 envs, 2 steps, 2x2 plans, 2-step rollout
+model:   runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+device:  cuda:0
+output:  runs/adaptive-plan-q-smoke/smoke-00000.npz
+result:  compiled and wrote 8 samples, but all outcomes draw and mean_gap=0.0000
+```
+
+The zero gap was not a collector failure. Raw scores were tiny because the default `score_scale=1000` was appropriate for terminal outcomes but too large for short nonterminal material/land scores.
+
+Smoke 2:
+
+```text
+command: 8 envs, 16 steps, 4x4 plans, 8-step rollout
+score_scale: 10
+output: runs/adaptive-plan-q-v0-scale10/plan-q-00000.npz
+samples: 128
+```
+
+Statistics:
+
+| metric | value |
+| --- | ---: |
+| raw plan score min / mean / max | `-1.12 / 0.41 / 5.27` |
+| plan_q min / mean / max | `-0.112 / 0.040 / 0.483` |
+| mean plan_q_gap | `0.0689` |
+| mean best_plan_q | `0.1094` |
+| source max-prob mean | `0.2700` |
+| target max-prob mean | `0.2704` |
+| best plan win/draw | `0.000 / 1.000` |
+
+Interpretation:
+
+```text
+The v0 collector produces non-uniform source/target Plan-Q marginals, so it is usable for ranking-supervision plumbing.
+However, the 8-step horizon still yields no decisive outcome labels, so it is not yet sufficient for fixed-v5 anti-draw training.
+Default score_scale is now 10.0 to preserve nonterminal score differences; terminal wins/losses still saturate plan_q.
+```
+
+Next data step:
+
+```text
+Run longer fixed-v5 max250 shards:
+  grid_sizes=8
+  opponent_policy_path=generals-ppo-8x8-expander-gpu-v5.eqx
+  plan_rollout_steps=32 or 64
+  rollouts_per_plan=1 initially
+  source_count=4
+  target_count=4
+
+Acceptance:
+  best_plan_q gap stays nonzero
+  best_plan win/loss outcome is not all draw
+  source/target marginals have enough entropy to train, but enough peak to rank
+```
