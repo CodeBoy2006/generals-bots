@@ -2982,3 +2982,39 @@ Evaluation on seed `75020`, 64 games/row:
 | `strategy-q-rank-v1` | `0.02` | `57.81%` | 16p1 |
 
 Conclusion: pairwise rank loss is implemented and optimizes, but this short aux-only run overfits/miscalibrates the Q head for inference. Do not promote. The next useful Q direction would require online validation inside training, stronger target normalization, or a rerank head trained on policy-action replacement outcomes rather than raw short-horizon search scores.
+
+## 2026-06-17 8x8 P1 League Best-Response Probe
+
+Ran the missing player-1 fixed 8x8 checkpoint-league probe against the historical v2-v5 pool. This tests whether ordinary PPO continuation can produce a v5-beating pure checkpoint when the learner is trained from the weaker mirrored seat instead of the earlier player-0 branch.
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train.py 512 \
+  --grid-size 8 --map-generator generated \
+  --mountain-density-min 0.12 --mountain-density-max 0.22 \
+  --num-cities-min 4 --num-cities-max 8 --min-generals-distance 5 \
+  --pool-size 16384 --num-steps 64 --num-iterations 160 \
+  --num-epochs 4 --minibatch-size 4096 --lr 0.000001 \
+  --truncation 500 \
+  --init-model-path /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-pool /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v2.eqx,/home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v3.eqx,/home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v4.eqx,/home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-pool-modes sample,sample,sample,sample \
+  --learner-player 1 --terminal-reward-scale 1.0 \
+  --checkpoint-dir runs/8x8-league-p1-v1/ckpts --checkpoint-every 40 --keep-checkpoints 4 \
+  --model-path runs/8x8-league-p1-v1/generals-ppo-8x8-league-p1-v1.eqx \
+  --seed 76100
+```
+
+Training stayed noisy but did not show a decisive improvement trend. Rollout win snapshots ranged from `41%` to `58%` after warmup, with no sustained climb over the v5/pool baseline. Checkpoints were evaluated directly against frozen v5 sample mode:
+
+| checkpoint | games/seat | seed | p0 win rate | p1 win rate | conclusion |
+| --- | ---: | ---: | ---: | ---: | --- |
+| iter040 | 256 | 76160 | `48.83%` | `43.75%` | below v5 |
+| iter080 | 256 | 76160 | `46.48%` | `48.44%` | below v5 |
+| iter120 | 256 | 76160 | `46.48%` | `48.44%` | below v5 |
+| iter160 | 256 | 76160 | `46.88%` | `42.58%` | below v5 |
+| final | 512 | 76150 | `47.85%` | `43.55%` | below v5 |
+
+For reference, the older augmented full-state best-response checkpoint in the repo root also failed the v5 gate under the same evaluator: player 0 reached `48.44%` over 512 games and player 1 reached `41.60%` over 512 games on seed `76000`.
+
+Conclusion: fixed 8x8 ordinary PPO best-response against the v2-v5 checkpoint pool is not a productive route to a pure v5-beating checkpoint, even when trained from player 1. This supports the broader adaptive conclusion from the strategy/Q/Worker probes: the next useful work should not be more small-learning-rate PPO continuation. Either keep rollout-search as an inference-time planner and distill replacement outcomes, or move the adaptive branch toward true seat/size-balanced long-rollout training with richer memory and strategic auxiliary targets.

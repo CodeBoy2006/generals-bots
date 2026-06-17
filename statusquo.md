@@ -627,3 +627,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-strategy-q-rank-v1`. Q-ranking needs online validation or better target normalization before it should bias policy logits.
 - **Context:** The rank loss optimized on GPU (`StratRank 0.1746 -> 0.0381`, `StratQ 90.0352 -> 76.4928`) in `runs/adaptive-strategy-q-rank-v1/`, but inference got worse: 64 games/row seed 75020 scored `64.06%` min at rerank scale `0.01` and `57.81%` at `0.02`. The run shows rank supervision is wired but not yet aligned with policy replacement outcomes.
+
+## [2026-06-17 12:27] 8x8 P1 League Best-Response Probe
+- **Changes:** Ran the missing fixed 8x8 player-1 PPO league best-response probe from v5 against the v2-v5 checkpoint pool, stored model/log artifacts under `runs/8x8-league-p1-v1/`, and documented checkpoint evaluations in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop ordinary fixed 8x8 PPO continuation against the historical checkpoint pool; use rollout-search inference/replacement-outcome distillation or return to adaptive long-rollout seat/size-balanced training.
+- **Context:** Intermediate checkpoints iter040/080/120/160 all stayed below frozen v5 in both seats; final 512-game evaluations scored p0 `47.85%` and p1 `43.55%` total win rate versus v5 sample. `legacymodels/` contains old adaptive/search checkpoints but no fixed 8x8 v5/Expander models.
