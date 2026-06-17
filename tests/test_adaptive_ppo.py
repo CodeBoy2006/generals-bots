@@ -1500,6 +1500,35 @@ def test_collect_adaptive_soft_batch_supports_history_base_network():
     assert base_obs.shape == obs.shape
 
 
+def test_mask_strategy_aux_grads_keeps_only_strategy_heads():
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import ADAPTIVE_HISTORY_INPUT_CHANNELS
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import mask_strategy_aux_grads
+
+    network = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        input_channels=ADAPTIVE_HISTORY_INPUT_CHANNELS,
+        channels=(16, 16, 16, 8),
+        strategy_aux=True,
+        global_context=True,
+    )
+    grads = jax.tree.map(lambda leaf: jnp.ones_like(leaf) if eqx.is_inexact_array(leaf) else leaf, network)
+    masked = mask_strategy_aux_grads(grads)
+
+    assert jnp.all(masked.conv1.weight == 0)
+    assert jnp.all(masked.policy_conv.weight == 0)
+    assert jnp.all(masked.value_linear1.weight == 0)
+    assert jnp.all(masked.global_linear1.weight == 0)
+    assert jnp.any(masked.strategy_intent_linear2.weight != 0)
+    assert jnp.any(masked.strategy_finish_linear2.weight != 0)
+    assert jnp.any(masked.strategy_q_conv.weight != 0)
+    assert jnp.any(masked.strategy_q_pass_linear.weight != 0)
+    assert jnp.any(masked.strategy_enemy_general_conv.weight != 0)
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess

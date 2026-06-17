@@ -585,3 +585,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the v1/v2 strategy-aux checkpoints. Next probe should disable all-active action soft labels or restrict action CE to high-margin rows while keeping Q/intent/belief representation losses; optionally add base template flags for outcome/HL-Gauss teacher checkpoints.
 - **Context:** `legacymodels/` does not contain the exact 71.29% historical best, but `generals-adaptive-ppo-v3-composite-balanced-probe1.eqx` was the best shared-MSE history teacher found in 64 games/row triage (`70.31%` min on seed 74000). v2 reached `68.75%` min on seed 74000 and `64.06%` on seed 74210, so it is an engineering validation rather than a promotion candidate. Focused verification passed: compileall, `git diff --check`, and 3 targeted CPU pytest cases.
+
+## [2026-06-17 11:29] Strategy Aux High-Margin Probes
+- **Changes:** Added `adaptive_search_distill.py --freeze-strategy-aux-only`, which masks gradients to only intent/finish/Q/belief auxiliary heads for policy-preserving auxiliary pretraining. Documented v3 high-margin-only CE, v4 close-spawn curriculum, v5 aux-only pretrain plus fine-tune, and 256 games/row base/v3 comparison.
+- **Status:** Completed
+- **Next Steps:** Do not promote v3/v4/v5. Stop sweeping this strategy-aux action-distill variant; next concrete branch should either build an offline replay/representation trainer or start Worker pretraining with BFS/path-assignment target heatmaps to address 16x draw/finish execution.
+- **Context:** Best new checkpoint was `runs/adaptive-strategy-aux-v3/ckpts/generals-adaptive-strategy-aux-v3-iter-000008.eqx`; it reached `67.19%` min over 256 games/row on seed 74000 versus `66.80%` for the shared-MSE history base, with 16p0 still bottlenecked by draws. v4 close-spawn and v5 aux-head pretrain both topped out at `67.19%` over 64 games/row and were not worth promotion.

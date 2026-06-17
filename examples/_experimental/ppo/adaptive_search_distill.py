@@ -121,6 +121,22 @@ def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT
     return masked
 
 
+def mask_strategy_aux_grads(grads):
+    """Keep gradients only for strategy auxiliary heads."""
+    masked = jax.tree.map(lambda leaf: jnp.zeros_like(leaf) if eqx.is_inexact_array(leaf) else leaf, grads)
+    if grads.strategy_intent_linear2 is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_intent_linear2, masked, grads.strategy_intent_linear2)
+    if grads.strategy_finish_linear2 is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_finish_linear2, masked, grads.strategy_finish_linear2)
+    if grads.strategy_q_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_q_conv, masked, grads.strategy_q_conv)
+    if grads.strategy_q_pass_linear is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_q_pass_linear, masked, grads.strategy_q_pass_linear)
+    if grads.strategy_enemy_general_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_enemy_general_conv, masked, grads.strategy_enemy_general_conv)
+    return masked
+
+
 def compute_adaptive_conservative_loss(
     student_network,
     base_network,
@@ -773,6 +789,7 @@ def train_adaptive_soft_minibatch(
     strategy_belief_weight,
     temperature,
     freeze_legacy_weights=False,
+    freeze_strategy_aux_only=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Train one adaptive soft-target distillation minibatch."""
@@ -868,7 +885,9 @@ def train_adaptive_soft_minibatch(
         return distill_loss + strategy_loss, metrics
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
-    if freeze_legacy_weights:
+    if freeze_strategy_aux_only:
+        grads = mask_strategy_aux_grads(grads)
+    elif freeze_legacy_weights:
         grads = mask_legacy_distill_grads(grads, legacy_input_channels)
     params = eqx.filter(student_network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -1053,6 +1072,7 @@ def train_adaptive_soft_epoch(
     strategy_belief_weight,
     temperature,
     freeze_legacy_weights=False,
+    freeze_strategy_aux_only=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Run adaptive soft-target distillation over shuffled minibatches."""
@@ -1139,6 +1159,7 @@ def train_adaptive_soft_epoch(
                 strategy_belief_weight,
                 temperature,
                 freeze_legacy_weights,
+                freeze_strategy_aux_only,
                 legacy_input_channels,
             )
             epoch_loss += loss
@@ -1736,6 +1757,7 @@ def parse_args():
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
     parser.add_argument("--freeze-legacy-weights", action="store_true")
+    parser.add_argument("--freeze-strategy-aux-only", action="store_true")
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
@@ -1841,6 +1863,13 @@ def parse_args():
         parser.error("--init-input-channels must be positive")
     if args.freeze_legacy_weights and not (args.global_context or args.scoreboard_history):
         parser.error("--freeze-legacy-weights requires --global-context or --scoreboard-history")
+    if args.freeze_strategy_aux_only and not (
+        args.strategy_q_weight > 0.0
+        or args.strategy_intent_weight > 0.0
+        or args.strategy_finish_weight > 0.0
+        or args.strategy_belief_weight > 0.0
+    ):
+        parser.error("--freeze-strategy-aux-only requires at least one strategy auxiliary loss")
     try:
         args.channels = parse_policy_channels(args.channels)
         args.base_channels = parse_policy_channels(args.base_channels or args.channels)
@@ -1908,6 +1937,8 @@ def main():
         print("Base global:   enabled")
     if args.freeze_legacy_weights:
         print("Frozen legacy: conv1 old inputs + trunk/heads")
+    if args.freeze_strategy_aux_only:
+        print("Frozen policy: strategy auxiliary heads only")
     if mixed_learner:
         mixed_p0_envs, mixed_p1_envs = split_mixed_env_counts(args.num_envs)
         learner_label = f"mixed players 0/1 ({mixed_p0_envs}+{mixed_p1_envs} envs)"
@@ -2217,6 +2248,7 @@ def main():
                 args.strategy_belief_weight,
                 args.temperature,
                 args.freeze_legacy_weights,
+                args.freeze_strategy_aux_only,
                 ADAPTIVE_INPUT_CHANNELS,
             )
         jax.block_until_ready(student_network)

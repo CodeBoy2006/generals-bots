@@ -2712,3 +2712,47 @@ change target sampling:
 optional:
   add base value-head/outcome/HL-Gauss template flags so noarch_hl can be used as teacher
 ```
+
+### Follow-up: high-margin, spawn curriculum, and aux-only pretrain
+
+2026-06-17 继续跑三组 GPU probes，目标是验证上一节推荐的“不要 all-active action CE，只保留 high-margin action rows + Q/intent/belief”的判断。
+
+`v3` 使用同一个 `composite-balanced` history base，关闭 all-active search CE：
+
+```text
+--kl-weight 2.0
+--improve-weight 0.0
+--soft-improvement-extra-weight 0.02
+--strategy-q-weight 0.0005
+--strategy-intent-weight 0.02
+--strategy-finish-weight 0.02
+--strategy-belief-weight 0.01
+--lr 5e-7
+```
+
+64 games/row seed `74000` 最佳为 iter8，min `70.31%`；seed `74210` min `67.19%`。随后对 iter8 做 256 games/row same-seed 对照：
+
+| checkpoint | 256-row min | bottleneck | note |
+| --- | ---: | --- | --- |
+| `composite-balanced` base | `66.80%` | 16p0 | draw `19.53%` |
+| `v3 iter8` | `67.19%` | 16p0 | draw `22.66%` |
+
+v3 对 12p0 有明显改善（`+3.52%`），但 16p1 和 draw rate 变差，整体只比 base 多 `+0.39%` min，不 promotion。
+
+`v4-spawn8` 在 distill data 上加 `--max-generals-distance 8`，评估仍使用完整 generated maps。结果反而更差：seed `74000` 最佳 min 只有 `67.19%`，iter8 掉到 `57.81%` 16p0。结论：固定 close-spawn curriculum 会造成 full-distribution mismatch；未来如果使用 spawn curriculum，需要 schedule 从小 cap 逐步放开，而不是单段 close-spawn distill。
+
+`v5` 新增 `--freeze-strategy-aux-only`，第一段只训练 strategy auxiliary heads，第二段从该 checkpoint 解冻低 LR fine-tune。实现上这个 flag 会把 policy/trunk/global/value gradients 置零，只保留 intent/finish/Q/belief heads。GPU 结果没有提升：fine-tune seed `74000` 最佳 min 为 `67.19%`，低于 v3 iter8。
+
+当前判断：
+
+- high-margin-only action CE 明显比 all-active action CE 稳，但仍不足以突破 16x draw/finish 瓶颈。
+- close-spawn 单段训练不泛化到完整 generated maps。
+- aux-head-only pretrain 可以降低 fine-tune loss，但没有转化为 policy strength。
+
+下一步不应继续扫这三个权重。更有信息量的方向是：
+
+```text
+1. 把 search/intent/belief 做成离线 replay，先训练表示，再用 PPO/finish reward 做长 rollout 更新。
+2. 给 adaptive_search_distill.py 增加 base value-head/outcome/HL-Gauss 模板只作为 teacher 对照，但 noarch_hl seed74210 只有 60.94% min，优先级低。
+3. 转 Worker 预训练：用目标 heatmap + BFS/path-assignment 训练执行层，直接攻击 16x draw/finish 的执行问题。
+```
