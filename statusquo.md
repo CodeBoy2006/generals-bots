@@ -867,3 +867,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep model-generated candidates for future data, but do not promote `adaptive-plan-q-model-candidate-gate-v0` or continue scalar action-Q threshold sweeps. Next route should use a direct binary command-acceptance head, per-seat gate calibration, or a larger model-candidate dataset before any inference gate.
 - **Context:** Model candidates produced a stronger shard than heuristic v3 shard0 (`best_win=19.3%`, `best_q=0.1190`, `mean_gap=0.3931`). Gate v0 improved offline replacement accuracy only from `39.4%` to `44.3%`. Fixed-v5 max250 128-row regressed: baseline `10.94%` min, candidate threshold `1` with policy margin `4` fell to `8.59%`, and threshold `0` fell to `5.47%`.
+
+## [2026-06-17 20:33] Binary Command Gate Probe
+- **Changes:** Added standalone `adaptive_command_gate.py` and `adaptive_command_gate_supervised.py`; extended `evaluate_adaptive_policy.py` with `--strategy-command-gate-path` and threshold support; added `adaptive_plan_q_dataset.py --candidate-source model-worker` for evaluator-aligned source proposals; documented model/model-worker gate results.
+- **Status:** Completed
+- **Next Steps:** Do not promote command-gate checkpoints or continue threshold sweeps. Next work should improve source/target proposal quality directly, for example with outcome-supervised source/target maps or a low-rate Commander proposal head before Worker/gate execution.
+- **Context:** Model-candidate gate fit offline (`53.4% -> 73.5%` balanced acc) but 128-row fixed-v5 regressed at thresholds `0.5/0.6/0.7`. Model-worker source candidates were more inference-aligned but weaker (`best_win=9.8%`, `best_q=-0.0432`); their gate fit offline (`41.2% -> 78.8%`) and had a 128-row threshold `0.7` signal (`3.91% -> 7.03%` min), but failed 256-row confirmation (`6.64% -> 5.47%` min).

@@ -6193,3 +6193,150 @@ replacement with either:
 2. a per-seat calibrated gate threshold, or
 3. a larger model-candidate dataset before fitting any gate.
 ```
+
+## 2026-06-17 Binary Command Gate Probe
+
+Added a standalone command acceptance gate:
+
+```text
+adaptive_command_gate.py
+  CommandGateNetwork, a normalized 2-layer MLP.
+
+adaptive_command_gate_supervised.py
+  trains from Plan-Q shards using candidate command labels.
+
+evaluate_adaptive_policy.py
+  --strategy-command-gate-path
+  --strategy-command-gate-threshold
+  --strategy-command-gate-hidden-dim
+```
+
+The gate does not modify the adaptive policy checkpoint. At inference it uses
+the evaluator's current source/target worker command and accepts it only when
+the MLP probability clears the threshold. Features are all available at
+inference:
+
+```text
+policy_logit_delta
+action_q_delta
+source_logit
+target_logit
+finish_probability
+source_army_log1p
+route_distance_norm
+candidate_policy_logit
+current_policy_logit
+candidate_q
+current_q
+seat
+```
+
+### Model-candidate gate v0
+
+Trained on `runs/adaptive-plan-q-model-candidates-v0/plan-q-00000.npz`:
+
+```text
+output:   runs/adaptive-command-gate-model-candidates-v0/generals-adaptive-command-gate-model-candidates-v0.eqx
+examples: 2677
+positive: 11.51%
+epochs:   120
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| loss | `0.6952` | `0.5143` |
+| balanced accuracy | `53.4%` | `73.5%` |
+| positive probability | `0.474` | `0.644` |
+| negative probability | `0.472` | `0.355` |
+
+Fixed-v5 max250, 128 games/row on seed `84320`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `10.94%` | `4.69%` | `4.69%` | `50.78%` | `56.25%` |
+| gate `0.5` | `9.38%` | `2.34%` | `2.34%` | `57.03%` | `35.94%` |
+| gate `0.6` | `6.25%` | `2.34%` | `2.34%` | `60.16%` | `50.00%` |
+| gate `0.7` | `10.16%` | `3.91%` | `3.91%` | `57.81%` | `50.00%` |
+
+Conclusion: direct binary gating is learnable offline, but this dataset's
+top-k source candidates still differ from the evaluator's actual
+route/army-adjusted source command, and gameplay regressed.
+
+### Model-worker candidate v0
+
+Added a more inference-aligned candidate mode:
+
+```text
+--candidate-source model-worker
+--candidate-target model
+```
+
+`model-worker` uses the evaluator worker command's source score for the top
+model target:
+
+```text
+source_logits + 0.25 * log1p(army) - 0.05 * route_distance_to_top_target
+```
+
+Collected `runs/adaptive-plan-q-model-worker-candidates-v0/`:
+
+```text
+samples=512
+mean_gap=0.2947
+best_q=-0.0432
+best_win=9.8%
+best_draw=88.9%
+```
+
+This is more inference-aligned but much weaker than the previous
+model-candidate shard (`best_win=19.3%`, `best_q=0.1190`), which means the
+currently executed source/target worker command is often a poor command.
+
+Trained `adaptive-command-gate-model-worker-candidates-v0`:
+
+```text
+examples: 2663
+positive: 7.29%
+epochs:   100
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| loss | `0.7249` | `0.4733` |
+| balanced accuracy | `41.2%` | `78.8%` |
+| positive probability | `0.475` | `0.671` |
+| negative probability | `0.500` | `0.322` |
+
+Fixed-v5 max250, 128 games/row on seed `84380`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `3.91%` | `10.94%` | `3.91%` | `64.84%` | `57.81%` |
+| gate `0.5` | `2.34%` | `9.38%` | `2.34%` | `27.34%` | `44.53%` |
+| gate `0.6` | `4.69%` | `7.81%` | `4.69%` | `35.16%` | `54.69%` |
+| gate `0.7` | `7.03%` | `7.81%` | `7.03%` | `45.31%` | `50.78%` |
+
+The apparent `0.7` signal failed 256-row confirmation on seed `84400`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `7.42%` | `6.64%` | `6.64%` | `55.08%` | `56.25%` |
+| gate `0.7` | `5.47%` | `5.47%` | `5.47%` | `30.47%` | `54.69%` |
+
+Conclusion:
+
+```text
+The binary command gate is a better supervision object than scalar action-Q
+thresholds, but it still cannot rescue weak source/target proposals. When the
+gate accepts more commands, draw often falls because losses rise.
+
+Do not promote either command-gate checkpoint. The next useful direction is
+not more gate threshold sweep; it is improving the Commander/source-target
+proposal itself, likely with outcome-supervised target/source maps or a
+low-rate Commander head that proposes several target/source commands before
+the Worker/gate sees them.
+```

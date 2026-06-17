@@ -56,7 +56,7 @@ from train import random_action, stack_learner_actions
 from train_adaptive import crop_observation, split_mixed_env_counts
 
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
-CANDIDATE_MODE_TO_ID = {"heuristic": 0, "model": 1}
+CANDIDATE_MODE_TO_ID = {"heuristic": 0, "model": 1, "model-worker": 2}
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -118,6 +118,28 @@ def model_candidate_source_indices(
     movable = state.ownership[learner_player] & active & (state.armies > 1)
     source_scores = jnp.where(movable, source_logits, -1.0e9)
     return topk_indices(source_scores, count)
+
+
+def model_worker_candidate_source_indices(
+    state,
+    learner_player: int,
+    effective_size: int,
+    pad_size: int,
+    count: int,
+    source_logits: jnp.ndarray,
+    target_index: jnp.ndarray,
+) -> jnp.ndarray:
+    """Pick source candidates using the same source score as the inference worker command."""
+    active = active_cells_for_size(effective_size, pad_size)
+    rows = jnp.arange(pad_size)[:, None]
+    cols = jnp.arange(pad_size)[None, :]
+    target_row = target_index // pad_size
+    target_col = target_index % pad_size
+    movable = state.ownership[learner_player] & active & (state.armies > 1)
+    army_score = 0.25 * jnp.log1p(jnp.maximum(state.armies.astype(jnp.float32), 0.0))
+    route_distance = jnp.abs(rows - target_row) + jnp.abs(cols - target_col)
+    source_scores = source_logits + army_score - 0.05 * route_distance.astype(jnp.float32)
+    return topk_indices(jnp.where(movable, source_scores, -1.0e9), count)
 
 
 def model_candidate_target_indices(
@@ -287,17 +309,6 @@ def score_plan_candidates(
     model_target_logits: jnp.ndarray,
 ):
     """Score source-target plans by forcing the first move and rolling out the base policy."""
-    if candidate_source_mode == CANDIDATE_MODE_TO_ID["model"]:
-        source_indices = model_candidate_source_indices(
-            state,
-            learner_player,
-            effective_size,
-            pad_size,
-            source_count,
-            model_source_logits,
-        )
-    else:
-        source_indices = candidate_source_indices(state, learner_player, effective_size, pad_size, source_count)
     if candidate_target_mode == CANDIDATE_MODE_TO_ID["model"]:
         target_indices = model_candidate_target_indices(
             state,
@@ -308,6 +319,27 @@ def score_plan_candidates(
         )
     else:
         target_indices = candidate_target_indices(state, learner_player, effective_size, pad_size, target_count)
+    if candidate_source_mode == CANDIDATE_MODE_TO_ID["model"]:
+        source_indices = model_candidate_source_indices(
+            state,
+            learner_player,
+            effective_size,
+            pad_size,
+            source_count,
+            model_source_logits,
+        )
+    elif candidate_source_mode == CANDIDATE_MODE_TO_ID["model-worker"]:
+        source_indices = model_worker_candidate_source_indices(
+            state,
+            learner_player,
+            effective_size,
+            pad_size,
+            source_count,
+            model_source_logits,
+            target_indices[0],
+        )
+    else:
+        source_indices = candidate_source_indices(state, learner_player, effective_size, pad_size, source_count)
     opponent_player = 1 - learner_player
     opponent_obs = game.get_observation(state, opponent_player)
     key, opponent_key = jrandom.split(key)
@@ -710,7 +742,7 @@ def collect_plan_q_step(
         active,
     )
     if (
-        candidate_source_mode == CANDIDATE_MODE_TO_ID["model"]
+        candidate_source_mode in (CANDIDATE_MODE_TO_ID["model"], CANDIDATE_MODE_TO_ID["model-worker"])
         or candidate_target_mode == CANDIDATE_MODE_TO_ID["model"]
     ):
         aux_outputs = jax.vmap(lambda obs, mask, active_mask: network.strategy_auxiliary(obs, mask, active_mask))(
@@ -1177,10 +1209,14 @@ def parse_args():
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
     if args.source_count <= 0 or args.target_count <= 0:
         parser.error("--source-count and --target-count must be positive")
-    if (args.candidate_source == "model" or args.candidate_target == "model") and not (
+    if (
+        args.candidate_source in ("model", "model-worker") or args.candidate_target == "model"
+    ) and not (
         args.strategy_aux and args.strategy_spatial_aux
     ):
         parser.error("--candidate-source/--candidate-target model requires --strategy-aux --strategy-spatial-aux")
+    if args.candidate_target == "model-worker":
+        parser.error("--candidate-target model-worker is not supported; use --candidate-target model")
     if args.plan_rollout_steps <= 0 or args.rollouts_per_plan <= 0:
         parser.error("--plan-rollout-steps and --rollouts-per-plan must be positive")
     if args.plan_worker_steps < 0:
