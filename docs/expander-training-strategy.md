@@ -3832,3 +3832,129 @@ gate:
   512-row promotion candidate
   2048-row final evidence
 ```
+
+## 2026-06-17 U-Net PPO v5-v7 Top-Advantage Diagnostics
+
+### Global top-advantage v5
+
+v5 tested the first recommended follow-up from v4: a conservative low-LR continuation with extra 8x sampling.
+
+```text
+runs/adaptive-unet-ppo-v5/
+init: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+rollout: 128 envs x 256 steps x 20 iters
+update: 1 epoch, minibatch 1024
+reward: terminal only
+optimizer: lr=5e-6
+top_advantage_fraction=0.25, mode=global
+sizes: 8:2,12:1,16:2
+```
+
+Training remained stable:
+
+```text
+iter 1:  Loss 2.1636, Episodes 67, Wins 56, Draws 0
+iter 10: Loss 2.2130, Episodes 107, Wins 87, Draws 1
+iter 20: Loss 2.2196, Episodes 115, Wins 90, Draws 4
+```
+
+256 games/row on seed `78980`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net PPO v4 | `73.83%` | `76.56%` | `77.73%` | `84.38%` | `79.30%` | `85.55%` | `73.83%` |
+| U-Net PPO v5 | `67.97%` | `78.91%` | `81.25%` | `85.16%` | `82.81%` | `81.25%` | `67.97%` |
+
+Conclusion: v5 is rejected. Extra 8x sampling with global top-advantage improved 8p1 and large rows but sacrificed 8p0, which confirms that the global filter can move gradient budget into easier rows instead of protecting the bottleneck.
+
+### Stratified top-advantage v6
+
+To test that diagnosis, `train_adaptive.py` now supports:
+
+```text
+--top-advantage-mode global      # old behavior, one global top-k over rollout samples
+--top-advantage-mode stratified  # independent top-k per effective size and learner seat
+```
+
+v6 reused the v5 recipe but enabled `--top-advantage-mode stratified`.
+
+Training:
+
+```text
+iter 1:  Loss 2.1380, Episodes 63, Wins 55, Draws 0
+iter 10: Loss 2.2171, Episodes 115, Wins 89, Draws 6
+iter 20: Loss 2.2240, Episodes 109, Wins 84, Draws 6
+```
+
+256 games/row on seed `79020` looked strong:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net PPO v4 | `70.70%` | `73.05%` | `84.38%` | `80.86%` | `77.73%` | `80.47%` | `70.70%` |
+| U-Net PPO v6 | `75.78%` | `76.56%` | `82.42%` | `83.98%` | `80.08%` | `80.08%` | `75.78%` |
+
+512 games/row on seed `79040` was only a narrow gain:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net PPO v4 | `74.41%` | `72.46%` | `85.35%` | `83.79%` | `80.47%` | `79.30%` | `72.46%` |
+| U-Net PPO v6 | `74.02%` | `73.05%` | `84.77%` | `82.03%` | `82.03%` | `77.15%` | `73.05%` |
+
+2048 games/row on seed `79060` rejected the checkpoint:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net PPO v4 | `74.51%` | `72.17%` | `83.01%` | `81.05%` | `78.81%` | `80.32%` | `72.17%` |
+| U-Net PPO v6 | `70.80%` | `73.54%` | `84.57%` | `81.49%` | `79.20%` | `79.64%` | `70.80%` |
+
+Large-map draw rates at 2048 games/row:
+
+```text
+v4 16p0/16p1 draw: 13.43% / 12.11%
+v6 16p0/16p1 draw: 12.55% / 13.13%
+```
+
+Conclusion: stratified filtering is useful as a trainer diagnostic and may reduce easy-row domination in short gates, but v6 is still a short-eval false positive. It does not replace v4.
+
+### EMA-saved stratified v7
+
+v7 tested whether saving EMA parameters could keep the stratified continuation closer to v4:
+
+```text
+runs/adaptive-unet-ppo-v7/
+same recipe as v6
+ema_decay=0.99, eval_ema=true
+```
+
+Training:
+
+```text
+iter 1:  Loss 2.1898, Episodes 62, Wins 49, Draws 0
+iter 10: Loss 2.2403, Episodes 104, Wins 75, Draws 8
+iter 20: Loss 2.1723, Episodes 97, Wins 81, Draws 3
+```
+
+512 games/row on seed `79120`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net PPO v4 | `71.48%` | `74.80%` | `81.64%` | `82.23%` | `77.93%` | `78.12%` | `71.48%` |
+| U-Net PPO v7 | `70.70%` | `72.66%` | `81.64%` | `82.03%` | `78.52%` | `79.10%` | `70.70%` |
+
+Conclusion: v7 is rejected at the 512-row gate; no 2048-row run is warranted.
+
+Current promotion state:
+
+```text
+promoted/current base: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+rejected: v5, v6, v7
+keep code tool: --top-advantage-mode stratified
+```
+
+Next direction:
+
+```text
+1. Stop simple low-LR PPO continuation from v4 unless it changes the objective or data path.
+2. Use stratified top-advantage only when paired with a stronger trust region, row-wise KL cap, or row-balanced replay.
+3. Prefer the next hard shift: belief/finish auxiliary heads trained from full state, or search-to-strategy supervision that teaches finish/draw risk rather than direct policy replay.
+```

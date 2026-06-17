@@ -86,6 +86,41 @@ def top_advantage_weights(advantages: jnp.ndarray, fraction: float) -> jnp.ndarr
     return weights.reshape(advantages.shape)
 
 
+def masked_top_advantage_weights(advantages: jnp.ndarray, mask: jnp.ndarray, fraction: float) -> jnp.ndarray:
+    """Select top-advantage samples inside one static task slice."""
+    flat_mask = mask.reshape(-1)
+    count_available = int(jnp.sum(flat_mask))
+    if count_available <= 0:
+        return jnp.zeros_like(advantages, dtype=jnp.float32)
+    count = max(1, math.ceil(count_available * fraction))
+    flat_advantages = advantages.reshape(-1)
+    candidates = jnp.where(flat_mask, flat_advantages, -jnp.inf)
+    _, indices = jax.lax.top_k(candidates, count)
+    weights = jnp.zeros_like(flat_advantages, dtype=jnp.float32).at[indices].set(1.0)
+    return weights.reshape(advantages.shape)
+
+
+def stratified_top_advantage_weights(
+    advantages: jnp.ndarray,
+    active: jnp.ndarray,
+    learner_players: jnp.ndarray,
+    grid_sizes: tuple[int, ...],
+    fraction: float,
+) -> jnp.ndarray:
+    """Apply top-advantage filtering independently per size and learner seat."""
+    if fraction >= 1.0:
+        return jnp.ones_like(advantages, dtype=jnp.float32)
+    active_cells = jnp.sum(active.astype(jnp.int32), axis=(-2, -1))
+    players = learner_players[None, :]
+    weights = jnp.zeros_like(advantages, dtype=jnp.float32)
+    for size in grid_sizes:
+        size_mask = active_cells == size * size
+        for player in (0, 1):
+            task_mask = size_mask & (players == player)
+            weights = weights + masked_top_advantage_weights(advantages, task_mask, fraction)
+    return jnp.minimum(weights, 1.0)
+
+
 def outcome_class_from_winner(winner: jnp.ndarray, learner_player: jnp.ndarray) -> jnp.ndarray:
     """Map a winner id to loss/draw/win from each learner perspective."""
     return jnp.where(
@@ -795,6 +830,7 @@ def parse_args():
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--top-advantage-fraction", type=float, default=1.0)
+    parser.add_argument("--top-advantage-mode", choices=("global", "stratified"), default="global")
     parser.add_argument("--ema-decay", type=float, default=0.0)
     parser.add_argument("--eval-ema", action="store_true")
     parser.add_argument("--pool-size", type=int, default=4096)
@@ -971,7 +1007,7 @@ def main():
     print(f"PPO updates:   epochs={args.num_epochs}, minibatch={args.minibatch_size or args.num_envs * args.num_steps}")
     print(f"GAE:           gamma={args.gamma:g}, lambda={args.gae_lambda:g}")
     if args.top_advantage_fraction < 1.0:
-        print(f"Top advantage: {args.top_advantage_fraction:g}")
+        print(f"Top advantage: {args.top_advantage_fraction:g} ({args.top_advantage_mode})")
     if args.ema_decay > 0.0:
         ema_target = "EMA" if args.eval_ema else "last iterate"
         print(f"EMA:           decay={args.ema_decay:g}, saving={ema_target}")
@@ -1285,11 +1321,20 @@ def main():
         obs, masks, active, actions, logprobs, values, rewards, dones, infos = rollout_data
         advantages, returns = compute_gae(rewards, values, dones, args.gamma, args.gae_lambda)
         policy_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        policy_weights = top_advantage_weights(policy_advantages, args.top_advantage_fraction)
         if mixed_learner:
             learner_players_for_batch = learner_players_for_log
         else:
             learner_players_for_batch = jnp.full((args.num_envs,), iteration_learner_player, dtype=jnp.int32)
+        if args.top_advantage_mode == "stratified":
+            policy_weights = stratified_top_advantage_weights(
+                policy_advantages,
+                active,
+                learner_players_for_batch,
+                args.grid_sizes,
+                args.top_advantage_fraction,
+            )
+        else:
+            policy_weights = top_advantage_weights(policy_advantages, args.top_advantage_fraction)
         outcome_targets, outcome_weights = rollout_outcome_targets(infos.winner, dones, learner_players_for_batch)
         batch = (
             obs,

@@ -711,3 +711,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat `runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx` as the current stronger U-Net base. Next iteration should target the slight 8p1 regression while preserving the 16x draw reduction.
 - **Context:** v3 2048-row min was `73.68%` vs legacy base `70.65%`, confirming U-Net replacement quality. PPO v4 then beat v3 at 2048-row min `73.05%` vs `72.66%`, with 16x draw reduced from v3 `14.06%/14.60%` to v4 `12.16%/12.89%`.
+
+## [2026-06-17 15:23] U-Net Top-Advantage Diagnostics
+- **Changes:** Added `train_adaptive.py --top-advantage-mode {global,stratified}` so PPO can select top-advantage samples either globally or independently by effective board size and learner seat. Updated README and recorded v5/v6/v7 GPU runs in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Keep `runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx` as the active base. Do not promote v5/v6/v7. Next useful branch should change the learning signal, e.g. belief/finish heads or search-to-strategy supervision with row-wise trust control, rather than another plain low-LR continuation.
+- **Context:** v5 global top-advantage failed 256-row triage (`67.97%` min vs v4 `73.83%`). v6 stratified looked strong at 256/512 rows but failed 2048-row confirmation (`70.80%` min vs same-seed v4 `72.17%`). v7 EMA stratified failed 512-row triage (`70.70%` min vs same-seed v4 `71.48%`). Training/eval used `cuda:0`; all checkpoints and JSON artifacts are under ignored `runs/`, not cache directories.
