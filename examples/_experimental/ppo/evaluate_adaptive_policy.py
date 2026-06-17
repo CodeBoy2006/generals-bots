@@ -963,6 +963,7 @@ def parse_args():
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-q-replace-threshold", type=float, default=-1.0)
     parser.add_argument("--strategy-q-replace-policy-margin", type=float, default=-1.0)
@@ -1057,6 +1058,12 @@ def parse_args():
         parser.error("--strategy-worker-mix-prob requires --strategy-aux --strategy-spatial-aux")
     if args.strategy_worker_finish_gate and args.strategy_worker_mix_prob <= 0.0:
         parser.error("--strategy-worker-finish-gate requires --strategy-worker-mix-prob")
+    if args.strategy_finish_outputs <= 0:
+        parser.error("--strategy-finish-outputs must be positive")
+    if args.strategy_finish_outputs != 2 and (args.strategy_target_finish_gate or args.strategy_worker_finish_gate):
+        parser.error("finish-gated rerank currently expects a 2-logit binary finish head")
+    if args.strategy_finish_outputs != 2 and args.strategy_command_gate_threshold >= 0.0:
+        parser.error("command gate checkpoints currently expect a 2-logit binary finish head")
     if args.strategy_worker_policy_margin < 0.0 and args.strategy_worker_policy_margin != -1.0:
         parser.error("--strategy-worker-policy-margin must be non-negative, or -1 to disable")
     if args.strategy_plan_worker_rerank_scale < 0.0:
@@ -1125,6 +1132,8 @@ def main():
         outcome_head=args.outcome_head,
         strategy_aux=args.strategy_aux,
         strategy_spatial_aux=args.strategy_spatial_aux,
+        strategy_finish_outputs=args.strategy_finish_outputs,
+        init_strategy_finish_outputs=args.strategy_finish_outputs,
         global_context=network_global_context,
         init_global_context=network_global_context,
         context_residual=args.context_residual,

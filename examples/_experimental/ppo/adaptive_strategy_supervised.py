@@ -48,6 +48,7 @@ def load_strategy_dataset(
     max_samples: int | None = None,
     max_samples_per_shard: int | None = None,
     seed: int = 0,
+    finish_head_mode: str = "binary",
 ) -> dict[str, jnp.ndarray]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
     rng = np.random.default_rng(seed)
@@ -76,7 +77,19 @@ def load_strategy_dataset(
         chunks["legal_mask"].append(shard["legal_mask"][shard_indices].astype(np.bool_))
         chunks["active"].append(shard["active"][shard_indices].astype(np.bool_))
         chunks["intent"].append(shard["intent"][shard_indices].astype(np.int32))
-        chunks["finish"].append((shard["finish_within_250"][shard_indices] > 0.5).astype(np.int32))
+        if finish_head_mode == "multi-horizon":
+            chunks["finish"].append(
+                np.stack(
+                    [
+                        shard["finish_within_50"][shard_indices],
+                        shard["finish_within_100"][shard_indices],
+                        shard["finish_within_250"][shard_indices],
+                    ],
+                    axis=-1,
+                ).astype(np.float32)
+            )
+        else:
+            chunks["finish"].append((shard["finish_within_250"][shard_indices] > 0.5).astype(np.int32))
         chunks["finish_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
         chunks["outcome"].append(shard["outcome"][shard_indices].astype(np.int32))
         chunks["outcome_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
@@ -149,6 +162,7 @@ def train_step(
     source_weight: float,
     target_weight: float,
     freeze_base: bool,
+    multi_horizon_finish: bool,
 ):
     """Train one minibatch of frozen-trunk strategy auxiliary losses."""
     (
@@ -176,14 +190,24 @@ def train_step(
         intent_loss = jnp.mean(intent_losses)
         intent_accuracy = jnp.mean((jnp.argmax(outputs.intent_logits, axis=-1) == intent_targets).astype(jnp.float32))
 
-        finish_log_probs = jax.nn.log_softmax(outputs.finish_logits, axis=-1)
-        finish_losses = -finish_log_probs[jnp.arange(finish_log_probs.shape[0]), finish_targets]
         finish_normalizer = jnp.maximum(jnp.sum(finish_weights), 1.0)
-        finish_loss = jnp.sum(finish_losses * finish_weights) / finish_normalizer
-        finish_accuracy = jnp.sum(
-            (jnp.argmax(outputs.finish_logits, axis=-1) == finish_targets).astype(jnp.float32) * finish_weights
-        )
-        finish_accuracy = finish_accuracy / finish_normalizer
+        if multi_horizon_finish:
+            finish_losses = binary_cross_entropy_with_logits(outputs.finish_logits, finish_targets)
+            finish_loss = jnp.sum(finish_losses * finish_weights[:, None])
+            finish_loss = finish_loss / jnp.maximum(finish_normalizer * finish_targets.shape[-1], 1.0)
+            finish_predictions = (jax.nn.sigmoid(outputs.finish_logits) >= 0.5).astype(jnp.float32)
+            finish_accuracy = jnp.sum(
+                (finish_predictions == finish_targets).astype(jnp.float32) * finish_weights[:, None]
+            )
+            finish_accuracy = finish_accuracy / jnp.maximum(finish_normalizer * finish_targets.shape[-1], 1.0)
+        else:
+            finish_log_probs = jax.nn.log_softmax(outputs.finish_logits, axis=-1)
+            finish_losses = -finish_log_probs[jnp.arange(finish_log_probs.shape[0]), finish_targets]
+            finish_loss = jnp.sum(finish_losses * finish_weights) / finish_normalizer
+            finish_accuracy = jnp.sum(
+                (jnp.argmax(outputs.finish_logits, axis=-1) == finish_targets).astype(jnp.float32) * finish_weights
+            )
+            finish_accuracy = finish_accuracy / finish_normalizer
 
         active_f = active.astype(jnp.float32)
         belief_per_cell = binary_cross_entropy_with_logits(outputs.enemy_general_logits, enemy_general)
@@ -311,6 +335,7 @@ def train_epoch(
     source_weight: float,
     target_weight: float,
     freeze_base: bool,
+    multi_horizon_finish: bool,
 ):
     """Shuffle one full pass over the loaded shards."""
     num_samples = dataset["obs"].shape[0]
@@ -353,6 +378,7 @@ def train_epoch(
             source_weight,
             target_weight,
             freeze_base,
+            multi_horizon_finish,
         )
         loss_sum += loss
         metrics_sum = metrics if metrics_sum is None else jax.tree.map(lambda a, b: a + b, metrics_sum, metrics)
@@ -382,6 +408,8 @@ def parse_args():
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
+    parser.add_argument("--finish-head-mode", choices=("binary", "multi-horizon"), default="binary")
+    parser.add_argument("--init-finish-head-mode", choices=("binary", "multi-horizon"), default="binary")
     parser.add_argument("--strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-model-path", required=True)
@@ -461,7 +489,13 @@ def parse_args():
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
-    dataset = load_strategy_dataset(paths, args.max_samples, args.max_samples_per_shard, args.seed)
+    dataset = load_strategy_dataset(
+        paths,
+        args.max_samples,
+        args.max_samples_per_shard,
+        args.seed,
+        args.finish_head_mode,
+    )
     key = jrandom.PRNGKey(args.seed)
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
     init_value_bins = (
@@ -469,6 +503,8 @@ def main():
         if args.init_value_loss == "hl-gauss"
         else 0
     )
+    finish_outputs = 3 if args.finish_head_mode == "multi-horizon" else 2
+    init_finish_outputs = 3 if args.init_finish_head_mode == "multi-horizon" else 2
 
     print("Adaptive strategy supervised training")
     print(f"Device:        {jax.devices()[0]}")
@@ -478,6 +514,7 @@ def main():
         print(f"Shard cap:     {args.max_samples_per_shard}")
     print(f"Network arch:  {args.network_arch}")
     print(f"Warm start:    {args.init_model_path}")
+    print(f"Finish head:   {args.finish_head_mode} ({finish_outputs} logits)")
     print(
         "Loss weights:  "
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
@@ -509,6 +546,8 @@ def main():
         init_outcome_head=args.init_outcome_head,
         strategy_aux=True,
         init_strategy_aux=args.init_strategy_aux,
+        strategy_finish_outputs=finish_outputs,
+        init_strategy_finish_outputs=init_finish_outputs,
         strategy_spatial_aux=args.strategy_spatial_aux,
         init_strategy_spatial_aux=args.init_strategy_spatial_aux,
         global_context=args.global_context,
@@ -540,6 +579,7 @@ def main():
             args.source_weight,
             args.target_weight,
             args.update_scope == "strategy-heads",
+            args.finish_head_mode == "multi-horizon",
         )
         jax.block_until_ready(network)
         print(

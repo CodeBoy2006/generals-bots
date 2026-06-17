@@ -951,3 +951,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote these checkpoints. Add a real multi-horizon finish head or oversample true U-Net-vs-v5 winning trajectories before the next full-policy imitation run.
 - **Context:** Best diagnostic checkpoint was v2: fixed-v5 max250 256-row min `12.11%`, above same-seed active base `9.38%`, but Expander 64-row min was only `70.31%`. v1/v3 64-row positives did not survive 256-row fixed-v5 confirmation. All model artifacts are in ignored `runs/`, not cache directories.
+
+## [2026-06-17 22:17] Multi-Horizon Finish Head
+- **Changes:** Added configurable `strategy_finish_outputs`, `adaptive_strategy_supervised.py --finish-head-mode multi-horizon`, evaluator `--strategy-finish-outputs`, and PPO warm-start `--init-strategy-finish-outputs`. Documented the new CLI and GPU probes.
+- **Status:** Completed
+- **Next Steps:** Do not promote v4/v5. Next data should be rollout-search winning trajectories or accepted Plan-Q oracle executions, because vanilla sampled winning windows are not enough.
+- **Context:** Old 2-logit U-Net checkpoints can warm-start into a 3-logit finish head. v4 multi-horizon mixed data learned finish labels (`69.9%`) but fixed-v5 max250 256-row fell to `8.98%`; v5 true-v5-win-only learned finish labels (`79.6%`) but fixed-v5 64-row min was `7.81%`.

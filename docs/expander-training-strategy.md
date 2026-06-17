@@ -4614,6 +4614,56 @@ Do not promote v0-v3 or v2-cont. Best diagnostic artifact is v2, but only as a
 weak positive data-quality signal.
 ```
 
+### Multi-horizon finish head
+
+Implemented a backward-compatible strategy finish head size:
+
+```text
+adaptive_network.py:
+  strategy_finish_outputs default 2
+  strategy_finish_outputs=3 for multi-horizon finish logits
+  old 2-logit checkpoints can be prefix-copied into a 3-logit target
+
+adaptive_strategy_supervised.py:
+  --finish-head-mode binary
+  --finish-head-mode multi-horizon
+  --init-finish-head-mode binary|multi-horizon
+
+evaluate_adaptive_policy.py:
+  --strategy-finish-outputs 3
+
+train_adaptive.py:
+  --init-strategy-finish-outputs 3
+```
+
+GPU smoke confirmed `adaptive-unet-ppo-v4` can warm-start into a 3-logit finish
+head:
+
+```text
+strategy_finish_linear2.weight.shape = (3, 64)
+```
+
+Training probes:
+
+| model | data | finish mode | key settings | fixed-v5 max250 | verdict |
+| --- | --- | --- | --- | --- | --- |
+| `adaptive-midgame-decisive-imitation-v4-mh` | v2 mixed data | 50/100/250 BCE | KL `2`, CE `0.3`, outcome `0.4` | 64-row min `10.94%`; 256-row min `8.98%` | head learns, gameplay worse than v2 |
+| `adaptive-midgame-decisive-imitation-v5-v5win-mh` | true U-Net-vs-v5 wins only | 50/100/250 BCE | KL `1.5`, CE `0.6`, no outcome/intent | 64-row min `7.81%` | conservative imitation still does not improve gate |
+
+The multi-horizon head fixes the training pathology: mixed data reaches
+finish-label accuracy `69.9%`, while true-v5-win-only reaches `79.6%`. Gameplay
+still does not improve, so the next bottleneck is not the finish head alone.
+
+Updated diagnosis:
+
+```text
+Midgame decisive filtering is good infrastructure.
+Multi-horizon finishability is learnable and should be kept.
+Current teacher trajectories are too narrow and do not teach actions that beat v5 reliably.
+Next useful data should come from rollout-search winning trajectories or accepted Plan-Q oracle
+executions, not only vanilla U-Net/v5 sampled winning windows.
+```
+
 ## 2026-06-17 Frozen Strategy-Head Supervision v0
 
 Implemented `examples/_experimental/ppo/adaptive_strategy_supervised.py`, a first offline trainer for strategy heads on top of the validated U-Net imitation v3 base.
