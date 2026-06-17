@@ -587,6 +587,30 @@ uv run python examples/_experimental/ppo/adaptive_teacher_imitation.py 128 \
 
 `--fog-memory` appends explored-ever, last-seen enemy ownership, last-seen enemy army, seen city, and seen general planes. `adaptive_teacher_imitation.py` lets the legacy adaptive CNN drive mixed-seat rollouts and trains the U-Net with all-action teacher KL plus action CE. Greedy teacher action labels are much less noisy than sampled labels, while KL still preserves the teacher distribution. U-Net checkpoints must be evaluated with matching `--network-arch unet`, `--channels`, `--scoreboard-history`, `--fog-memory`, and value-head flags.
 
+`adaptive_strategy_dataset.py` collects offline strategy-supervision shards under `runs/` without changing policy weights. Each `.npz` shard stores adaptive observations, legal masks, teacher logits/actions, outcome/terminal labels, enemy-general and hidden-enemy maps, weak intent labels, and source/target heatmaps. Example U-Net teacher collection:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 16 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-steps 128 \
+  --teacher-kind adaptive \
+  --teacher-model-path runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx \
+  --teacher-network-arch unet \
+  --teacher-channels 64,96,128,64 \
+  --teacher-input-channels 35 \
+  --teacher-scoreboard-history \
+  --teacher-value-heads per-size \
+  --teacher-value-head-sizes 8,12,16 \
+  --teacher-value-loss hl-gauss \
+  --teacher-outcome-head \
+  --scoreboard-history \
+  --fog-memory \
+  --opponent expander \
+  --output-dir runs/adaptive-strategy-dataset-v0/unet-v3-expander
+```
+
 ## 验证
 
 运行完整测试：

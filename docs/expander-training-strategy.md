@@ -4428,3 +4428,88 @@ U-Net imitation v3 is validated as a stable supervised base, not a 512-row false
 U-Net PPO v4 remains the active Expander base because it has better 12/16 rows and lower 16x draw.
 For strategy-dataset work, use v3 as the clean supervised-policy teacher/base and v4 as the stronger Expander active baseline.
 ```
+
+## 2026-06-17 Adaptive Strategy Dataset v0
+
+Implemented `examples/_experimental/ppo/adaptive_strategy_dataset.py`, a first offline shard collector for strategy supervision.
+
+The collector supports:
+
+```text
+teacher-kind:
+  adaptive checkpoint
+  fixed 8x8 PolicyValueNetwork checkpoint
+  Expander target distribution
+
+mixed learner seats:
+  p0 and p1 are collected in the same shard
+
+saved arrays:
+  obs
+  legal_mask
+  active
+  teacher_logits
+  teacher_action_index
+  teacher_greedy_index
+  action
+  grid_size
+  seat
+  done / winner
+  outcome / outcome_known
+  steps_to_terminal / terminal_time
+  finish_within_50 / 100 / 250
+  draw_risk
+  enemy_general_heatmap
+  enemy_owned_map
+  hidden_enemy_owned_map
+  hidden_enemy_army_map
+  city_map
+  source_heatmap
+  target_heatmap
+  weak intent
+  visible_enemy_density
+  contact
+```
+
+Smoke checks:
+
+```text
+adaptive U-Net v3 smoke:
+  4 envs x 8 steps
+  output: runs/adaptive-strategy-dataset-smoke2/unet-v3-smoke-00000.npz
+  samples: 32
+  obs: (32, 35, 16, 16)
+  teacher_logits: (32, 2049), finite float16 after clipping masked logits to -1e4
+
+fixed-v5 smoke:
+  4 envs x 260 steps, max250
+  output: runs/adaptive-strategy-dataset-fixed-v5-smoke/fixed-v5-smoke-00000.npz
+  samples: 1040
+  episodes: 4
+  draws: 4
+  draw_risk mean: 0.961
+```
+
+Initial v0 shards:
+
+| shard | samples | size | grid distribution | seat distribution | outcome known | finish250 | draw risk | contact |
+| --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| `runs/adaptive-strategy-dataset-v0/unet-v3-expander/unet-v3-expander-00000.npz` | 2048 | 1.2M | 8:768, 12:384, 16:896 | p0:1024, p1:1024 | `0.145` | `0.145` | `0.000` | `0.401` |
+| `runs/adaptive-strategy-dataset-v0/fixed-v5-max250/fixed-v5-max250-00000.npz` | 4160 | 1.9M | 8:4160 | p0:2080, p1:2080 | `0.832` | `0.029` | `0.661` | `0.859` |
+
+Interpretation:
+
+```text
+The v0 collector is ready for the next stage: training frozen-trunk finish/belief/intent heads.
+The fixed-v5 shard captures the desired anti-draw regime: high contact, high draw-risk, low finish-within-250.
+The U-Net/Expander shard captures successful adaptive policy states and gives positive finish labels for contrast.
+```
+
+Known limitations for v0:
+
+```text
+target_heatmap is currently the true enemy general heatmap.
+source_heatmap is the own largest-stack cell.
+intent labels are weak rule labels without search outcomes.
+No replacement-outcome top-k search rows are saved yet.
+```

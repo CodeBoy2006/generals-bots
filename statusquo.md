@@ -741,3 +741,9 @@
 - **Status:** Completed
 - **Next Steps:** Use U-Net imitation v3 as the clean supervised-policy base/teacher for `adaptive_strategy_dataset.py`; keep U-Net PPO v4 as the stronger active Expander baseline until strategy supervision produces a better checkpoint.
 - **Context:** v3 scored `73.68%` min on seed `78860` and `74.61%` min on seed `80720`, with 16x draw around `14-15%`. v4 still has better 12/16 rows and lower 16x draw on its existing 2048-row seed, so v3 is validated for supervised strategy work but not promoted over v4 as active Expander base.
+
+## [2026-06-17 17:01] Adaptive Strategy Dataset v0
+- **Changes:** Added `adaptive_strategy_dataset.py`, an offline shard collector for adaptive observations, teacher logits/actions, outcome/terminal labels, belief maps, weak intent, source/target heatmaps, and contact/density probes. Updated README and strategy docs with usage and v0 shard statistics.
+- **Status:** Completed
+- **Next Steps:** Add the frozen-trunk strategy-head trainer that consumes these shards and learns finish/draw-risk, enemy-general belief, hidden enemy maps, weak intent, source heatmap, and target heatmap without changing policy logits.
+- **Context:** CUDA smoke passed for U-Net v3 teacher and fixed-v5 teacher. Initial shards were written under ignored `runs/adaptive-strategy-dataset-v0/`: U-Net v3 vs Expander has 2048 samples and 0.145 finish-within-250 mean; fixed-v5 max250 has 4160 samples, 0.661 draw-risk mean, 0.029 finish-within-250 mean, and balanced p0/p1 seats.
