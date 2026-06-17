@@ -927,3 +927,9 @@
 - **Status:** Completed
 - **Next Steps:** Re-run scorer probes with top-k metrics before deciding whether Commander candidate selection is unusable or only needs a top-k rerank/Worker stage.
 - **Context:** Mid100 high-gap data improved scorer correlation more than argmax pair@1, so top-k visibility is needed to judge whether the scorer can shortlist useful plans even when top1 remains weak.
+
+## [2026-06-17 21:44] High-Gap Pair Top-K Recheck
+- **Changes:** Recomputed top-k metrics for `adaptive-plan-pair-scorer-highgap-v0.best` and documented the result.
+- **Status:** Completed
+- **Next Steps:** Treat explicit pair scorer as a top-k shortlist candidate only; do not wire it as a single-plan evaluator selector.
+- **Context:** Highgap-v0 validation metrics were pair@1 `18.0%`, pair@2 `23.8%`, pair@4 `33.5%`, source `30.7%`, target `38.3%`, corr `+0.127`. Top-k is better than argmax but still too weak for direct gameplay integration.

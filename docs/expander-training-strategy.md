@@ -7004,3 +7004,15 @@ The best checkpoint is still selected by validation pair@1. The new metrics are
 diagnostic only, but they are important because the mid100 run improved
 correlation more than argmax top1; a Commander can still use a top-k scorer if
 later rollout or a Worker head resolves the final choice.
+
+Recomputed top-k metrics for the best highgap-v0 scorer:
+
+```text
+checkpoint: runs/adaptive-plan-pair-scorer-highgap-v0/generals-adaptive-plan-pair-scorer-highgap-v0.best.eqx
+train: pair@1 13.7%, pair@2 25.7%, pair@4 41.7%, source 34.0%, target 36.0%, corr +0.176
+val:   pair@1 18.0%, pair@2 23.8%, pair@4 33.5%, source 30.7%, target 38.3%, corr +0.127
+```
+
+This is not strong enough for direct evaluator integration, but it is better
+than a pure argmax read suggests. A future Commander probe should treat the
+scorer as a top-k shortlist, not as a single-plan selector.
