@@ -611,6 +611,38 @@ uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 16 \
   --output-dir runs/adaptive-strategy-dataset-v0/unet-v3-expander
 ```
 
+`adaptive_strategy_supervised.py` consumes those shards and trains only the frozen-base strategy heads. The first stage intentionally leaves the policy/trunk logits unchanged while learning intent, finish-within-250, and enemy-general belief:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v0/unet-v3-expander/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max250/*.npz' \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-model-path runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx \
+  --num-epochs 20 \
+  --minibatch-size 512 \
+  --intent-weight 0.2 \
+  --finish-weight 0.4 \
+  --belief-weight 0.3 \
+  --model-path runs/adaptive-strategy-supervised-v0/generals-adaptive-strategy-supervised-v0.eqx
+```
+
+This is a representation-learning step, not a gameplay promotion step. Use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head.
+
 ## 验证
 
 运行完整测试：

@@ -4513,3 +4513,96 @@ source_heatmap is the own largest-stack cell.
 intent labels are weak rule labels without search outcomes.
 No replacement-outcome top-k search rows are saved yet.
 ```
+
+## 2026-06-17 Frozen Strategy-Head Supervision v0
+
+Implemented `examples/_experimental/ppo/adaptive_strategy_supervised.py`, a first offline trainer for strategy heads on top of the validated U-Net imitation v3 base.
+
+Training setup:
+
+```text
+init:
+  runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx
+
+datasets:
+  runs/adaptive-strategy-dataset-v0/unet-v3-expander/*.npz
+  runs/adaptive-strategy-dataset-v0/fixed-v5-max250/*.npz
+
+network:
+  U-Net 64,96,128,64
+  input_channels 35
+  global_context + scoreboard_history + fog_memory
+  per-size HL-Gauss value heads
+  outcome head loaded but not trained in v0
+
+update scope:
+  strategy_intent_linear2
+  strategy_finish_linear2
+  strategy_enemy_general_conv
+  strategy_q heads receive no loss yet
+  trunk/policy/value frozen by gradient mask
+```
+
+GPU smoke:
+
+```text
+command:
+  1024 samples, 3 epochs, CUDA_VISIBLE_DEVICES=0
+
+result:
+  Loss 15.3574 -> 15.0802
+  Intent loss 6.6846 -> 6.3125
+  Finish loss 0.4217 -> 0.4077
+  Belief BCE 7.9549 -> 7.6889
+```
+
+The smoke used `--outcome-weight 0.4` and exposed a useful calibration issue:
+
+```text
+Outcome loss stayed very high at about 28.4.
+The label encoding is correct (0/1/2), so the issue is the warm-start outcome head being poorly calibrated on fixed-v5 draw-heavy states.
+Decision: keep outcome_weight at 0 for the first frozen-head stage and train outcome later with balanced shards or a fresh head.
+```
+
+Full v0 head training:
+
+```text
+command:
+  all v0 shards
+  6208 samples
+  20 epochs
+  minibatch_size 512
+  lr 1e-4
+  outcome_weight 0
+
+artifact:
+  runs/adaptive-strategy-supervised-v0/generals-adaptive-strategy-supervised-v0.eqx
+```
+
+Training curve:
+
+| epoch | loss | intent loss / acc | finish loss / acc | belief BCE |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `2.3954` | `4.5516 / 0.2%` | `2.4715 / 11.1%` | `1.6549` |
+| 5 | `1.1971` | `2.6910 / 0.3%` | `1.0957 / 11.9%` | `0.7353` |
+| 10 | `0.5513` | `1.3896 / 76.6%` | `0.4589 / 89.0%` | `0.2993` |
+| 20 | `0.3566` | `0.8600 / 76.4%` | `0.3583 / 89.0%` | `0.1375` |
+
+Policy preservation check:
+
+```text
+128 held dataset states
+base:    U-Net imitation v3 without strategy aux
+trained: strategy-supervised v0 with strategy aux
+
+max_policy_logit_abs_diff:  0.0
+mean_policy_logit_abs_diff: 0.0
+```
+
+Interpretation:
+
+```text
+The v0 strategy labels are learnable, and the frozen-head update path is safe.
+This checkpoint is not expected to improve gameplay yet because policy logits are identical to U-Net imitation v3.
+The next useful step is to expand the dataset with fixed-v5 max500/max750 and more max250 draw/decisive rows, then run policy-coupled strategy training where the U-Net trunk/policy is allowed a small KL-anchored update.
+```

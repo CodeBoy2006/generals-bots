@@ -747,3 +747,9 @@
 - **Status:** Completed
 - **Next Steps:** Add the frozen-trunk strategy-head trainer that consumes these shards and learns finish/draw-risk, enemy-general belief, hidden enemy maps, weak intent, source heatmap, and target heatmap without changing policy logits.
 - **Context:** CUDA smoke passed for U-Net v3 teacher and fixed-v5 teacher. Initial shards were written under ignored `runs/adaptive-strategy-dataset-v0/`: U-Net v3 vs Expander has 2048 samples and 0.145 finish-within-250 mean; fixed-v5 max250 has 4160 samples, 0.661 draw-risk mean, 0.029 finish-within-250 mean, and balanced p0/p1 seats.
+
+## [2026-06-17 17:11] Frozen Strategy Head Supervision v0
+- **Changes:** Added `adaptive_strategy_supervised.py`, a frozen-base offline trainer for U-Net strategy auxiliary heads from strategy dataset shards. Updated README and strategy docs with commands, GPU smoke, v0 training curve, and policy-preservation check.
+- **Status:** Completed
+- **Next Steps:** Expand the strategy dataset with fixed-v5 max500/max750 and more max250 decisive/draw rows, then run policy-coupled strategy training with a KL anchor so finish/belief/intent features can influence action logits.
+- **Context:** CUDA v0 training on 6208 samples reduced loss `2.3954 -> 0.3566`, intent accuracy reached `76.4%`, finish accuracy reached `89.0%`, and belief BCE fell `1.6549 -> 0.1375`. Outcome supervision was left off because the warm-start outcome head is badly calibrated on fixed-v5 draw-heavy states. Policy logit diff versus U-Net imitation v3 was exactly `0.0`, confirming no gameplay promotion is expected yet.
