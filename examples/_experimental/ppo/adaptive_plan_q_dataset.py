@@ -1128,16 +1128,22 @@ def filter_plan_q_arrays(
     target_count: int,
     min_plan_gap: float,
     require_best_plan_win: bool,
+    min_save_turn: int,
+    max_save_turn: int | None,
 ) -> tuple[dict[str, np.ndarray], int, int]:
     """Filter rows before writing a shard while preserving aligned array axes."""
     original_count = int(arrays["obs"].shape[0])
-    if min_plan_gap <= 0.0 and not require_best_plan_win:
+    if min_plan_gap <= 0.0 and not require_best_plan_win and min_save_turn <= 0 and max_save_turn is None:
         return arrays, original_count, original_count
     keep = np.ones((original_count,), dtype=np.bool_)
     if min_plan_gap > 0.0:
         keep &= arrays["plan_q_gap"].astype(np.float32) >= min_plan_gap
     if require_best_plan_win:
         keep &= best_plan_outcomes_from_arrays(arrays, target_count) == 2
+    if min_save_turn > 0:
+        keep &= arrays["time"].astype(np.int32) >= min_save_turn
+    if max_save_turn is not None:
+        keep &= arrays["time"].astype(np.int32) <= max_save_turn
     filtered = {name: value[keep] for name, value in arrays.items()}
     return filtered, original_count, int(np.sum(keep))
 
@@ -1206,6 +1212,8 @@ def parse_args():
     parser.add_argument("--logit-dtype", choices=("float32", "float16"), default="float16")
     parser.add_argument("--min-plan-gap", type=float, default=0.0)
     parser.add_argument("--require-best-plan-win", action="store_true")
+    parser.add_argument("--min-save-turn", type=int, default=0)
+    parser.add_argument("--max-save-turn", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -1255,6 +1263,10 @@ def parse_args():
         parser.error("--score-scale and --score-temperature must be positive")
     if args.min_plan_gap < 0.0:
         parser.error("--min-plan-gap must be non-negative")
+    if args.min_save_turn < 0:
+        parser.error("--min-save-turn must be non-negative")
+    if args.max_save_turn is not None and args.max_save_turn < args.min_save_turn:
+        parser.error("--max-save-turn must be greater than or equal to --min-save-turn")
     if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
         parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.opponent_input_channels <= 0:
@@ -1297,10 +1309,11 @@ def main():
         print(f"Plan worker:   {args.plan_worker_steps} extra target-conditioned steps")
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} behavior steps before scoring")
-    if args.min_plan_gap > 0.0 or args.require_best_plan_win:
+    if args.min_plan_gap > 0.0 or args.require_best_plan_win or args.min_save_turn > 0 or args.max_save_turn is not None:
         print(
             "Save filter:   "
-            f"min_gap={args.min_plan_gap:g}, require_best_win={args.require_best_plan_win}"
+            f"min_gap={args.min_plan_gap:g}, require_best_win={args.require_best_plan_win}, "
+            f"turn=[{args.min_save_turn}, {args.max_save_turn if args.max_save_turn is not None else 'inf'}]"
         )
     print(f"Output:        {args.output_dir}")
     if args.scoreboard_history:
@@ -1458,6 +1471,8 @@ def main():
         "score_temperature": args.score_temperature,
         "min_plan_gap": args.min_plan_gap,
         "require_best_plan_win": args.require_best_plan_win,
+        "min_save_turn": args.min_save_turn,
+        "max_save_turn": args.max_save_turn,
         "seed": args.seed,
     }
 
@@ -1520,6 +1535,8 @@ def main():
             args.target_count,
             args.min_plan_gap,
             args.require_best_plan_win,
+            args.min_save_turn,
+            args.max_save_turn,
         )
         if kept_samples == 0:
             print(

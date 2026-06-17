@@ -915,3 +915,9 @@
 - **Status:** Completed
 - **Next Steps:** Scale `min_gap=0.25` model-worker collection before evaluator integration; do not tighten to `0.5` until there are enough rows.
 - **Context:** Highgap v0 kept 818/2048 rows with best-plan win `32.3%`, draw `67.7%`, mean gap `0.680`. Pair scorer highgap-v0 beat same-split additive val pair top1 `18.0%` vs `15.2%`; highgap-gap05-v0 used 410 rows and fell to `15.3%`, effectively additive baseline.
+
+## [2026-06-17 21:35] Midgame Plan-Q Save Filter
+- **Changes:** Added `--min-save-turn` and `--max-save-turn` to `adaptive_plan_q_dataset.py` and documented the highgap-v1 scaling results that motivated the turn filter.
+- **Status:** Completed
+- **Next Steps:** Collect mid/late high-gap model-worker data with `min_gap=0.25` and `min_save_turn` around 100 or 120 before training another pair scorer.
+- **Context:** Highgap-v1 scaled to 3415 rows but shifted earlier than v0: median turn `96` vs `128`, and p1 best-plan win fell to `22.0%` vs v0 `36.5%`. Scorer still beat additive (`8.2%` vs `5.0%`; gap05 `11.3%` vs `7.1%`) but absolute pair top1 was too weak.

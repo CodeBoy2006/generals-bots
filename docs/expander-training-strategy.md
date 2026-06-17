@@ -6929,3 +6929,65 @@ The 0.5 filter is too small at this scale and collapses to additive-baseline
 pair top1. The next useful route is more min_gap=0.25 data, not harder
 filtering or evaluator integration.
 ```
+
+### High-gap v1 scaling and turn-filter diagnosis
+
+Scaled `min_plan_gap=0.25` collection to 16 shards:
+
+```text
+output: runs/adaptive-plan-q-model-worker-highgap-v1/
+seed: 84900
+states scored: 8192
+states kept: 3415
+best_win: 23.4%
+best_draw: 76.6%
+mean_best_q: +0.2094
+mean_gap: 0.6243
+gap quantiles: [0.2500, 0.3274, 0.4863, 0.8206, 1.2520, 1.3948, 1.8340]
+```
+
+Distribution comparison:
+
+```text
+highgap-v0:
+  rows: 818
+  time mean/median: 127.3 / 128
+  p0 rows/win/gap/q/time: 344 / 26.5% / 0.633 / +0.279 / 133.3
+  p1 rows/win/gap/q/time: 474 / 36.5% / 0.714 / +0.396 / 123.0
+
+highgap-v1:
+  rows: 3415
+  time mean/median: 103.2 / 96
+  p0 rows/win/gap/q/time: 1598 / 25.0% / 0.635 / +0.178 / 94.8
+  p1 rows/win/gap/q/time: 1817 / 22.0% / 0.615 / +0.237 / 110.5
+```
+
+Pair-scorer results:
+
+```text
+highgap-v1:
+  rows: 3415
+  train/val: 2732 / 683
+  same-split additive val pair top1: 5.0%, corr -0.014
+  best scorer val pair top1: 8.2%, source 22.4%, target 29.5%, corr +0.058
+
+highgap-v1-gap05:
+  rows: 1656
+  train/val: 1325 / 331
+  same-split additive val pair top1: 7.1%, corr -0.033
+  best scorer val pair top1: 11.3%, source 27.7%, target 30.6%, corr +0.084
+```
+
+Conclusion:
+
+```text
+More rows alone did not fix pair scoring. The v1 collection drifted earlier in
+the game and had much weaker p1 winning-plan density than v0. The pair scorer
+still beats additive, but the absolute signal is too weak for evaluator
+integration.
+
+Added `adaptive_plan_q_dataset.py --min-save-turn` and `--max-save-turn` so the
+next dataset can target mid/late high-gap states directly. Next probe should use
+min_gap=0.25 plus min_save_turn around 100 or 120; do not keep scaling raw
+0.25 high-gap rows.
+```
