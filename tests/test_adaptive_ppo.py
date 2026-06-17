@@ -1263,6 +1263,22 @@ def test_strategy_aux_loss_uses_q_intent_finish_and_belief_targets():
     assert float(metrics["strategy_belief_loss"]) > 0.0
 
 
+def test_strategy_q_pairwise_rank_loss_rewards_correct_candidate_order():
+    from examples._experimental.ppo.adaptive_search_distill import strategy_q_pairwise_rank_loss
+
+    target_q = jnp.array([[1.0, -1.0, 0.9]], dtype=jnp.float32)
+    correct_pred = jnp.array([[2.0, -2.0, 0.0]], dtype=jnp.float32)
+    reversed_pred = jnp.array([[-2.0, 2.0, 0.0]], dtype=jnp.float32)
+    weights = jnp.ones((1,), dtype=jnp.float32)
+
+    correct_loss = strategy_q_pairwise_rank_loss(correct_pred, target_q, weights, min_margin=0.25)
+    reversed_loss = strategy_q_pairwise_rank_loss(reversed_pred, target_q, weights, min_margin=0.25)
+    filtered_loss = strategy_q_pairwise_rank_loss(correct_pred, target_q, weights, min_margin=5.0)
+
+    assert float(correct_loss) < float(reversed_loss)
+    assert float(filtered_loss) == 0.0
+
+
 def test_soft_search_weights_can_select_only_search_improvements():
     from examples._experimental.ppo.adaptive_search_distill import (
         SOFT_WEIGHT_MODE_NAME_TO_ID,

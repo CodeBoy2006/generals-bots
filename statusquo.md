@@ -621,3 +621,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote raw strategy-Q rerank. If Q is pursued further, train/calibrate a dedicated candidate-ranking head with seat/size-balanced batches and inference-scaled targets.
 - **Context:** On v3 iter8, 64 games/row seed 74900 peaked at `67.19%` min with scale `0.02`, but 256 games/row seed 74920 showed only a tiny best improvement: scale `0.01` reached `67.97%` min versus `67.58%` at scale `0.00`, still far below the `71.29%` candidate. Q bias mostly moves weakness between 16p0/16p1 instead of solving it.
+
+## [2026-06-17 12:18] Strategy-Q Pairwise Rank Probe
+- **Changes:** Added `adaptive_search_distill.py --strategy-q-rank-weight` / `--strategy-q-rank-min-margin`, a pairwise candidate ranking loss for strategy-Q heads. Added a focused rank-loss test and documented the short GPU aux-only calibration run.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-strategy-q-rank-v1`. Q-ranking needs online validation or better target normalization before it should bias policy logits.
+- **Context:** The rank loss optimized on GPU (`StratRank 0.1746 -> 0.0381`, `StratQ 90.0352 -> 76.4928`) in `runs/adaptive-strategy-q-rank-v1/`, but inference got worse: 64 games/row seed 75020 scored `64.06%` min at rerank scale `0.01` and `57.81%` at `0.02`. The run shows rank supervision is wired but not yet aligned with policy replacement outcomes.

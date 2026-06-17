@@ -2945,3 +2945,40 @@ template: --channels 32,32,32,16 --scoreboard-history --strategy-aux
 | `0.02` | `67.19%` | 16p0 `72.27%`, 16p1 `67.19%`; seat tradeoff returns |
 
 Conclusion: strategy-Q inference bias is a useful diagnostic and mildly improves the best 256-row row balance at scale `0.01`, but it is nowhere near the existing `71.29%` promotion bar. The failure mode is again seat/size transfer: Q bias helps 16p0 finish/draw, then pushes weakness into 16p1 or 8p0. Next step should train/calibrate Q for inference directly, e.g. Q-rank loss on candidate set with seat/size-balanced batches, not merely reuse the high-noise auxiliary Q head.
+
+### Strategy-Q pairwise rank loss
+
+Added optional pairwise ranking supervision for the strategy-Q head:
+
+```text
+--strategy-q-rank-weight
+--strategy-q-rank-min-margin
+```
+
+For each top-k search candidate set, this loss compares candidate pairs whose search-Q target gap exceeds the margin and applies a `softplus(-(q_i - q_j))` ranking loss when target `i` should outrank target `j`. It is intended to train inference ordering without relying on noisy absolute search score regression.
+
+GPU probe:
+
+```text
+init:      adaptive-strategy-aux-v3 iter8
+run:       runs/adaptive-strategy-q-rank-v1/
+settings:  mixed seats, 8/12/16, top_k=4, rollout_steps=4, rollouts/action=1
+loss:      strategy_q_weight=0.0001, strategy_q_rank_weight=0.05, rank_min_margin=0.02
+freeze:    --freeze-strategy-aux-only
+```
+
+Training log signal:
+
+```text
+iter 1:  StratQ 90.0352, StratRank 0.1746
+iter 24: StratQ 76.4928, StratRank 0.0381
+```
+
+Evaluation on seed `75020`, 64 games/row:
+
+| checkpoint | rerank scale | min win rate | bottleneck |
+| --- | ---: | ---: | --- |
+| `strategy-q-rank-v1` | `0.01` | `64.06%` | 16p1 |
+| `strategy-q-rank-v1` | `0.02` | `57.81%` | 16p1 |
+
+Conclusion: pairwise rank loss is implemented and optimizes, but this short aux-only run overfits/miscalibrates the Q head for inference. Do not promote. The next useful Q direction would require online validation inside training, stronger target normalization, or a rerank head trained on policy-action replacement outcomes rather than raw short-horizon search scores.

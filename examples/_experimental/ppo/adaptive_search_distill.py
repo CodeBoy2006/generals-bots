@@ -336,6 +336,25 @@ def binary_cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray) 
     return jnp.maximum(logits, 0.0) - logits * targets + jnp.log1p(jnp.exp(-jnp.abs(logits)))
 
 
+def strategy_q_pairwise_rank_loss(
+    candidate_q: jnp.ndarray,
+    candidate_q_targets: jnp.ndarray,
+    q_weights: jnp.ndarray,
+    min_margin: float,
+) -> jnp.ndarray:
+    """Pairwise ranking loss for strategy-Q candidate scores."""
+    target_diff = candidate_q_targets[:, :, None] - candidate_q_targets[:, None, :]
+    pred_diff = candidate_q[:, :, None] - candidate_q[:, None, :]
+    pair_mask = target_diff > min_margin
+    pair_losses = jax.nn.softplus(-pred_diff)
+    pair_counts = jnp.sum(pair_mask.astype(jnp.float32), axis=(1, 2))
+    per_sample_loss = jnp.sum(pair_losses * pair_mask.astype(jnp.float32), axis=(1, 2))
+    per_sample_loss = jnp.where(pair_counts > 0.0, per_sample_loss / jnp.maximum(pair_counts, 1.0), 0.0)
+    sample_weights = q_weights * (pair_counts > 0.0).astype(jnp.float32)
+    normalizer = jnp.maximum(jnp.sum(sample_weights), 1.0)
+    return jnp.sum(per_sample_loss * sample_weights) / normalizer
+
+
 def compute_strategy_aux_loss(
     student_network,
     obs,
@@ -354,6 +373,8 @@ def compute_strategy_aux_loss(
     intent_weight: float,
     finish_weight: float,
     belief_weight: float,
+    q_rank_weight: float = 0.0,
+    q_rank_min_margin: float = 0.0,
 ):
     """Return strategic Q/intent/finish/belief auxiliary loss and metrics."""
     outputs = jax.vmap(
@@ -368,6 +389,7 @@ def compute_strategy_aux_loss(
     q_errors = jnp.mean((candidate_q - candidate_q_targets) ** 2, axis=1)
     q_normalizer = jnp.maximum(jnp.sum(q_weights), 1.0)
     q_loss = jnp.sum(q_errors * q_weights) / q_normalizer
+    q_rank_loss = strategy_q_pairwise_rank_loss(candidate_q, candidate_q_targets, q_weights, q_rank_min_margin)
 
     intent_log_probs = jax.nn.log_softmax(outputs.intent_logits, axis=-1)
     intent_losses = -jnp.take_along_axis(intent_log_probs, intent_targets[:, None], axis=1)[:, 0]
@@ -389,9 +411,16 @@ def compute_strategy_aux_loss(
     belief_normalizer = jnp.maximum(jnp.sum(belief_weights), 1.0)
     belief_loss = jnp.sum(per_sample_belief * belief_weights) / belief_normalizer
 
-    loss = q_weight * q_loss + intent_weight * intent_loss + finish_weight * finish_loss + belief_weight * belief_loss
+    loss = (
+        q_weight * q_loss
+        + q_rank_weight * q_rank_loss
+        + intent_weight * intent_loss
+        + finish_weight * finish_loss
+        + belief_weight * belief_loss
+    )
     metrics = {
         "strategy_q_loss": jnp.where(q_weight > 0.0, q_loss, 0.0),
+        "strategy_q_rank_loss": jnp.where(q_rank_weight > 0.0, q_rank_loss, 0.0),
         "strategy_intent_loss": jnp.where(intent_weight > 0.0, intent_loss, 0.0),
         "strategy_finish_loss": jnp.where(finish_weight > 0.0, finish_loss, 0.0),
         "strategy_belief_loss": jnp.where(belief_weight > 0.0, belief_loss, 0.0),
@@ -784,6 +813,8 @@ def train_adaptive_soft_minibatch(
     search_value_weight,
     search_outcome_weight,
     strategy_q_weight,
+    strategy_q_rank_weight,
+    strategy_q_rank_min_margin,
     strategy_intent_weight,
     strategy_finish_weight,
     strategy_belief_weight,
@@ -847,6 +878,7 @@ def train_adaptive_soft_minibatch(
         )
         if (
             strategy_q_weight > 0.0
+            or strategy_q_rank_weight > 0.0
             or strategy_intent_weight > 0.0
             or strategy_finish_weight > 0.0
             or strategy_belief_weight > 0.0
@@ -869,11 +901,14 @@ def train_adaptive_soft_minibatch(
                 strategy_intent_weight,
                 strategy_finish_weight,
                 strategy_belief_weight,
+                strategy_q_rank_weight,
+                strategy_q_rank_min_margin,
             )
         else:
             strategy_loss = jnp.asarray(0.0, dtype=jnp.float32)
             strategy_metrics = {
                 "strategy_q_loss": jnp.asarray(0.0, dtype=jnp.float32),
+                "strategy_q_rank_loss": jnp.asarray(0.0, dtype=jnp.float32),
                 "strategy_intent_loss": jnp.asarray(0.0, dtype=jnp.float32),
                 "strategy_finish_loss": jnp.asarray(0.0, dtype=jnp.float32),
                 "strategy_belief_loss": jnp.asarray(0.0, dtype=jnp.float32),
@@ -1067,6 +1102,8 @@ def train_adaptive_soft_epoch(
     search_value_weight,
     search_outcome_weight,
     strategy_q_weight,
+    strategy_q_rank_weight,
+    strategy_q_rank_min_margin,
     strategy_intent_weight,
     strategy_finish_weight,
     strategy_belief_weight,
@@ -1154,6 +1191,8 @@ def train_adaptive_soft_epoch(
                 search_value_weight,
                 search_outcome_weight,
                 strategy_q_weight,
+                strategy_q_rank_weight,
+                strategy_q_rank_min_margin,
                 strategy_intent_weight,
                 strategy_finish_weight,
                 strategy_belief_weight,
@@ -1775,6 +1814,8 @@ def parse_args():
     parser.add_argument("--search-value-scale", type=float, default=100.0)
     parser.add_argument("--search-outcome-weight", type=float, default=0.0)
     parser.add_argument("--strategy-q-weight", type=float, default=0.0)
+    parser.add_argument("--strategy-q-rank-weight", type=float, default=0.0)
+    parser.add_argument("--strategy-q-rank-min-margin", type=float, default=0.0)
     parser.add_argument("--strategy-intent-weight", type=float, default=0.0)
     parser.add_argument("--strategy-finish-weight", type=float, default=0.0)
     parser.add_argument("--strategy-belief-weight", type=float, default=0.0)
@@ -1833,6 +1874,7 @@ def parse_args():
         or args.search_value_weight < 0.0
         or args.search_outcome_weight < 0.0
         or args.strategy_q_weight < 0.0
+        or args.strategy_q_rank_weight < 0.0
         or args.strategy_intent_weight < 0.0
         or args.strategy_finish_weight < 0.0
         or args.strategy_belief_weight < 0.0
@@ -1843,6 +1885,8 @@ def parse_args():
         )
     if args.search_value_scale <= 0.0:
         parser.error("--search-value-scale must be positive")
+    if args.strategy_q_rank_min_margin < 0.0:
+        parser.error("--strategy-q-rank-min-margin must be non-negative")
     if args.temperature <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--temperature and --score-temperature must be positive")
     if args.margin_scale <= 0.0 or args.max_improve_weight <= 0.0:
@@ -1865,6 +1909,7 @@ def parse_args():
         parser.error("--freeze-legacy-weights requires --global-context or --scoreboard-history")
     if args.freeze_strategy_aux_only and not (
         args.strategy_q_weight > 0.0
+        or args.strategy_q_rank_weight > 0.0
         or args.strategy_intent_weight > 0.0
         or args.strategy_finish_weight > 0.0
         or args.strategy_belief_weight > 0.0
@@ -1891,6 +1936,7 @@ def main():
     base_network_global_context = args.base_global_context or args.base_scoreboard_history
     strategy_aux_enabled = (
         args.strategy_q_weight > 0.0
+        or args.strategy_q_rank_weight > 0.0
         or args.strategy_intent_weight > 0.0
         or args.strategy_finish_weight > 0.0
         or args.strategy_belief_weight > 0.0
@@ -1965,7 +2011,8 @@ def main():
     if strategy_aux_enabled:
         print(
             "Strategy aux:   "
-            f"q={args.strategy_q_weight:g}, intent={args.strategy_intent_weight:g}, "
+            f"q={args.strategy_q_weight:g}, q_rank={args.strategy_q_rank_weight:g}, "
+            f"rank_margin={args.strategy_q_rank_min_margin:g}, intent={args.strategy_intent_weight:g}, "
             f"finish={args.strategy_finish_weight:g}, belief={args.strategy_belief_weight:g}"
         )
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
@@ -2243,6 +2290,8 @@ def main():
                 args.search_value_weight,
                 args.search_outcome_weight,
                 args.strategy_q_weight,
+                args.strategy_q_rank_weight,
+                args.strategy_q_rank_min_margin,
                 args.strategy_intent_weight,
                 args.strategy_finish_weight,
                 args.strategy_belief_weight,
@@ -2270,6 +2319,7 @@ def main():
                 f"Value: {float(metrics.get('search_value_loss', 0.0)):.4f} | "
                 f"Outcome: {float(metrics.get('search_outcome_loss', 0.0)):.4f} | "
                 f"StratQ: {float(metrics.get('strategy_q_loss', 0.0)):.4f} | "
+                f"StratRank: {float(metrics.get('strategy_q_rank_loss', 0.0)):.4f} | "
                 f"Intent: {float(metrics.get('strategy_intent_loss', 0.0)):.4f} | "
                 f"Belief: {float(metrics.get('strategy_belief_loss', 0.0)):.4f} | "
                 f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
