@@ -3128,4 +3128,19 @@ Training signal showed why this is not yet enough by itself:
 | `0.000` | `59.38%` | 16p0 |
 | `0.001` | `62.50%` | 8p1/16p0/16p1 |
 
-Conclusion: accepted-replacement weighting is implemented and confirms the data problem. True accepted replacements are present but sparse under one-step top-k candidate collection, so aux-only online batches are too noisy. Keep the option for future replay/oversampling, but do not continue accepted-only r64 training without a buffer that accumulates and balances accepted rows.
+A second probe initialized from the already calibrated `outcome-r64-v3` checkpoint and used lower LR `1e-5`:
+
+```text
+run:  runs/adaptive-strategy-q-accepted-r64-v2/
+init: runs/adaptive-strategy-q-outcome-r64-v3/generals-adaptive-strategy-q-outcome-r64-v3.eqx
+```
+
+It still saw sparse accepted rows (`5-26` per `512`) and did not improve inference:
+
+| scale | min win rate | bottleneck |
+| ---: | ---: | --- |
+| `0.000` | `68.75%` | 16p1 |
+| `0.001` | `62.50%` | 16p0 |
+| `0.002` | `67.19%` | 16p1 |
+
+Conclusion: accepted-replacement weighting is implemented and confirms the data problem. True accepted replacements are present but sparse under one-step top-k candidate collection, so aux-only online batches are too noisy even when starting from the better r64-calibrated Q head. Keep the option for future replay/oversampling, but do not continue accepted-only r64 training without a buffer that accumulates and balances accepted rows.

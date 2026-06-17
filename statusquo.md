@@ -657,3 +657,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue accepted-only online batches without replay/oversampling; accepted rows are too sparse. If revisited, build an accepted-row buffer or dedicated rerank dataset.
 - **Context:** `runs/adaptive-strategy-q-accepted-r64-v1/` saw only `6-22` accepted Q rows per 512 samples and unstable Q/rank losses. 64 games/row max750 min improved from `59.38%` at scale `0.000` to `62.50%` at `0.001`, still far below the current platform.
+
+## [2026-06-17 12:50] Accepted-Replacement Low-LR Fine-Tune
+- **Changes:** Ran and documented `runs/adaptive-strategy-q-accepted-r64-v2/`, a low-LR accepted-row fine-tune initialized from the stronger outcome-r64-v3 Q checkpoint.
+- **Status:** Completed
+- **Next Steps:** Stop accepted-only online fine-tuning; build replay/oversampling before returning to accepted replacements.
+- **Context:** Accepted rows remained sparse (`5-26` per 512). 64 games/row max750 min was `68.75%` with no Q bias, then dropped to `62.50%` at scale `0.001` and `67.19%` at scale `0.002`.
