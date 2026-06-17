@@ -30,6 +30,7 @@ from adaptive_common import (
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     AdaptiveFogMemory,
     active_cells_for_size,
+    adaptive_action_to_index,
     adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
@@ -401,9 +402,7 @@ def score_plan_candidates(
 
 def plan_action_to_index(action: jnp.ndarray, pad_size: int) -> jnp.ndarray:
     """Encode a plan first action into adaptive policy-index layout."""
-    is_pass, row, col, direction, is_half = action
-    encoded_dir = jnp.where(is_pass > 0, 8, jnp.where(is_half > 0, direction + 4, direction))
-    return (encoded_dir * pad_size * pad_size + row * pad_size + col).astype(jnp.int32)
+    return adaptive_action_to_index(action, pad_size)
 
 
 @eqx.filter_jit

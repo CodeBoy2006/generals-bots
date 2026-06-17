@@ -811,6 +811,37 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
 
 This trainer defaults to frozen trunk/policy updates and only moves the source/target strategy heads. It is a data-quality and representation probe until the Plan-Q shards include longer-horizon fixed-v5 outcome labels.
 
+The same trainer can train the strategy action-Q head directly from plan outcomes:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
+  --dataset runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz \
+  --init-model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --strategy-aux \
+  --init-strategy-aux \
+  --strategy-spatial-aux \
+  --init-strategy-spatial-aux \
+  --source-weight 0 \
+  --target-weight 0 \
+  --action-q-weight 1.0 \
+  --action-q-mse-weight 0.1 \
+  --gap-weighting \
+  --model-path runs/adaptive-plan-q-action-q-v1/generals-adaptive-plan-q-action-q-v1.eqx
+```
+
+Plan action labels use the standard adaptive action index, including the single global pass index. The action-Q loss aggregates duplicate plan slots onto their shared primitive action before applying ranking CE, then can be probed with `evaluate_adaptive_policy.py --strategy-q-rerank-scale <scale>`.
+
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
 
 ```bash

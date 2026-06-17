@@ -5310,3 +5310,104 @@ Worker-conditioned counterfactuals produced the first winning plan labels in thi
 The effect is real but still sparse: only 2/1024 plans won, so the supervised checkpoint is not a promotion model.
 Next step is larger worker-conditioned collection, likely mixing fixed-v5 max250/max500 and keeping enough near-terminal successful rows for finish labels.
 ```
+
+## 2026-06-17 Plan-Q Action-Q Supervision
+
+Fixed a Plan-Q label bug:
+
+```text
+plan_action_indices previously encoded pass as 8*pad*pad + row*pad + col.
+The adaptive policy action space has exactly one global pass index: 8*pad*pad.
+This polluted action-Q supervision with invalid indices >= 2049 on 16-padded boards.
+```
+
+Corrected shard smoke:
+
+```text
+output: runs/adaptive-plan-q-action-index-smoke/smoke-00000.npz
+plan_action_indices min/max: 37 / 2048
+bad indices >= 2049: 0
+teacher_action_index bad indices >= 2049: 0
+```
+
+Larger corrected worker shard:
+
+```text
+output: runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz
+grid: 8x8
+truncation: 250
+warmup_steps: 190
+samples: 512
+plans/state: 4x4
+plan_rollout_steps: 64
+plan_worker_steps: 16
+rollouts/plan: 1
+device: cuda:0
+```
+
+Statistics:
+
+| metric | value |
+| --- | ---: |
+| action index min / max | `16 / 2048` |
+| bad action indices >= 2049 | `0` |
+| pass plan actions | `2096` |
+| all plan outcomes | `3138 loss / 4917 draw / 137 win` |
+| best-plan outcomes | `36 loss / 419 draw / 57 win` |
+| mean plan_q_gap | `0.4299` |
+| mean best_plan_q | `-0.0933` |
+
+Action-Q trainer update:
+
+```text
+adaptive_plan_q_supervised.py now supports:
+  --action-q-weight
+  --action-q-mse-weight
+  --action-q-temperature
+
+The loss aggregates duplicate source-target plan slots onto the same primitive action with scatter-add,
+then trains strategy action-Q with full legal-action ranking CE plus optional candidate MSE.
+```
+
+Action-Q v1 training:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz
+init: runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+output: runs/adaptive-plan-q-action-q-v1/generals-adaptive-plan-q-action-q-v1.eqx
+loss: source=0, target=0, action_q=1.0, action_q_mse=0.1
+epochs: 80
+```
+
+Training curve:
+
+| epoch | action-Q rank / MSE / action acc | action-Q pred gap |
+| ---: | ---: | ---: |
+| 1 | `12.9955 / 9.8694 / 9.7%` | `5.569` |
+| 40 | `6.4975 / 7.5601 / 25.7%` | `4.903` |
+| 80 | `5.8049 / 5.3826 / 27.1%` | `4.576` |
+
+Fixed-v5 max250 128-row scale sweep:
+
+| q scale | p0 win | p1 win | min | draw notes |
+| ---: | ---: | ---: | ---: | --- |
+| `0` | `11.72%` | `13.28%` | `11.72%` | p0 draw `57.03%`, p1 draw `60.16%` |
+| `0.01` | `12.50%` | `12.50%` | `12.50%` | draw increased |
+| `0.02` | `10.16%` | `13.28%` | `10.16%` | worse p0 |
+| `0.05` | `10.94%` | `13.28%` | `10.94%` | worse p0 |
+
+Fixed-v5 max250 256-row confirmation:
+
+| q scale | p0 win | p1 win | min | draw |
+| ---: | ---: | ---: | ---: | ---: |
+| `0` | `12.11%` | `10.94%` | `10.94%` | p0 `54.69%`, p1 `61.33%` |
+| `0.01` | `10.55%` | `11.72%` | `10.55%` | p0 `54.69%`, p1 `60.16%` |
+
+Conclusion:
+
+```text
+Action-Q from worker-conditioned Plan-Q is learnable, and full-action aggregation is materially better than slot-wise plan CE.
+Direct Q-rerank still fails fixed-v5 promotion: the 128-row weak positive at scale 0.01 did not confirm at 256 rows.
+Do not promote adaptive-plan-q-action-q-v1.
+Next step should make the learned plan signal execute through a target-conditioned Worker/mixture policy or train on larger, more decisive Plan-Q data; do not continue q-rerank scale sweeps.
+```

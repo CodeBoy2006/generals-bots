@@ -1,4 +1,4 @@
-"""Train adaptive source/target heads from Plan-Q source-target shards."""
+"""Train adaptive strategy heads from Plan-Q source-target shards."""
 
 from __future__ import annotations
 
@@ -57,6 +57,8 @@ def load_plan_q_dataset(
         "target_probs": [],
         "teacher_logits": [],
         "teacher_action": [],
+        "plan_action_indices": [],
+        "plan_q": [],
         "plan_q_gap": [],
     }
     for path in paths:
@@ -74,6 +76,8 @@ def load_plan_q_dataset(
         chunks["target_probs"].append(shard["target_score_probs"][indices].astype(np.float32))
         chunks["teacher_logits"].append(shard["teacher_logits"][indices].astype(np.float32))
         chunks["teacher_action"].append(shard["teacher_action_index"][indices].astype(np.int32))
+        chunks["plan_action_indices"].append(shard["plan_action_indices"][indices].astype(np.int32))
+        chunks["plan_q"].append(shard["plan_q"][indices].astype(np.float32))
         chunks["plan_q_gap"].append(shard["plan_q_gap"][indices].astype(np.float32))
 
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
@@ -83,10 +87,14 @@ def load_plan_q_dataset(
 
 
 def mask_plan_q_grads(grads, keep_outcome: bool = False):
-    """Keep gradients only for source/target spatial heads and optional outcome head."""
+    """Keep gradients only for Plan-Q strategy heads and optional outcome head."""
     masked = jax.tree.map(lambda leaf: jnp.zeros_like(leaf) if eqx.is_inexact_array(leaf) else leaf, grads)
     if keep_outcome and grads.outcome_linear2 is not None:
         masked = eqx.tree_at(lambda net: net.outcome_linear2, masked, grads.outcome_linear2)
+    if grads.strategy_q_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_q_conv, masked, grads.strategy_q_conv)
+    if grads.strategy_q_pass_linear is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_q_pass_linear, masked, grads.strategy_q_pass_linear)
     if grads.strategy_source_conv is not None:
         masked = eqx.tree_at(lambda net: net.strategy_source_conv, masked, grads.strategy_source_conv)
     if grads.strategy_target_conv is not None:
@@ -125,6 +133,9 @@ def train_step(
     target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    action_q_weight: float,
+    action_q_mse_weight: float,
+    action_q_temperature: float,
     gap_weighting: bool,
     freeze_base: bool,
 ):
@@ -139,32 +150,57 @@ def train_step(
         target_probs,
         teacher_logits,
         teacher_actions,
+        plan_action_indices,
+        plan_q,
         plan_q_gap,
     ) = batch
 
     def loss_fn(net):
         outputs = jax.vmap(lambda o, m, a: net.strategy_auxiliary(o, m, a))(obs, masks, active)
-        if outputs.source_logits is None or outputs.target_logits is None:
-            raise ValueError("Plan-Q supervision requires strategy_spatial_aux")
-        source_loss, source_accuracy, source_candidate_accuracy, source_entropy = indexed_spatial_ce(
-            outputs.source_logits,
-            active,
-            source_indices,
-            source_probs,
-        )
-        target_loss, target_accuracy, target_candidate_accuracy, target_entropy = indexed_spatial_ce(
-            outputs.target_logits,
-            active,
-            target_indices,
-            target_probs,
-        )
         sample_weight = jnp.ones_like(plan_q_gap)
         if gap_weighting:
             sample_weight = jnp.clip(plan_q_gap / jnp.maximum(jnp.mean(plan_q_gap), 1.0e-6), 0.25, 4.0)
             sample_weight = jax.lax.stop_gradient(sample_weight)
-            # Recompute weighted losses directly when gap weighting is enabled.
-            source_loss = weighted_indexed_spatial_ce(outputs.source_logits, active, source_indices, source_probs, sample_weight)
-            target_loss = weighted_indexed_spatial_ce(outputs.target_logits, active, target_indices, target_probs, sample_weight)
+
+        source_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        source_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        source_candidate_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        source_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        target_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_candidate_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        if source_weight > 0.0 or target_weight > 0.0:
+            if outputs.source_logits is None or outputs.target_logits is None:
+                raise ValueError("source/target Plan-Q supervision requires strategy_spatial_aux")
+            source_loss, source_accuracy, source_candidate_accuracy, source_entropy = indexed_spatial_ce(
+                outputs.source_logits,
+                active,
+                source_indices,
+                source_probs,
+            )
+            target_loss, target_accuracy, target_candidate_accuracy, target_entropy = indexed_spatial_ce(
+                outputs.target_logits,
+                active,
+                target_indices,
+                target_probs,
+            )
+            if gap_weighting:
+                # Recompute weighted losses directly when gap weighting is enabled.
+                source_loss = weighted_indexed_spatial_ce(
+                    outputs.source_logits,
+                    active,
+                    source_indices,
+                    source_probs,
+                    sample_weight,
+                )
+                target_loss = weighted_indexed_spatial_ce(
+                    outputs.target_logits,
+                    active,
+                    target_indices,
+                    target_probs,
+                    sample_weight,
+                )
 
         policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
         action_ce = jnp.asarray(0.0, dtype=jnp.float32)
@@ -182,11 +218,30 @@ def train_step(
                 (jnp.argmax(student_logits, axis=-1) == teacher_actions).astype(jnp.float32)
             )
 
+        action_q_rank_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        action_q_mse_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        action_q_candidate_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        action_q_target_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        action_q_pred_gap = jnp.asarray(0.0, dtype=jnp.float32)
+        if action_q_weight > 0.0 or action_q_mse_weight > 0.0:
+            action_q_rank_loss, action_q_mse_loss, action_q_candidate_accuracy, action_q_target_entropy, action_q_pred_gap = (
+                plan_action_q_losses(
+                    outputs.action_q_values,
+                    masks,
+                    plan_action_indices,
+                    plan_q,
+                    action_q_temperature,
+                    sample_weight,
+                )
+            )
+
         loss = (
             source_weight * source_loss
             + target_weight * target_loss
             + policy_kl_weight * policy_kl
             + action_ce_weight * action_ce
+            + action_q_weight * action_q_rank_loss
+            + action_q_mse_weight * action_q_mse_loss
         )
         metrics = {
             "source_loss": source_loss,
@@ -200,6 +255,11 @@ def train_step(
             "policy_kl": policy_kl,
             "action_ce": action_ce,
             "teacher_action_accuracy": teacher_action_accuracy,
+            "action_q_rank_loss": action_q_rank_loss,
+            "action_q_mse_loss": action_q_mse_loss,
+            "action_q_candidate_accuracy": action_q_candidate_accuracy,
+            "action_q_target_entropy": action_q_target_entropy,
+            "action_q_pred_gap": action_q_pred_gap,
             "mean_gap": jnp.mean(plan_q_gap),
             "mean_sample_weight": jnp.mean(sample_weight),
         }
@@ -230,6 +290,46 @@ def weighted_indexed_spatial_ce(
     return jnp.sum(losses * sample_weight) / normalizer
 
 
+def plan_action_q_losses(
+    action_q_values: jnp.ndarray,
+    legal_mask: jnp.ndarray,
+    plan_action_indices: jnp.ndarray,
+    plan_q: jnp.ndarray,
+    temperature: float,
+    sample_weight: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Fit action-Q values to plan-level counterfactual ranking targets."""
+    flat_action_indices = plan_action_indices.reshape(plan_action_indices.shape[0], -1)
+    flat_plan_q = jax.lax.stop_gradient(plan_q.reshape(plan_q.shape[0], -1))
+    batch_indices = jnp.broadcast_to(jnp.arange(action_q_values.shape[0])[:, None], flat_action_indices.shape)
+    candidate_q = jnp.take_along_axis(action_q_values, flat_action_indices, axis=1)
+    target_plan_probs = jax.nn.softmax(flat_plan_q / temperature, axis=1)
+    target_action_probs = jnp.zeros_like(action_q_values).at[batch_indices, flat_action_indices].add(target_plan_probs)
+
+    move_mask = jnp.transpose(legal_mask, (0, 3, 1, 2)).reshape(legal_mask.shape[0], -1)
+    full_legal = jnp.concatenate(
+        [move_mask, move_mask, jnp.ones((move_mask.shape[0], 1), dtype=bool)],
+        axis=1,
+    )
+    masked_action_q = jnp.where(full_legal, action_q_values / temperature, -1.0e9)
+    action_log_probs = jax.nn.log_softmax(masked_action_q, axis=1)
+    rank_losses = -jnp.sum(target_action_probs * action_log_probs, axis=1)
+    mse_losses = jnp.mean((candidate_q - flat_plan_q) ** 2, axis=1)
+    normalizer = jnp.maximum(jnp.sum(sample_weight), 1.0)
+    rank_loss = jnp.sum(rank_losses * sample_weight) / normalizer
+    mse_loss = jnp.sum(mse_losses * sample_weight) / normalizer
+    target_action = jnp.argmax(target_action_probs, axis=1)
+    pred_action = jnp.argmax(masked_action_q, axis=1)
+    action_accuracy = jnp.sum((pred_action == target_action).astype(jnp.float32) * sample_weight) / normalizer
+    target_entropy = -jnp.mean(
+        jnp.sum(target_action_probs * jnp.log(jnp.clip(target_action_probs, 1.0e-8, 1.0)), axis=1)
+    )
+    legal_count = jnp.maximum(jnp.sum(full_legal, axis=1), 1)
+    legal_mean = jnp.sum(jnp.where(full_legal, action_q_values, 0.0), axis=1) / legal_count
+    pred_gap = jnp.mean(jnp.max(jnp.where(full_legal, action_q_values, -1.0e9), axis=1) - legal_mean)
+    return rank_loss, mse_loss, action_accuracy, target_entropy, pred_gap
+
+
 def train_epoch(
     network,
     opt_state,
@@ -241,6 +341,9 @@ def train_epoch(
     target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    action_q_weight: float,
+    action_q_mse_weight: float,
+    action_q_temperature: float,
     gap_weighting: bool,
     freeze_base: bool,
 ):
@@ -264,6 +367,8 @@ def train_epoch(
             dataset["target_probs"][idx],
             dataset["teacher_logits"][idx],
             dataset["teacher_action"][idx],
+            dataset["plan_action_indices"][idx],
+            dataset["plan_q"][idx],
             dataset["plan_q_gap"][idx],
         )
         network, opt_state, loss, metrics = train_step(
@@ -275,6 +380,9 @@ def train_epoch(
             target_weight,
             policy_kl_weight,
             action_ce_weight,
+            action_q_weight,
+            action_q_mse_weight,
+            action_q_temperature,
             gap_weighting,
             freeze_base,
         )
@@ -320,6 +428,9 @@ def parse_args():
     parser.add_argument("--target-weight", type=float, default=0.5)
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
+    parser.add_argument("--action-q-weight", type=float, default=0.0)
+    parser.add_argument("--action-q-mse-weight", type=float, default=0.0)
+    parser.add_argument("--action-q-temperature", type=float, default=0.25)
     parser.add_argument("--gap-weighting", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -360,13 +471,19 @@ def parse_args():
             args.target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.action_q_weight,
+            args.action_q_mse_weight,
         )
     ):
         parser.error("loss weights must be non-negative")
+    if args.action_q_temperature <= 0.0:
+        parser.error("--action-q-temperature must be positive")
     if args.update_scope == "all" and args.policy_kl_weight <= 0.0:
         parser.error("--update-scope all requires a positive --policy-kl-weight to anchor policy drift")
-    if not args.strategy_aux or not args.strategy_spatial_aux:
-        parser.error("Plan-Q supervision requires --strategy-aux --strategy-spatial-aux")
+    if not args.strategy_aux:
+        parser.error("Plan-Q supervision requires --strategy-aux")
+    if (args.source_weight > 0.0 or args.target_weight > 0.0) and not args.strategy_spatial_aux:
+        parser.error("source/target Plan-Q supervision requires --strategy-spatial-aux")
     return args
 
 
@@ -391,8 +508,10 @@ def main():
     print(
         "Loss weights:  "
         f"source={args.source_weight:g}, target={args.target_weight:g}, "
-        f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}"
+        f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
+        f"action_q={args.action_q_weight:g}, action_q_mse={args.action_q_mse_weight:g}"
     )
+    print(f"Action-Q temp: {args.action_q_temperature:g}")
     print(f"Update scope:  {args.update_scope}")
     print(f"Gap weighting: {args.gap_weighting}")
     print()
@@ -437,6 +556,9 @@ def main():
             args.target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.action_q_weight,
+            args.action_q_mse_weight,
+            args.action_q_temperature,
             args.gap_weighting,
             args.update_scope == "strategy-heads",
         )
@@ -453,6 +575,10 @@ def main():
             f"TgtH {float(metrics['target_entropy']):.3f} | "
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
+            f"AQ {float(metrics['action_q_rank_loss']):.4f}/"
+            f"{float(metrics['action_q_mse_loss']):.4f}/"
+            f"{float(metrics['action_q_candidate_accuracy']) * 100:5.1f}% | "
+            f"AQgap {float(metrics['action_q_pred_gap']):.3f} | "
             f"Gap {float(metrics['mean_gap']):.4f} | "
             f"W {float(metrics['mean_sample_weight']):.3f} | "
             f"Time {time.time() - t0:.2f}s"
