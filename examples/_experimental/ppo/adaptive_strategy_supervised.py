@@ -118,6 +118,8 @@ def train_step(
     outcome_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    q_kl_weight: float,
+    q_action_ce_weight: float,
     freeze_base: bool,
 ):
     """Train one minibatch of frozen-trunk strategy auxiliary losses."""
@@ -137,6 +139,7 @@ def train_step(
 
     def loss_fn(net):
         outputs = jax.vmap(lambda o, m, a: net.strategy_auxiliary(o, m, a))(obs, masks, active)
+        teacher_legal = teacher_logits > -9999.0
 
         intent_log_probs = jax.nn.log_softmax(outputs.intent_logits, axis=-1)
         intent_losses = -intent_log_probs[jnp.arange(intent_log_probs.shape[0]), intent_targets]
@@ -178,7 +181,8 @@ def train_step(
         teacher_action_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         if policy_kl_weight > 0.0 or action_ce_weight > 0.0:
             student_logits = jax.vmap(lambda o, m, a: net.logits_value(o, m, a)[0])(obs, masks, active)
-            teacher_log_probs = jax.nn.log_softmax(teacher_logits, axis=-1)
+            masked_teacher_logits = jnp.where(teacher_legal, teacher_logits, -1.0e9)
+            teacher_log_probs = jax.nn.log_softmax(masked_teacher_logits, axis=-1)
             teacher_probs = jnp.exp(teacher_log_probs)
             student_log_probs = jax.nn.log_softmax(student_logits, axis=-1)
             policy_kl_per_sample = jnp.sum(teacher_probs * (teacher_log_probs - student_log_probs), axis=-1)
@@ -190,6 +194,22 @@ def train_step(
                 (jnp.argmax(student_logits, axis=-1) == teacher_actions).astype(jnp.float32)
             )
 
+        q_policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
+        q_action_ce = jnp.asarray(0.0, dtype=jnp.float32)
+        q_action_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        if q_kl_weight > 0.0 or q_action_ce_weight > 0.0:
+            masked_teacher_logits = jnp.where(teacher_legal, teacher_logits, -1.0e9)
+            teacher_log_probs = jax.nn.log_softmax(masked_teacher_logits, axis=-1)
+            teacher_probs = jnp.exp(teacher_log_probs)
+            q_logits = jnp.where(teacher_legal, outputs.action_q_values, -1.0e9)
+            q_log_probs = jax.nn.log_softmax(q_logits, axis=-1)
+            q_policy_kl_per_sample = jnp.sum(teacher_probs * (teacher_log_probs - q_log_probs), axis=-1)
+            q_policy_kl = jnp.mean(q_policy_kl_per_sample)
+
+            q_action_ce_losses = -q_log_probs[jnp.arange(q_log_probs.shape[0]), teacher_actions]
+            q_action_ce = jnp.mean(q_action_ce_losses)
+            q_action_accuracy = jnp.mean((jnp.argmax(q_logits, axis=-1) == teacher_actions).astype(jnp.float32))
+
         loss = (
             intent_weight * intent_loss
             + finish_weight * finish_loss
@@ -197,6 +217,8 @@ def train_step(
             + outcome_weight * outcome_loss
             + policy_kl_weight * policy_kl
             + action_ce_weight * action_ce
+            + q_kl_weight * q_policy_kl
+            + q_action_ce_weight * q_action_ce
         )
         metrics = {
             "intent_loss": intent_loss,
@@ -205,10 +227,13 @@ def train_step(
             "outcome_loss": outcome_loss,
             "policy_kl": policy_kl,
             "action_ce": action_ce,
+            "q_policy_kl": q_policy_kl,
+            "q_action_ce": q_action_ce,
             "intent_accuracy": intent_accuracy,
             "finish_accuracy": finish_accuracy,
             "outcome_accuracy": outcome_accuracy,
             "teacher_action_accuracy": teacher_action_accuracy,
+            "q_action_accuracy": q_action_accuracy,
             "finish_weight_mean": jnp.mean(finish_weights),
             "outcome_weight_mean": jnp.mean(outcome_weights),
         }
@@ -235,6 +260,8 @@ def train_epoch(
     outcome_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    q_kl_weight: float,
+    q_action_ce_weight: float,
     freeze_base: bool,
 ):
     """Shuffle one full pass over the loaded shards."""
@@ -271,6 +298,8 @@ def train_epoch(
             outcome_weight,
             policy_kl_weight,
             action_ce_weight,
+            q_kl_weight,
+            q_action_ce_weight,
             freeze_base,
         )
         loss_sum += loss
@@ -314,6 +343,8 @@ def parse_args():
     parser.add_argument("--outcome-weight", type=float, default=0.0)
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
+    parser.add_argument("--q-kl-weight", type=float, default=0.0)
+    parser.add_argument("--q-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -355,6 +386,8 @@ def parse_args():
             args.outcome_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.q_kl_weight,
+            args.q_action_ce_weight,
         )
     ):
         parser.error("loss weights must be non-negative")
@@ -389,7 +422,8 @@ def main():
         "Loss weights:  "
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
         f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}, "
-        f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}"
+        f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
+        f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}"
     )
     if args.update_scope == "strategy-heads":
         scope_label = "strategy auxiliary heads" + (" + outcome head" if args.outcome_weight > 0.0 else "")
@@ -438,6 +472,8 @@ def main():
             args.outcome_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.q_kl_weight,
+            args.q_action_ce_weight,
             args.update_scope == "strategy-heads",
         )
         jax.block_until_ready(network)
@@ -449,6 +485,8 @@ def main():
             f"Outcome {float(metrics['outcome_loss']):.4f}/{float(metrics['outcome_accuracy']) * 100:5.1f}% | "
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
+            f"QKL {float(metrics['q_policy_kl']):.4f} | "
+            f"QCE {float(metrics['q_action_ce']):.4f}/{float(metrics['q_action_accuracy']) * 100:5.1f}% | "
             f"Time {time.time() - t0:.2f}s"
         )
 

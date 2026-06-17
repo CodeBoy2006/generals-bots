@@ -759,3 +759,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote coupled v1/v4 checkpoints. Next branch should make strategy predictions affect action selection more directly, such as finish/Q reranking, target-conditioned action bias, or replacement-outcome search heads, instead of full-trunk action-KL coupling.
 - **Context:** Coupled v1 from v3 improved 512-row Expander min over same-seed v4 (`74.61%` vs `73.63%`) but weakened 16x rows and fixed-v5 stayed low (`10.55%` min at 256 max250). v4-coupled unbalanced collapsed 8p0 to `70.70%` at 256. Balanced v4-coupled preserved 16x but still trailed v4 on same-seed Expander (`73.44%` vs `73.83%` min) and fixed-v5 (`9.77%` vs `10.55%` min). All models stayed under ignored `runs/`; evaluation should be run serially on GPU to avoid allocation warnings.
+
+## [2026-06-17 17:47] Strategy-Q Rerank Probe
+- **Changes:** Added `--q-kl-weight` and `--q-action-ce-weight` to `adaptive_strategy_supervised.py` so frozen strategy-Q heads can learn teacher action distributions for inference-time reranking. Updated README and training strategy docs with Q-rerank commands and GPU scale sweeps.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-strategy-q-rerank-v1`. Next strategy-inference branch should use more structured target/finish gating or replacement-outcome search Q instead of global centered all-action reranking.
+- **Context:** Q head training was successful as supervision (`QKL 5.4646 -> 0.5882`, Q action match `10.7% -> 58.9%`), but gameplay did not pass gate. Expander scale `0.05` improved 256-row min (`73.44% -> 75.00%`) but failed 512-row confirmation (`71.68%` vs scale-0 `71.88%`). Fixed-v5 max250 128-row did not improve (`10.94%` min at scale 0 and 0.05, `10.16%` at 0.10). Artifacts remain under ignored `runs/`.

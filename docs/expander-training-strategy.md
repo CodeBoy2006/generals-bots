@@ -4772,3 +4772,96 @@ The useful artifact is the trainer/data infrastructure, not the checkpoints.
 Current offline action KL/CE is still too blunt: it can reduce KL and learn heads, but it does not reliably convert finish/belief/intent representation into stronger decisions.
 Next direction should make strategy heads affect inference explicitly, e.g. finish/Q reranking, target-conditioned action bias, or search-labeled replacement-outcome heads, rather than pushing the whole trunk with plain action KL.
 ```
+
+## 2026-06-17 Frozen Strategy-Q Rerank Probe
+
+Extended `adaptive_strategy_supervised.py` with direct strategy-Q supervision:
+
+```text
+--q-kl-weight
+--q-action-ce-weight
+```
+
+The loss treats `strategy_auxiliary().action_q_values` as logits over the padded adaptive action space, masks illegal actions using the stored teacher logits, and trains:
+
+```text
+QKL: KL(teacher_logits || strategy_q_logits)
+QCE: CE(teacher_sample_action)
+```
+
+This keeps the main policy frozen and uses `evaluate_adaptive_policy.py --strategy-q-rerank-scale` to apply the learned Q head as a centered legal-action bias at inference time.
+
+Training:
+
+```text
+init:
+  runs/adaptive-strategy-heads-v4-balanced-v1/generals-adaptive-strategy-heads-v4-balanced-v1.eqx
+
+datasets:
+  v4-expander-balanced x3
+  fixed-v5 max250/max500/max750
+
+sampling:
+  max_samples_per_shard 4096
+
+loss:
+  q_kl 1.0
+  q_action_ce 0.05
+  intent 0.05
+  finish 0.1
+  belief 0.05
+
+artifact:
+  runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx
+```
+
+Training curve:
+
+```text
+QKL:       5.4646 -> 0.5882
+QCE:       6.7705 -> 1.4958
+Q action:  10.7%  -> 58.9%
+Intent:    78.8%  -> 81.2%
+Finish:    67.3%  -> 70.8%
+Belief BCE 0.0806 -> 0.0589
+```
+
+Expander 128-row, seed 81420:
+
+| scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `71.88%` | `78.91%` | `84.38%` | `84.38%` | `84.38%` | `81.25%` | `71.88%` |
+| 0.02 | `69.53%` | `78.12%` | `84.38%` | `83.59%` | `82.81%` | `78.12%` | `69.53%` |
+| 0.05 | `73.44%` | `75.78%` | `86.72%` | `76.56%` | `84.38%` | `80.47%` | `73.44%` |
+| 0.10 | `72.66%` | `71.88%` | `80.47%` | `76.56%` | `83.59%` | `80.47%` | `71.88%` |
+
+Expander 256-row, seed 81460:
+
+| scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `79.69%` | `74.61%` | `85.16%` | `79.69%` | `73.44%` | `81.64%` | `73.44%` |
+| 0.05 | `77.73%` | `75.00%` | `83.20%` | `82.42%` | `76.56%` | `82.81%` | `75.00%` |
+
+Expander 512-row, seed 81480:
+
+| scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `71.88%` | `76.56%` | `82.23%` | `83.59%` | `80.27%` | `78.32%` | `71.88%` |
+| 0.05 | `71.68%` | `75.78%` | `82.42%` | `84.38%` | `80.47%` | `76.95%` | `71.68%` |
+
+Fixed-v5 max250, 128-row, seed 81440:
+
+| scale | p0 | p1 | min | draw p0/p1 |
+| ---: | ---: | ---: | ---: | --- |
+| 0 | `10.94%` | `14.06%` | `10.94%` | `46.88% / 47.66%` |
+| 0.05 | `10.94%` | `11.72%` | `10.94%` | `46.88% / 50.00%` |
+| 0.10 | `10.16%` | `11.72%` | `10.16%` | `45.31% / 50.78%` |
+
+Conclusion:
+
+```text
+The strategy-Q head clearly learns the offline teacher distribution, but direct centered all-action reranking does not pass promotion.
+Scale 0.05 looked promising at 128 and 256 rows, but 512-row confirmation regressed slightly versus scale 0.
+Fixed-v5 max250 did not improve; rerank changed draw/loss mix but did not create wins.
+Do not promote q-rerank-v1. The next strategy-inference branch should be more structured: target-conditioned movement bias, finish-only gating, or replacement-outcome search Q, rather than a global action-logit bias over every step.
+```

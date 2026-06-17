@@ -678,6 +678,42 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 `--update-scope all` is intentionally guarded by `--policy-kl-weight > 0` because otherwise the offline strategy losses can move the trunk without an action-distribution anchor. Current coupled checkpoints are diagnostic artifacts; keep using 256/512-row promotion gates before replacing the active Expander base.
 
+To train only the strategy-Q head for inference-time reranking, keep the base policy frozen and add Q losses against teacher logits/actions:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v1/v4-expander-balanced/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max250/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max750/*.npz' \
+  --max-samples-per-shard 4096 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --init-model-path runs/adaptive-strategy-heads-v4-balanced-v1/generals-adaptive-strategy-heads-v4-balanced-v1.eqx \
+  --q-kl-weight 1.0 \
+  --q-action-ce-weight 0.05 \
+  --intent-weight 0.05 \
+  --finish-weight 0.1 \
+  --belief-weight 0.05 \
+  --model-path runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx
+```
+
+Evaluate Q reranking with `evaluate_adaptive_policy.py --strategy-aux --strategy-q-rerank-scale <scale>`. Treat this as a probe: current results show the Q head can learn the offline teacher distribution, but direct all-action reranking has not passed 512-row promotion.
+
 ## 验证
 
 运行完整测试：
