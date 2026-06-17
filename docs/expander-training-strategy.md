@@ -4375,3 +4375,56 @@ seat
 ```
 
 Then train a dedicated rerank/finish head or policy correction on accepted replacement rows, rather than globally changing the primitive policy with weighted imitation.
+
+## 2026-06-17 U-Net Imitation v3 Two-Seed 2048-Row Validation
+
+Phase 0 follow-up validated the U-Net imitation v3 checkpoint on a second 2048 games/row seed:
+
+```text
+runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx
+eval command template:
+  evaluate_adaptive_policy.py
+  --grid-sizes 8,12,16
+  --num-games 2048
+  --max-steps 750
+  --opponent expander
+  --policy-mode sample
+  --network-arch unet
+  --channels 64,96,128,64
+  --scoreboard-history
+  --fog-memory
+  --value-heads per-size
+  --value-loss hl-gauss
+  --outcome-head
+```
+
+Two-seed evidence:
+
+| checkpoint | seed | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net imitation v3 | 78860 | `75.29%` | `73.68%` | `81.45%` | `82.71%` | `76.51%` | `76.76%` | `73.68%` |
+| U-Net imitation v3 | 80720 | `74.61%` | `75.05%` | `81.01%` | `81.10%` | `77.29%` | `76.32%` | `74.61%` |
+
+Draw rates:
+
+| checkpoint | seed | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net imitation v3 | 78860 | `0.20%` | `0.29%` | `3.96%` | `3.81%` | `14.45%` | `14.36%` |
+| U-Net imitation v3 | 80720 | `0.68%` | `0.49%` | `4.49%` | `4.39%` | `14.36%` | `15.14%` |
+
+Comparison anchor:
+
+```text
+runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+seed 78940 2048-row min: 73.05%
+rows: 8p0 73.05%, 8p1 74.51%, 12p0 82.18%, 12p1 82.32%, 16p0 79.64%, 16p1 78.66%
+draw: 16p0 12.16%, 16p1 12.89%
+```
+
+Decision:
+
+```text
+U-Net imitation v3 is validated as a stable supervised base, not a 512-row false positive.
+U-Net PPO v4 remains the active Expander base because it has better 12/16 rows and lower 16x draw.
+For strategy-dataset work, use v3 as the clean supervised-policy teacher/base and v4 as the stronger Expander active baseline.
+```

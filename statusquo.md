@@ -735,3 +735,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop simple outcome/window/seat reweighting for the fixed-v5 gate. Build a replacement-outcome/search dataset with accepted candidate actions, time-to-terminal deltas, draw-risk deltas, and seat labels, then train a dedicated rerank/finish correction head.
 - **Context:** Outcome aux v1 learned (`Out 1.36 -> 0.98`) but 512-row min was only `12.30%`. Terminal-window v1 improved p0 to `17.97%` but collapsed p1 to `8.98%`; p1-weighted v2 regressed versus same-seed base (`12.89%` min vs base `19.14%`). KL-anchored PPO against fixed v5 scored only `9.77%` min. Current best fixed-v5 artifact remains imitation v5 iter030 at `14.65%` min over 512 games/seat max250.
+
+## [2026-06-17 16:48] U-Net Imitation v3 Phase-0 Validation
+- **Changes:** Ran a second CUDA 2048 games/row Expander evaluation for `runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx` and documented the two-seed matrix in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Use U-Net imitation v3 as the clean supervised-policy base/teacher for `adaptive_strategy_dataset.py`; keep U-Net PPO v4 as the stronger active Expander baseline until strategy supervision produces a better checkpoint.
+- **Context:** v3 scored `73.68%` min on seed `78860` and `74.61%` min on seed `80720`, with 16x draw around `14-15%`. v4 still has better 12/16 rows and lower 16x draw on its existing 2048-row seed, so v3 is validated for supervised strategy work but not promoted over v4 as active Expander base.
