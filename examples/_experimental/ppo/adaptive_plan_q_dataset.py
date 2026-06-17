@@ -203,6 +203,7 @@ def score_plan_candidates(
     state,
     effective_size,
     key,
+    truncation: int,
     learner_player,
     source_count: int,
     target_count: int,
@@ -274,7 +275,8 @@ def score_plan_candidates(
                 None,
             )
             next_state, _ = game.step(rollout_state, actions)
-            already_done = game.get_info(rollout_state).is_done
+            current_info = game.get_info(rollout_state)
+            already_done = current_info.is_done | (rollout_state.time >= truncation)
             final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
             final_info = game.get_info(final_state)
             next_scoreboard = reset_adaptive_scoreboard_history(current_scoreboard, final_info.is_done)
@@ -290,7 +292,11 @@ def score_plan_candidates(
         final_info = game.get_info(final_state)
         final_obs = game.get_observation(final_state, learner_player)
         score = adaptive_score_observation(final_info, final_obs, learner_player, army_weight, land_weight, terminal_score)
-        outcome = outcome_class_from_winner(jnp.where(final_info.is_done, final_info.winner, -1), learner_player)
+        truncated = (final_state.time >= truncation) & ~final_info.is_done
+        outcome = outcome_class_from_winner(
+            jnp.where(final_info.is_done & ~truncated, final_info.winner, -1),
+            learner_player,
+        )
         return score, outcome
 
     def plan_score(source_index, target_index, plan_key):
@@ -351,6 +357,170 @@ def plan_action_to_index(action: jnp.ndarray, pad_size: int) -> jnp.ndarray:
     is_pass, row, col, direction, is_half = action
     encoded_dir = jnp.where(is_pass > 0, 8, jnp.where(is_half > 0, direction + 4, direction))
     return (encoded_dir * pad_size * pad_size + row * pad_size + col).astype(jnp.int32)
+
+
+@eqx.filter_jit
+def advance_behavior_step(
+    states,
+    effective_sizes,
+    pool,
+    network,
+    fixed_opponent_network,
+    key,
+    truncation: int,
+    opponent_id: int,
+    learner_player: int,
+    policy_mode: int,
+    opponent_policy_mode: int,
+    opponent_policy_grid_size: int,
+    pad_size: int,
+    global_context=False,
+    scoreboard_history=None,
+    scoreboard_history_enabled=False,
+    fog_memory=None,
+    fog_memory_enabled=False,
+):
+    """Advance behavior states without scoring source-target plans."""
+    num_envs = states.armies.shape[0]
+    if scoreboard_history is None:
+        scoreboard_history = empty_scoreboard_history(num_envs)
+    if fog_memory is None:
+        fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
+
+    obs_p0 = jax.vmap(lambda state: game.get_observation(state, 0))(states)
+    obs_p1 = jax.vmap(lambda state: game.get_observation(state, 1))(states)
+    learner_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
+    opponent_obs = jax.lax.cond(learner_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
+    current_fog_memory = (
+        jax.vmap(update_adaptive_fog_memory)(fog_memory, learner_obs) if fog_memory_enabled else fog_memory
+    )
+    current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
+        learner_obs,
+        effective_sizes,
+    )
+    if scoreboard_history_enabled:
+        history_context = jax.vmap(adaptive_scoreboard_history_context)(scoreboard_history, current_scoreboard)
+        obs_arr, active = jax.vmap(
+            lambda obs, size, history, memory: adaptive_obs_to_array(
+                obs,
+                size,
+                pad_size,
+                include_global_context=True,
+                scoreboard_history=history,
+                fog_memory=memory if fog_memory_enabled else None,
+            )
+        )(learner_obs, effective_sizes, history_context, current_fog_memory)
+    else:
+        obs_arr, active = jax.vmap(
+            lambda obs, size, memory: adaptive_obs_to_array(
+                obs,
+                size,
+                pad_size,
+                include_global_context=global_context,
+                fog_memory=memory if fog_memory_enabled else None,
+            )
+        )(learner_obs, effective_sizes, current_fog_memory)
+    masks = jax.vmap(
+        lambda obs, size: compute_adaptive_valid_move_mask(
+            obs.armies,
+            obs.owned_cells,
+            obs.mountains,
+            size,
+            pad_size,
+        )
+    )(learner_obs, effective_sizes)
+    logits = jax.vmap(lambda obs, mask, active_mask: network.logits_value(obs, mask, active_mask)[0])(
+        obs_arr,
+        masks,
+        active,
+    )
+
+    key, policy_key, opponent_key = jrandom.split(key, 3)
+    policy_keys = jrandom.split(policy_key, num_envs)
+    learner_actions = jax.vmap(
+        lambda sample_logits, sample_key: policy_action_from_logits(sample_logits, sample_key, policy_mode, pad_size)
+    )(logits, policy_keys)
+    opponent_keys = jrandom.split(opponent_key, num_envs)
+    opponent_actions = jax.vmap(
+        lambda sample_key, obs: opponent_policy_action(
+            fixed_opponent_network,
+            opponent_id,
+            sample_key,
+            obs,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
+        )
+    )(opponent_keys, opponent_obs)
+    actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
+    new_states, infos = jax.vmap(game.step)(states, actions)
+    terminated = infos.is_done
+    truncated = (new_states.time >= truncation) & ~terminated
+    dones = terminated | truncated
+
+    pool_size = pool.states.armies.shape[0]
+    reset_indices = new_states.pool_idx % pool_size
+    reset_states = jax.tree.map(lambda value: value[reset_indices], pool.states)
+    reset_sizes = pool.effective_sizes[reset_indices]
+    next_pool_idx = jnp.where(dones, new_states.pool_idx + num_envs, new_states.pool_idx)
+    reset_states = reset_states._replace(pool_idx=next_pool_idx)
+    current_states = new_states._replace(pool_idx=next_pool_idx)
+    final_states = jax.tree.map(
+        lambda reset, current: jnp.where(dones.reshape(num_envs, *([1] * (reset.ndim - 1))), reset, current),
+        reset_states,
+        current_states,
+    )
+    final_sizes = jnp.where(dones, reset_sizes, effective_sizes)
+    final_scoreboard = reset_adaptive_scoreboard_history(current_scoreboard, dones)
+    final_memory = reset_adaptive_fog_memory(current_fog_memory, dones)
+    return final_states, final_sizes, final_scoreboard, final_memory, key, dones
+
+
+def warmup_behavior_rollout(
+    states,
+    effective_sizes,
+    pool,
+    network,
+    fixed_opponent_network,
+    key,
+    warmup_steps: int,
+    truncation: int,
+    opponent_id: int,
+    learner_player: int,
+    policy_mode: int,
+    opponent_policy_mode: int,
+    opponent_policy_grid_size: int,
+    pad_size: int,
+    global_context=False,
+    scoreboard_history=None,
+    scoreboard_history_enabled=False,
+    fog_memory=None,
+    fog_memory_enabled=False,
+):
+    """Run behavior-only warmup steps for one learner seat."""
+    reset_count = 0
+    for _ in range(warmup_steps):
+        states, effective_sizes, scoreboard_history, fog_memory, key, dones = advance_behavior_step(
+            states,
+            effective_sizes,
+            pool,
+            network,
+            fixed_opponent_network,
+            key,
+            truncation,
+            opponent_id,
+            learner_player,
+            policy_mode,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
+            pad_size,
+            global_context,
+            scoreboard_history,
+            scoreboard_history_enabled,
+            fog_memory,
+            fog_memory_enabled,
+        )
+        reset_count += int(jnp.sum(dones))
+    return states, effective_sizes, scoreboard_history, fog_memory, key, reset_count
 
 
 @eqx.filter_jit
@@ -448,6 +618,7 @@ def collect_plan_q_step(
             state,
             size,
             sample_key,
+            truncation,
             learner_player,
             source_count,
             target_count,
@@ -787,6 +958,7 @@ def parse_args():
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--pool-size", type=int, default=1024)
     parser.add_argument("--truncation", type=int, default=750)
+    parser.add_argument("--warmup-steps", type=int, default=0)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
@@ -849,6 +1021,8 @@ def parse_args():
         parser.error("--pool-size must be at least num_envs")
     if args.num_steps <= 0 or args.num_shards <= 0:
         parser.error("--num-steps and --num-shards must be positive")
+    if args.warmup_steps < 0:
+        parser.error("--warmup-steps must be non-negative")
     if args.truncation <= 0:
         parser.error("--truncation must be positive")
     if args.input_channels is not None and args.input_channels <= 0:
@@ -896,6 +1070,8 @@ def main():
     print(f"Model:         {args.model_path}")
     print(f"Plans/state:   {args.source_count}x{args.target_count}")
     print(f"Plan rollout:  {args.plan_rollout_steps} steps x {args.rollouts_per_plan}")
+    if args.warmup_steps > 0:
+        print(f"Warmup:        {args.warmup_steps} behavior steps before scoring")
     print(f"Output:        {args.output_dir}")
     if args.scoreboard_history:
         print("Score history: enabled")
@@ -968,6 +1144,57 @@ def main():
             jnp.ones((p1_envs,), dtype=jnp.int32),
         ]
     )
+    if args.warmup_steps > 0:
+        t0 = time.time()
+        key, p0_warmup_key, p1_warmup_key = jrandom.split(key, 3)
+        states_p0, effective_sizes_p0, scoreboard_history_p0, fog_memory_p0, _, p0_resets = warmup_behavior_rollout(
+            states_p0,
+            effective_sizes_p0,
+            pool,
+            network,
+            fixed_opponent_network,
+            p0_warmup_key,
+            args.warmup_steps,
+            args.truncation,
+            opponent_id,
+            0,
+            policy_mode,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
+            args.pad_to,
+            network_global_context,
+            scoreboard_history_p0,
+            args.scoreboard_history,
+            fog_memory_p0,
+            args.fog_memory,
+        )
+        states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, _, p1_resets = warmup_behavior_rollout(
+            states_p1,
+            effective_sizes_p1,
+            pool,
+            network,
+            fixed_opponent_network,
+            p1_warmup_key,
+            args.warmup_steps,
+            args.truncation,
+            opponent_id,
+            1,
+            policy_mode,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
+            args.pad_to,
+            network_global_context,
+            scoreboard_history_p1,
+            args.scoreboard_history,
+            fog_memory_p1,
+            args.fog_memory,
+        )
+        jax.block_until_ready(states_p0.armies)
+        jax.block_until_ready(states_p1.armies)
+        print(
+            f"Warmup done | p0_resets={p0_resets} p1_resets={p1_resets} | "
+            f"time={time.time() - t0:.2f}s"
+        )
     metadata_base = {
         "grid_sizes": list(args.grid_sizes),
         "pad_to": args.pad_to,
@@ -990,6 +1217,7 @@ def main():
         "opponent_policy_mode": args.opponent_policy_mode,
         "num_envs": args.num_envs,
         "num_steps": args.num_steps,
+        "warmup_steps": args.warmup_steps,
         "truncation": args.truncation,
         "scoreboard_history": args.scoreboard_history,
         "fog_memory": args.fog_memory,

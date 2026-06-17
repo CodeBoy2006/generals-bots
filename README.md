@@ -752,6 +752,7 @@ CUDA_VISIBLE_DEVICES=0 \
 uv run python examples/_experimental/ppo/adaptive_plan_q_dataset.py 8 \
   --grid-sizes 8 \
   --num-steps 16 \
+  --warmup-steps 0 \
   --num-shards 1 \
   --pool-size 128 \
   --model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
@@ -775,6 +776,8 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_dataset.py 8 \
 ```
 
 The first smoke shard is intentionally small. It validates the data path and produces non-uniform Plan-Q marginals, but does not yet provide anti-draw outcome labels because the 8-step rollout horizon remains nonterminal. Longer fixed-v5 max250 shards are the next data step.
+
+For fixed-v5 max250 data, use `--truncation 250` and `--warmup-steps <n>` to advance behavior games before expensive plan scoring. Counterfactual plan rollouts are truncation-aware, so wins after the max-step gate are not counted as wins.
 
 Train source/target heads from Plan-Q marginals with `adaptive_plan_q_supervised.py`:
 

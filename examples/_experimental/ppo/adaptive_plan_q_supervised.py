@@ -99,7 +99,7 @@ def indexed_spatial_ce(
     active: jnp.ndarray,
     candidate_indices: jnp.ndarray,
     candidate_probs: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Cross-entropy against a sparse candidate distribution over spatial cells."""
     masked_logits = jnp.where(active, logits, -1.0e9).reshape(logits.shape[0], -1)
     log_probs = jax.nn.log_softmax(masked_logits, axis=-1)
@@ -109,9 +109,10 @@ def indexed_spatial_ce(
     target_pos = jnp.argmax(candidate_probs, axis=1)
     target_indices = jnp.take_along_axis(candidate_indices, target_pos[:, None], axis=1)[:, 0]
     predictions = jnp.argmax(masked_logits, axis=1)
-    accuracy = jnp.mean((predictions == target_indices).astype(jnp.float32))
+    global_accuracy = jnp.mean((predictions == target_indices).astype(jnp.float32))
+    candidate_accuracy = jnp.mean((jnp.argmax(candidate_log_probs, axis=1) == target_pos).astype(jnp.float32))
     entropy = -jnp.mean(jnp.sum(candidate_probs * jnp.log(jnp.clip(candidate_probs, 1.0e-8, 1.0)), axis=1))
-    return jnp.mean(losses), accuracy, entropy
+    return jnp.mean(losses), global_accuracy, candidate_accuracy, entropy
 
 
 @eqx.filter_jit
@@ -145,13 +146,13 @@ def train_step(
         outputs = jax.vmap(lambda o, m, a: net.strategy_auxiliary(o, m, a))(obs, masks, active)
         if outputs.source_logits is None or outputs.target_logits is None:
             raise ValueError("Plan-Q supervision requires strategy_spatial_aux")
-        source_loss, source_accuracy, source_entropy = indexed_spatial_ce(
+        source_loss, source_accuracy, source_candidate_accuracy, source_entropy = indexed_spatial_ce(
             outputs.source_logits,
             active,
             source_indices,
             source_probs,
         )
-        target_loss, target_accuracy, target_entropy = indexed_spatial_ce(
+        target_loss, target_accuracy, target_candidate_accuracy, target_entropy = indexed_spatial_ce(
             outputs.target_logits,
             active,
             target_indices,
@@ -192,6 +193,8 @@ def train_step(
             "target_loss": target_loss,
             "source_accuracy": source_accuracy,
             "target_accuracy": target_accuracy,
+            "source_candidate_accuracy": source_candidate_accuracy,
+            "target_candidate_accuracy": target_candidate_accuracy,
             "source_entropy": source_entropy,
             "target_entropy": target_entropy,
             "policy_kl": policy_kl,
@@ -440,8 +443,12 @@ def main():
         jax.block_until_ready(network)
         print(
             f"Epoch {epoch:03d} | Loss {float(loss):.4f} | "
-            f"Src {float(metrics['source_loss']):.4f}/{float(metrics['source_accuracy']) * 100:5.1f}% | "
-            f"Tgt {float(metrics['target_loss']):.4f}/{float(metrics['target_accuracy']) * 100:5.1f}% | "
+            f"Src {float(metrics['source_loss']):.4f}/"
+            f"{float(metrics['source_candidate_accuracy']) * 100:5.1f}%cand/"
+            f"{float(metrics['source_accuracy']) * 100:5.1f}%grid | "
+            f"Tgt {float(metrics['target_loss']):.4f}/"
+            f"{float(metrics['target_candidate_accuracy']) * 100:5.1f}%cand/"
+            f"{float(metrics['target_accuracy']) * 100:5.1f}%grid | "
             f"SrcH {float(metrics['source_entropy']):.3f} | "
             f"TgtH {float(metrics['target_entropy']):.3f} | "
             f"KL {float(metrics['policy_kl']):.4f} | "

@@ -5148,3 +5148,85 @@ Plan-Q target marginals also reduce CE but top1 accuracy remains weak, matching 
 This checkpoint is not a promotion candidate because only auxiliary heads changed and the dataset lacks decisive outcome labels.
 The next useful training data should be longer fixed-v5 max250 Plan-Q shards, then rerun this trainer with gap-weighting or stronger target supervision.
 ```
+
+## 2026-06-17 Fixed-v5 Warmed Plan-Q Shard
+
+Updated `adaptive_plan_q_dataset.py` with:
+
+```text
+--warmup-steps
+truncation-aware counterfactual plan rollouts
+```
+
+Reason:
+
+```text
+Opening states cannot produce useful fixed-v5 max250 finish labels under short plan rollouts.
+Warmup advances behavior games first, then spends counterfactual budget near the finish/draw decision region.
+Plan rollouts now stop at --truncation, so wins after max250 are not counted as wins.
+```
+
+Fixed-v5 warm shard:
+
+```text
+output: runs/adaptive-plan-q-fixed-v5-warm190-v0/plan-q-00000.npz
+model:  runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+opponent: generals-ppo-8x8-expander-gpu-v5.eqx sample
+grid: 8x8
+truncation: 250
+warmup_steps: 190
+samples: 64
+plans/state: 4x4
+plan_rollout_steps: 64
+rollouts/plan: 1
+device: cuda:0
+```
+
+Statistics:
+
+| metric | value |
+| --- | ---: |
+| behavior state time min / mean / max | `12 / 139.1 / 198` |
+| plan outcomes | `186 loss / 838 draw / 0 win` |
+| mean plan_q_gap | `0.2712` |
+| mean best_plan_q | `0.1652` |
+| source max-prob mean | `0.3479` |
+| target max-prob mean | `0.3157` |
+
+Interpretation:
+
+```text
+Warmup and longer rollouts produced strong safety ranking signal: many bad plans lose, best plans avoid loss.
+They still did not produce winning plans against fixed-v5 max250.
+This data can teach source/target heads to avoid losing plans, but not yet to finish games.
+The low minimum behavior time means some rows reset during warmup; future shards should either keep reset rows marked or collect more rows to dilute resets.
+```
+
+Gap-weighted Plan-Q supervision v1:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-warm190-v0/*.npz
+init: runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+output: runs/adaptive-plan-q-fixed-v5-supervised-v1/generals-adaptive-plan-q-fixed-v5-supervised-v1.eqx
+epochs: 12
+gap_weighting: true
+```
+
+Training curve:
+
+| epoch | source loss / candidate acc / grid acc | target loss / candidate acc / grid acc |
+| ---: | ---: | ---: |
+| 1 | `4.2827 / 28.1% / 0.0%` | `4.1558 / 28.1% / 0.0%` |
+| 6 | `4.0483 / 25.0% / 0.0%` | `3.9930 / 25.0% / 0.0%` |
+| 12 | `3.8626 / 26.6% / 0.0%` | `3.8177 / 28.1% / 0.0%` |
+
+Conclusion:
+
+```text
+Plan-Q heads can fit fixed-v5 safety marginals, but this shard is not sufficient for anti-draw because it has no winning plans.
+Do not evaluate this checkpoint as a promotion model; policy logits are unchanged.
+Next useful change is to make the plan executor stronger, not just longer:
+  add plan-conditioned multi-step Worker actions,
+  or score candidates with rollout-search / stronger policy after the first forced move,
+  or sample states from successful fixed-v5 imitation trajectories where winning plans exist.
+```

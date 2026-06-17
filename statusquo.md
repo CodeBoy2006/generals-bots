@@ -789,3 +789,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect longer fixed-v5 max250 Plan-Q shards and rerun this trainer with `--gap-weighting`; only then evaluate whether Plan-Q target maps can support a Worker/mixture policy.
 - **Context:** CUDA smoke on `runs/adaptive-plan-q-v0-scale10/*.npz` trained 8 epochs from `adaptive-strategy-spatial-v1`. Source loss improved `3.0467 -> 2.8660` and source top1 `19.5% -> 28.1%`; target loss improved `4.3221 -> 4.1629` but target top1 stayed weak (`~2%`). The checkpoint only updates auxiliary heads and is not a promotion candidate.
+
+## [2026-06-17 18:34] Fixed-v5 Warmed Plan-Q Probe
+- **Changes:** Added `adaptive_plan_q_dataset.py --warmup-steps` and made counterfactual plan rollouts truncation-aware. Added candidate-local accuracy metrics to `adaptive_plan_q_supervised.py`. Documented fixed-v5 warm shard and gap-weighted training results.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-plan-q-fixed-v5-supervised-v1`; policy logits are unchanged and the shard contains no winning plans. Next route should strengthen plan execution/scoring with a Worker or rollout-search after the forced plan step.
+- **Context:** Warmed fixed-v5 max250 shard (`warmup_steps=190`, `plan_rollout_steps=64`) produced 64 samples and 1024 plan scores: `186 loss`, `838 draw`, `0 win`, mean `plan_q_gap=0.2712`. Gap-weighted supervision fit the safety marginals (`Src loss 4.2827 -> 3.8626`, `Tgt loss 4.1558 -> 3.8177`; candidate acc around `25-28%`) but cannot train anti-draw finish behavior without winning-plan labels.
