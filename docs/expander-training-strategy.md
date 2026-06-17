@@ -3090,3 +3090,42 @@ Rerank triage:
 | outcome-r64 v3 | 256 | 76720 | `0.001` | `66.80%` | failed promotion check; 16p1 bottleneck |
 
 Conclusion: replacement-outcome Q targets are now available, and `rollout_steps=64` is the first setting that produces real candidate outcome diversity. However, direct Q-as-logit-bias still fails 256-row validation and remains below the current `71.29%` platform. Do not promote the current outcome-Q checkpoints. If this route continues, it should stop treating the auxiliary Q head as a raw inference bias and instead train a dedicated accepted-replacement rerank head or online policy-improvement gate.
+
+### Accepted-replacement Q weighting
+
+Added `--strategy-q-weight-mode accepted`. This keeps the previous `active` default but lets Q/rank supervision ignore rows unless the candidate set contains a credible replacement for the top-prior action:
+
+```text
+accepted if:
+  best outcome candidate switches away from top-prior
+  and either:
+    outcome improves loss -> draw/win or draw -> win
+    OR same outcome and shaped-score margin passes --min-margin
+```
+
+The first accepted-only r64 probe used the same setup as outcome-r64, but only trained Q/rank on accepted rows:
+
+```text
+run:        runs/adaptive-strategy-q-accepted-r64-v1/
+init:       strategy-aux-v3 iter8
+search:     top_k=4, rollout_steps=64, rollouts/action=1
+loss:       strategy_q_weight=0.1, strategy_q_rank_weight=0.05
+weighting:  --strategy-q-weight-mode accepted
+```
+
+Training signal showed why this is not yet enough by itself:
+
+| metric | observation |
+| --- | --- |
+| `StratS` | only `6-22` accepted Q rows per `512` flattened samples |
+| `StratQ` | highly unstable, roughly `51-157` during the 32-iter run |
+| `StratRank` | stayed high, roughly `5.2-7.9` |
+
+64 games/row max750 triage:
+
+| scale | min win rate | bottleneck |
+| ---: | ---: | --- |
+| `0.000` | `59.38%` | 16p0 |
+| `0.001` | `62.50%` | 8p1/16p0/16p1 |
+
+Conclusion: accepted-replacement weighting is implemented and confirms the data problem. True accepted replacements are present but sparse under one-step top-k candidate collection, so aux-only online batches are too noisy. Keep the option for future replay/oversampling, but do not continue accepted-only r64 training without a buffer that accumulates and balances accepted rows.

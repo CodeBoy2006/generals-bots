@@ -651,3 +651,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote raw outcome-Q rerank. Use the r64 result only as evidence that long candidate rollouts can create outcome diversity; the next version should train a dedicated accepted-replacement rerank head or online gate.
 - **Context:** r64 produced stable outcome rank signal and reduced StratQ from roughly `82` to `36`, but inference did not validate. Best 64-row scale was `0.001` at `70.31%` min; 256-row confirmation fell to `66.80%` with 16p1 bottlenecked.
+
+## [2026-06-17 12:47] Accepted-Replacement Q Weighting
+- **Changes:** Added `adaptive_search_distill.py --strategy-q-weight-mode accepted`, which trains Q/rank only on candidate rows where long rollout search finds an outcome-improving or high-margin same-outcome replacement for the top-prior action. Added focused tests, README docs, training-log `StratS`, and a short CUDA accepted-r64 probe.
+- **Status:** Completed
+- **Next Steps:** Do not continue accepted-only online batches without replay/oversampling; accepted rows are too sparse. If revisited, build an accepted-row buffer or dedicated rerank dataset.
+- **Context:** `runs/adaptive-strategy-q-accepted-r64-v1/` saw only `6-22` accepted Q rows per 512 samples and unstable Q/rank losses. 64 games/row max750 min improved from `59.38%` at scale `0.000` to `62.50%` at `0.001`, still far below the current platform.

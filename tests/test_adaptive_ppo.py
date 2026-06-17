@@ -936,6 +936,46 @@ def test_strategy_candidate_q_target_values_can_use_outcomes():
     assert jnp.allclose(hybrid_targets, outcome_targets + 0.1 * score_targets)
 
 
+def test_accepted_replacement_weights_prefer_outcome_then_score():
+    from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights
+
+    candidate_indices = jnp.array(
+        [
+            [10, 11, 12],
+            [20, 21, 22],
+            [30, 31, 32],
+        ],
+        dtype=jnp.int32,
+    )
+    search_scores = jnp.array(
+        [
+            [0.0, -20.0, -50.0],
+            [10.0, 30.0, 12.0],
+            [50.0, 40.0, 35.0],
+        ],
+        dtype=jnp.float32,
+    )
+    candidate_outcomes = jnp.array(
+        [
+            [1, 2, 1],
+            [1, 1, 1],
+            [2, 2, 2],
+        ],
+        dtype=jnp.int32,
+    )
+    weights = accepted_replacement_weights(
+        candidate_indices,
+        search_scores,
+        candidate_outcomes,
+        active_weights=jnp.ones((3,), dtype=jnp.float32),
+        min_margin=10.0,
+        margin_scale=20.0,
+        max_weight=1.0,
+    )
+
+    assert jnp.allclose(weights, jnp.array([1.0, 0.5, 0.0], dtype=jnp.float32))
+
+
 def test_adaptive_soft_loss_can_add_extra_improvement_term():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork

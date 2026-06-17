@@ -56,6 +56,8 @@ SOFT_WEIGHT_MODE_NAMES = ("active", "improvement")
 SOFT_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(SOFT_WEIGHT_MODE_NAMES)}
 STRATEGY_Q_TARGET_NAMES = ("score", "outcome", "outcome-score")
 STRATEGY_Q_TARGET_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATEGY_Q_TARGET_NAMES)}
+STRATEGY_Q_WEIGHT_MODE_NAMES = ("active", "accepted")
+STRATEGY_Q_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATEGY_Q_WEIGHT_MODE_NAMES)}
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
@@ -102,6 +104,64 @@ def strategy_candidate_q_target_values(
             lambda _: outcome_targets,
             lambda _: hybrid_targets,
         ),
+        None,
+    )
+
+
+def accepted_replacement_weights(
+    candidate_indices: jnp.ndarray,
+    search_scores: jnp.ndarray,
+    candidate_outcomes: jnp.ndarray,
+    active_weights: jnp.ndarray,
+    min_margin: float,
+    margin_scale: float,
+    max_weight: float,
+) -> jnp.ndarray:
+    """Weight rows where long search finds a credible replacement for the top-prior action."""
+    base_indices = candidate_indices[..., 0]
+    base_scores = search_scores[..., 0]
+    base_outcomes = candidate_outcomes[..., 0]
+    best_outcomes = jnp.max(candidate_outcomes, axis=-1)
+    best_outcome_mask = candidate_outcomes == best_outcomes[..., None]
+    best_outcome_scores = jnp.where(best_outcome_mask, search_scores, -jnp.inf)
+    best_positions = jnp.argmax(best_outcome_scores, axis=-1)
+    best_indices = jnp.take_along_axis(candidate_indices, best_positions[..., None], axis=-1)[..., 0]
+    best_scores = jnp.take_along_axis(search_scores, best_positions[..., None], axis=-1)[..., 0]
+
+    switched = best_indices != base_indices
+    outcome_improved = best_outcomes > base_outcomes
+    score_margins = best_scores - base_scores
+    score_improved = (best_outcomes == base_outcomes) & (score_margins >= min_margin)
+    scaled_score_weights = jnp.clip((score_margins - min_margin) / margin_scale, 0.0, max_weight)
+    replacement_weights = jnp.where(outcome_improved, max_weight, scaled_score_weights)
+    accepted = switched & (outcome_improved | score_improved)
+    return jnp.where(accepted, replacement_weights, 0.0).astype(jnp.float32) * active_weights
+
+
+def strategy_q_sample_weights(
+    candidate_indices: jnp.ndarray,
+    search_scores: jnp.ndarray,
+    candidate_outcomes: jnp.ndarray,
+    active_weights: jnp.ndarray,
+    weight_mode: int,
+    min_margin: float,
+    margin_scale: float,
+    max_weight: float,
+) -> jnp.ndarray:
+    """Return sample weights for strategy-Q/rank supervision."""
+    accepted_weights = accepted_replacement_weights(
+        candidate_indices,
+        search_scores,
+        candidate_outcomes,
+        active_weights,
+        min_margin,
+        margin_scale,
+        max_weight,
+    )
+    return jax.lax.cond(
+        weight_mode == STRATEGY_Q_WEIGHT_MODE_NAME_TO_ID["accepted"],
+        lambda _: accepted_weights,
+        lambda _: active_weights,
         None,
     )
 
@@ -1527,6 +1587,7 @@ def collect_adaptive_soft_batch(
     pad_size,
     strategy_q_target_mode=STRATEGY_Q_TARGET_NAME_TO_ID["score"],
     strategy_q_outcome_score_weight=0.05,
+    strategy_q_weight_mode=STRATEGY_Q_WEIGHT_MODE_NAME_TO_ID["active"],
     global_context=False,
     scoreboard_history_enabled=False,
     base_global_context=False,
@@ -1687,6 +1748,16 @@ def collect_adaptive_soft_batch(
             max_weight,
         )
         improvement_extra_weights = improvement_extra_weights * active_weights
+        q_weights = strategy_q_sample_weights(
+            candidate_indices,
+            search_scores,
+            candidate_outcomes,
+            active_weights,
+            strategy_q_weight_mode,
+            min_margin,
+            margin_scale,
+            max_weight,
+        )
 
         learner_keys = jrandom.split(learner_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
@@ -1786,7 +1857,7 @@ def collect_adaptive_soft_batch(
             active_weights,
             active_weights,
             strategy_candidate_q_targets,
-            active_weights,
+            q_weights,
             strategy_targets.intent,
             active_weights,
             strategy_targets.finish,
@@ -1850,6 +1921,7 @@ def parse_args():
     parser.add_argument("--strategy-q-rank-min-margin", type=float, default=0.0)
     parser.add_argument("--strategy-q-target", choices=STRATEGY_Q_TARGET_NAMES, default="score")
     parser.add_argument("--strategy-q-outcome-score-weight", type=float, default=0.05)
+    parser.add_argument("--strategy-q-weight-mode", choices=STRATEGY_Q_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--strategy-intent-weight", type=float, default=0.0)
     parser.add_argument("--strategy-finish-weight", type=float, default=0.0)
     parser.add_argument("--strategy-belief-weight", type=float, default=0.0)
@@ -1959,6 +2031,7 @@ def parse_args():
         parser.error(str(exc))
     args.soft_weight_mode_id = SOFT_WEIGHT_MODE_NAME_TO_ID[args.soft_weight_mode]
     args.strategy_q_target_mode = STRATEGY_Q_TARGET_NAME_TO_ID[args.strategy_q_target]
+    args.strategy_q_weight_mode_id = STRATEGY_Q_WEIGHT_MODE_NAME_TO_ID[args.strategy_q_weight_mode]
     return args
 
 
@@ -2050,6 +2123,7 @@ def main():
             "Strategy aux:   "
             f"q={args.strategy_q_weight:g}, q_rank={args.strategy_q_rank_weight:g}, "
             f"rank_margin={args.strategy_q_rank_min_margin:g}, q_target={args.strategy_q_target}, "
+            f"q_weight_mode={args.strategy_q_weight_mode}, "
             f"outcome_score_weight={args.strategy_q_outcome_score_weight:g}, "
             f"intent={args.strategy_intent_weight:g}, "
             f"finish={args.strategy_finish_weight:g}, belief={args.strategy_belief_weight:g}"
@@ -2245,6 +2319,7 @@ def main():
                     args.pad_to,
                     args.strategy_q_target_mode,
                     args.strategy_q_outcome_score_weight,
+                    args.strategy_q_weight_mode_id,
                     network_global_context,
                     args.scoreboard_history,
                     base_network_global_context,
@@ -2277,6 +2352,7 @@ def main():
                     args.pad_to,
                     args.strategy_q_target_mode,
                     args.strategy_q_outcome_score_weight,
+                    args.strategy_q_weight_mode_id,
                     network_global_context,
                     args.scoreboard_history,
                     base_network_global_context,
@@ -2314,6 +2390,7 @@ def main():
                     args.pad_to,
                     args.strategy_q_target_mode,
                     args.strategy_q_outcome_score_weight,
+                    args.strategy_q_weight_mode_id,
                     network_global_context,
                     args.scoreboard_history,
                     base_network_global_context,
@@ -2367,6 +2444,7 @@ def main():
                 f"StratRank: {float(metrics.get('strategy_q_rank_loss', 0.0)):.4f} | "
                 f"Intent: {float(metrics.get('strategy_intent_loss', 0.0)):.4f} | "
                 f"Belief: {float(metrics.get('strategy_belief_loss', 0.0)):.4f} | "
+                f"StratS: {int(metrics.get('strategy_samples', 0)):5d} | "
                 f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
                 f"({float(metrics['selected_fraction']) * 100:4.1f}%) | "
                 f"Margin: {float(metrics['mean_selected_margin']):6.1f} | "
