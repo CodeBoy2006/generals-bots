@@ -3018,3 +3018,46 @@ Training stayed noisy but did not show a decisive improvement trend. Rollout win
 For reference, the older augmented full-state best-response checkpoint in the repo root also failed the v5 gate under the same evaluator: player 0 reached `48.44%` over 512 games and player 1 reached `41.60%` over 512 games on seed `76000`.
 
 Conclusion: fixed 8x8 ordinary PPO best-response against the v2-v5 checkpoint pool is not a productive route to a pure v5-beating checkpoint, even when trained from player 1. This supports the broader adaptive conclusion from the strategy/Q/Worker probes: the next useful work should not be more small-learning-rate PPO continuation. Either keep rollout-search as an inference-time planner and distill replacement outcomes, or move the adaptive branch toward true seat/size-balanced long-rollout training with richer memory and strategic auxiliary targets.
+
+## 2026-06-17 Strategy-Q Replacement Outcome Target
+
+Added `adaptive_search_distill.py --strategy-q-target {score,outcome,outcome-score}`. The default `score` preserves the previous behavior. The new modes use rollout-search candidate replacement outcomes:
+
+```text
+outcome:
+  loss/draw-or-unfinished/win -> -1/0/+1
+
+outcome-score:
+  outcome + strategy_q_outcome_score_weight * tanh(search_score / search_value_scale)
+```
+
+The purpose is to make strategy-Q/rank supervision care first about whether replacing the base action leads to a win/loss/draw, instead of directly fitting the shaped material/prior rollout score. `outcome-score` exists because short rollout candidates often all end as draw/unfinished; the shaped-score tie-break keeps pairwise rank supervision from going empty in those rows.
+
+Short CUDA probes used the existing v3 strategy-aux iter8 checkpoint and froze policy/trunk:
+
+```text
+base/search: legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx
+init:        runs/adaptive-strategy-aux-v3/ckpts/generals-adaptive-strategy-aux-v3-iter-000008.eqx
+mode:        mixed seats, 8/12/16, scoreboard history, strategy aux only
+search:      top_k=4, rollout_steps=4, rollouts/action=1
+loss:        strategy_q_weight=0.1, strategy_q_rank_weight=0.05
+```
+
+Training signal:
+
+| run | target | rank margin | final StratQ | final StratRank | observation |
+| --- | --- | ---: | ---: | ---: | --- |
+| `adaptive-strategy-q-outcome-v1` | outcome | `0.5` | `76.9965` | `0.0000` | pure outcome labels usually tied as draw/unfinished |
+| `adaptive-strategy-q-outcome-score-v1` | outcome-score | `0.02` | `86.5230` | `0.1168` | tie-break creates rank signal, but not clean convergence |
+
+64 games/row rerank triage against Expander used `max_steps=750`:
+
+| run | rerank scale | min win rate | key note |
+| --- | ---: | ---: | --- |
+| outcome v1 | `0.00` | `70.31%` | policy-preservation check only |
+| outcome v1 | `0.01` | `62.50%` | Q bias hurts 16x rows |
+| outcome-score v1 | `0.00` | `68.75%` | policy-preservation check only |
+| outcome-score v1 | `0.005` | `67.19%` | small bias still hurts min row |
+| outcome-score v1 | `0.01` | `65.62%` | 16x p1 becomes bottleneck |
+
+Conclusion: replacement-outcome Q targets are now available, but this short aux-only calibration is not promotion-worthy. The important engineering result is that pure outcome labels are too sparse under `rollout_steps=4`; a future attempt must either use longer search rollouts to create real terminal outcome diversity, train an online-validated rerank head, or generate labels from full policy-action replacement episodes instead of short candidate rollouts. Do not use the current outcome-Q checkpoints as inference bias.

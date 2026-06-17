@@ -633,3 +633,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop ordinary fixed 8x8 PPO continuation against the historical checkpoint pool; use rollout-search inference/replacement-outcome distillation or return to adaptive long-rollout seat/size-balanced training.
 - **Context:** Intermediate checkpoints iter040/080/120/160 all stayed below frozen v5 in both seats; final 512-game evaluations scored p0 `47.85%` and p1 `43.55%` total win rate versus v5 sample. `legacymodels/` contains old adaptive/search checkpoints but no fixed 8x8 v5/Expander models.
+
+## [2026-06-17 12:34] Strategy-Q Replacement Outcome Target
+- **Changes:** Added `adaptive_search_distill.py --strategy-q-target {score,outcome,outcome-score}` and `--strategy-q-outcome-score-weight`, documented the option in README, added a focused target-conversion test, and recorded short CUDA outcome-Q probes in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote the outcome-Q checkpoints. If Q rerank is revisited, use longer rollouts or policy-action replacement episodes so terminal outcome labels are less sparse.
+- **Context:** Pure outcome target produced `StratRank 0.0000` because short candidate rollouts usually tied as draw/unfinished. `outcome-score` created rank signal but rerank still hurt: 64 games/row max750 min fell from `68.75%` at scale `0.00` to `67.19%` at `0.005` and `65.62%` at `0.01`.

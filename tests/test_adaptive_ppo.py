@@ -902,6 +902,40 @@ def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
     assert jnp.allclose(jnp.sum(target_probs, axis=1), jnp.ones((2,), dtype=jnp.float32))
 
 
+def test_strategy_candidate_q_target_values_can_use_outcomes():
+    from examples._experimental.ppo.adaptive_search_distill import (
+        STRATEGY_Q_TARGET_NAME_TO_ID,
+        strategy_candidate_q_target_values,
+    )
+
+    search_scores = jnp.array([[100.0, 0.0, -100.0]], dtype=jnp.float32)
+    candidate_outcomes = jnp.array([[2, 1, 0]], dtype=jnp.int32)
+
+    score_targets = strategy_candidate_q_target_values(
+        search_scores,
+        candidate_outcomes,
+        score_scale=100.0,
+        target_mode=STRATEGY_Q_TARGET_NAME_TO_ID["score"],
+    )
+    outcome_targets = strategy_candidate_q_target_values(
+        search_scores,
+        candidate_outcomes,
+        score_scale=100.0,
+        target_mode=STRATEGY_Q_TARGET_NAME_TO_ID["outcome"],
+    )
+    hybrid_targets = strategy_candidate_q_target_values(
+        search_scores,
+        candidate_outcomes,
+        score_scale=100.0,
+        target_mode=STRATEGY_Q_TARGET_NAME_TO_ID["outcome-score"],
+        outcome_score_weight=0.1,
+    )
+
+    assert jnp.allclose(score_targets, jnp.tanh(search_scores / 100.0))
+    assert jnp.allclose(outcome_targets, jnp.array([[1.0, 0.0, -1.0]], dtype=jnp.float32))
+    assert jnp.allclose(hybrid_targets, outcome_targets + 0.1 * score_targets)
+
+
 def test_adaptive_soft_loss_can_add_extra_improvement_term():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork

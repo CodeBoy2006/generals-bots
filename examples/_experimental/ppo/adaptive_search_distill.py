@@ -54,6 +54,8 @@ from train import checkpoint_path_for_iteration, prune_old_checkpoints, stack_le
 TARGET_MODE_NAMES = ("hard", "soft")
 SOFT_WEIGHT_MODE_NAMES = ("active", "improvement")
 SOFT_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(SOFT_WEIGHT_MODE_NAMES)}
+STRATEGY_Q_TARGET_NAMES = ("score", "outcome", "outcome-score")
+STRATEGY_Q_TARGET_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATEGY_Q_TARGET_NAMES)}
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
@@ -80,6 +82,28 @@ def concatenate_flat_batches(*batches):
 def search_value_targets(search_scores: jnp.ndarray, score_scale: float) -> jnp.ndarray:
     """Convert top-k rollout-search scores into bounded scalar value targets."""
     return jnp.tanh(jnp.max(search_scores, axis=-1) / score_scale).astype(jnp.float32)
+
+
+def strategy_candidate_q_target_values(
+    search_scores: jnp.ndarray,
+    candidate_outcomes: jnp.ndarray,
+    score_scale: float,
+    target_mode: int,
+    outcome_score_weight: float = 0.05,
+) -> jnp.ndarray:
+    """Return candidate Q targets from either shaped search scores or replacement outcomes."""
+    score_targets = jnp.tanh(search_scores / score_scale).astype(jnp.float32)
+    outcome_targets = (candidate_outcomes.astype(jnp.float32) - 1.0).astype(jnp.float32)
+    hybrid_targets = outcome_targets + outcome_score_weight * score_targets
+    return jax.lax.switch(
+        target_mode,
+        (
+            lambda _: score_targets,
+            lambda _: outcome_targets,
+            lambda _: hybrid_targets,
+        ),
+        None,
+    )
 
 
 def outcome_class_from_winner(winner: jnp.ndarray, player: jnp.ndarray) -> jnp.ndarray:
@@ -1501,6 +1525,8 @@ def collect_adaptive_soft_batch(
     score_temperature,
     search_value_scale,
     pad_size,
+    strategy_q_target_mode=STRATEGY_Q_TARGET_NAME_TO_ID["score"],
+    strategy_q_outcome_score_weight=0.05,
     global_context=False,
     scoreboard_history_enabled=False,
     base_global_context=False,
@@ -1636,7 +1662,13 @@ def collect_adaptive_soft_batch(
                 search_value_scale,
             )
         )(states, learner_obs, effective_sizes, search_scores, candidate_outcomes)
-        strategy_candidate_q_targets = jnp.tanh(search_scores / search_value_scale).astype(jnp.float32)
+        strategy_candidate_q_targets = strategy_candidate_q_target_values(
+            search_scores,
+            candidate_outcomes,
+            search_value_scale,
+            strategy_q_target_mode,
+            strategy_q_outcome_score_weight,
+        )
         active_weights = is_active.astype(jnp.float32)
         search_weights = soft_search_weights(
             candidate_indices,
@@ -1816,6 +1848,8 @@ def parse_args():
     parser.add_argument("--strategy-q-weight", type=float, default=0.0)
     parser.add_argument("--strategy-q-rank-weight", type=float, default=0.0)
     parser.add_argument("--strategy-q-rank-min-margin", type=float, default=0.0)
+    parser.add_argument("--strategy-q-target", choices=STRATEGY_Q_TARGET_NAMES, default="score")
+    parser.add_argument("--strategy-q-outcome-score-weight", type=float, default=0.05)
     parser.add_argument("--strategy-intent-weight", type=float, default=0.0)
     parser.add_argument("--strategy-finish-weight", type=float, default=0.0)
     parser.add_argument("--strategy-belief-weight", type=float, default=0.0)
@@ -1887,6 +1921,8 @@ def parse_args():
         parser.error("--search-value-scale must be positive")
     if args.strategy_q_rank_min_margin < 0.0:
         parser.error("--strategy-q-rank-min-margin must be non-negative")
+    if args.strategy_q_outcome_score_weight < 0.0:
+        parser.error("--strategy-q-outcome-score-weight must be non-negative")
     if args.temperature <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--temperature and --score-temperature must be positive")
     if args.margin_scale <= 0.0 or args.max_improve_weight <= 0.0:
@@ -1922,6 +1958,7 @@ def parse_args():
     except ValueError as exc:
         parser.error(str(exc))
     args.soft_weight_mode_id = SOFT_WEIGHT_MODE_NAME_TO_ID[args.soft_weight_mode]
+    args.strategy_q_target_mode = STRATEGY_Q_TARGET_NAME_TO_ID[args.strategy_q_target]
     return args
 
 
@@ -2012,7 +2049,9 @@ def main():
         print(
             "Strategy aux:   "
             f"q={args.strategy_q_weight:g}, q_rank={args.strategy_q_rank_weight:g}, "
-            f"rank_margin={args.strategy_q_rank_min_margin:g}, intent={args.strategy_intent_weight:g}, "
+            f"rank_margin={args.strategy_q_rank_min_margin:g}, q_target={args.strategy_q_target}, "
+            f"outcome_score_weight={args.strategy_q_outcome_score_weight:g}, "
+            f"intent={args.strategy_intent_weight:g}, "
             f"finish={args.strategy_finish_weight:g}, belief={args.strategy_belief_weight:g}"
         )
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
@@ -2204,6 +2243,8 @@ def main():
                     args.score_temperature,
                     args.search_value_scale,
                     args.pad_to,
+                    args.strategy_q_target_mode,
+                    args.strategy_q_outcome_score_weight,
                     network_global_context,
                     args.scoreboard_history,
                     base_network_global_context,
@@ -2234,6 +2275,8 @@ def main():
                     args.score_temperature,
                     args.search_value_scale,
                     args.pad_to,
+                    args.strategy_q_target_mode,
+                    args.strategy_q_outcome_score_weight,
                     network_global_context,
                     args.scoreboard_history,
                     base_network_global_context,
@@ -2269,6 +2312,8 @@ def main():
                     args.score_temperature,
                     args.search_value_scale,
                     args.pad_to,
+                    args.strategy_q_target_mode,
+                    args.strategy_q_outcome_score_weight,
                     network_global_context,
                     args.scoreboard_history,
                     base_network_global_context,
