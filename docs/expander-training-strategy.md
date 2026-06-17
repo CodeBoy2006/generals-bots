@@ -7265,3 +7265,48 @@ simply adding more search-action rows or increasing action CE. Next attempts
 should either keep v1 as a conservative supervised base and collect more diverse
 winning windows, or move search supervision into value/finish/intent targets
 with action CE staying weak.
+
+### PPO from midgame search v1
+
+Added teacher-template flags to `train_adaptive.py` so `--teacher-kl-weight` can
+load complex adaptive checkpoints with per-size HL-Gauss value heads, outcome
+head, and strategy auxiliary heads. A direct load smoke confirmed that
+`adaptive-midgame-search-imitation-v1` can be loaded as a 35-channel U-Net
+teacher with `(8,12,16)` value heads, 128 categorical value bins, outcome head,
+strategy aux, and 3 finish logits.
+
+PPO probes from v1:
+
+```text
+oom probe:
+  96 env x 256 steps, minibatch 4096
+  result: GPU OOM during train minibatch compilation
+
+small probe:
+  48 env x 128 steps, minibatch 2048
+  result: too much compile/memory pressure, interrupted
+
+tiny probe:
+  24 env x 64 steps, minibatch 512
+  result: runnable but too few episodes
+  Expander 64-row min: 67.19%
+
+mb256 probe:
+  48 env x 128 steps, minibatch 256
+  lr=3e-7, terminal reward, mixed seats, top-advantage stratified, EMA
+  rollout: iter20 episodes=22, wins=16
+  Expander 64-row min: 76.56%
+  Expander 256-row min: 69.53%
+
+kl probe:
+  same as mb256, minibatch 128, teacher KL=0.1 to v1
+  complex teacher loaded with per-size HL-Gauss/outcome/strategy aux flags
+  rollout: iter20 episodes=22, wins=16
+  Expander 64-row min: 67.19%
+```
+
+Conclusion: direct PPO from v1 is not currently a promotion route. The runnable
+PPO configurations have too few decisive episodes and shift weak rows badly; the
+KL-anchored version still regressed at 64 rows. Keep the new teacher-loader
+support, but do not continue this path without either larger-memory microbatch
+work, richer rollout signal, or a better value/finish/search target.

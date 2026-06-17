@@ -969,3 +969,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v0-v3. Keep v1 as the strongest diagnostic candidate, but next work should use search trajectories for value/finish/intent or collect more diverse winning windows rather than scaling action CE rows.
 - **Context:** v1 was best: Expander 512-row min `74.61%` vs same-seed v4 base `70.51%`, but it missed the 75% line and fixed-v5 max250 stayed weak (`10.94%` min at 64 rows). v2 showed draw action CE filtering helps 64-row but failed 256-row; v3 showed adding more search-action rows regressed to `70.31%` 256-row min.
+
+## [2026-06-17 23:10] KL-Anchored V1 PPO Probe
+- **Changes:** Extended `train_adaptive.py` teacher loading flags so teacher KL can deserialize complex U-Net adaptive checkpoints with per-size HL-Gauss value heads, outcome head, and strategy aux finish logits. Ran v1 PPO probes under ignored `runs/adaptive-midgame-search-ppo-*`.
+- **Status:** Completed
+- **Next Steps:** Do not promote PPO probes. Use the teacher-loader support for future KL-anchored experiments, but avoid direct small PPO from v1 until rollout signal or microbatching is improved.
+- **Context:** `48 env x 128 steps` with minibatch 256 ran but fell to Expander 256-row min `69.53%`; teacher-KL `0.1` to v1 loaded correctly but fell to 64-row min `67.19%`. Larger U-Net PPO configs hit GPU memory/compile pressure.

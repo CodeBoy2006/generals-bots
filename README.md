@@ -686,6 +686,8 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 `--update-scope all` is intentionally guarded by `--policy-kl-weight > 0` because otherwise the offline strategy losses can move the trunk without an action-distribution anchor. Current coupled checkpoints are diagnostic artifacts; keep using 256/512-row promotion gates before replacing the active Expander base.
 
+`train_adaptive.py --teacher-kl-weight` can also anchor PPO to complex adaptive checkpoints. When the teacher checkpoint has per-size HL-Gauss value heads, outcome head, or strategy auxiliary heads, pass the matching `--teacher-value-heads`, `--teacher-value-head-sizes`, `--teacher-value-loss`, `--teacher-outcome-head`, `--teacher-strategy-aux`, and `--teacher-strategy-finish-outputs` flags so the teacher tree matches the serialized checkpoint. This is useful for KL-anchoring PPO to strategy-supervised U-Net checkpoints without using the teacher for rollout actions.
+
 To train only the strategy-Q head for inference-time reranking, keep the base policy frozen and add Q losses against teacher logits/actions:
 
 ```bash

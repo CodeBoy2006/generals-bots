@@ -933,6 +933,13 @@ def parse_args():
     parser.add_argument("--teacher-input-channels", type=int, default=None)
     parser.add_argument("--teacher-global-context", action="store_true")
     parser.add_argument("--teacher-scoreboard-history", action="store_true")
+    parser.add_argument("--teacher-value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--teacher-value-head-sizes", default=None)
+    parser.add_argument("--teacher-value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--teacher-value-bins", type=int, default=128)
+    parser.add_argument("--teacher-outcome-head", action="store_true")
+    parser.add_argument("--teacher-strategy-aux", action="store_true")
+    parser.add_argument("--teacher-strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--teacher-rollout-actions", action="store_true")
     parser.add_argument("--teacher-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--init-model-path", default=None)
@@ -962,6 +969,14 @@ def parse_args():
         parser.error(str(exc))
     try:
         args.opponent_channels = parse_policy_channels(args.opponent_channels)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.teacher_value_head_sizes = (
+            parse_grid_sizes(args.teacher_value_head_sizes)
+            if args.teacher_value_head_sizes is not None
+            else args.grid_sizes
+        )
     except ValueError as exc:
         parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
@@ -1043,6 +1058,10 @@ def parse_args():
         parser.error("--teacher-action-ce-weight requires --teacher-rollout-actions")
     if args.teacher_input_channels is not None and args.teacher_input_channels <= 0:
         parser.error("--teacher-input-channels must be positive")
+    if args.teacher_value_loss == "hl-gauss" and args.teacher_value_bins <= 1:
+        parser.error("--teacher-value-bins must be greater than 1 for --teacher-value-loss hl-gauss")
+    if args.teacher_strategy_finish_outputs <= 0:
+        parser.error("--teacher-strategy-finish-outputs must be positive")
     if args.checkpoint_every < 0:
         parser.error("--checkpoint-every cannot be negative")
     if args.keep_checkpoints < 0:
@@ -1133,6 +1152,17 @@ def main():
         print(f"Outcome aux:   weight={args.outcome_aux_weight:g}")
     if args.teacher_model_path is not None:
         print(f"Teacher:       {args.teacher_model_path} arch={args.teacher_network_arch}")
+        if args.teacher_value_heads != "shared":
+            print(
+                "Teacher value: "
+                f"{args.teacher_value_heads} {','.join(str(size) for size in args.teacher_value_head_sizes)}"
+            )
+        if args.teacher_value_loss == "hl-gauss":
+            print(f"Teacher value: hl-gauss bins={args.teacher_value_bins}")
+        if args.teacher_outcome_head:
+            print("Teacher aux:   outcome head")
+        if args.teacher_strategy_aux:
+            print(f"Teacher strat: finish_outputs={args.teacher_strategy_finish_outputs}")
         if args.teacher_kl_weight > 0.0:
             print(f"Teacher KL:    weight={args.teacher_kl_weight:g}")
         if args.teacher_rollout_actions:
@@ -1198,6 +1228,7 @@ def main():
             if args.teacher_input_channels is not None
             else adaptive_input_channel_count(teacher_global_context, args.teacher_scoreboard_history, False)
         )
+        teacher_value_bins = args.teacher_value_bins if args.teacher_value_loss == "hl-gauss" else 0
         teacher_network = load_or_create_adaptive_network(
             net_key,
             pad_size=args.pad_to,
@@ -1205,6 +1236,16 @@ def main():
             channels=args.teacher_channels,
             input_channels=teacher_input_channels,
             init_input_channels=teacher_input_channels,
+            value_head_sizes=args.teacher_value_head_sizes if args.teacher_value_heads == "per-size" else (),
+            init_value_head_sizes=args.teacher_value_head_sizes if args.teacher_value_heads == "per-size" else (),
+            value_bins=teacher_value_bins,
+            init_value_bins=teacher_value_bins,
+            outcome_head=args.teacher_outcome_head,
+            init_outcome_head=args.teacher_outcome_head,
+            strategy_aux=args.teacher_strategy_aux,
+            init_strategy_aux=args.teacher_strategy_aux,
+            strategy_finish_outputs=args.teacher_strategy_finish_outputs,
+            init_strategy_finish_outputs=args.teacher_strategy_finish_outputs,
             global_context=teacher_global_context,
             init_global_context=teacher_global_context,
             network_arch=args.teacher_network_arch,
