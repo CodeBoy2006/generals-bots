@@ -939,3 +939,9 @@
 - **Status:** Completed
 - **Next Steps:** Use this only for scorer sanity checks. The next promotion-oriented route is midgame decisive trajectory imitation, not online Plan-Q scorer integration.
 - **Context:** The evaluator reports pair@1/pair@2/pair@4, source/target accuracy, correlation, and margin on the same split used by scorer training. It keeps top-k Plan-Q diagnostics reproducible without starting another training run.
+
+## [2026-06-17 22:03] Midgame Strategy Dataset Filters
+- **Changes:** Added current `time`, `visible_enemy_count`, and save-time row filters to `adaptive_strategy_dataset.py` for midgame/contact/terminal-window decisive trajectory shards. Updated README, zh manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Collect A2 U-Net active-base midgame decisive shards on GPU, then run policy-coupled `adaptive_strategy_supervised.py` with KL anchor plus finish/outcome/belief/intent losses.
+- **Context:** CUDA smoke wrote an ignored shard under `runs/adaptive-strategy-filter-smoke/` using `teacher-kind expander` and `--min-save-turn 1`; models and future training artifacts remain under ignored `runs/`, not cache directories.

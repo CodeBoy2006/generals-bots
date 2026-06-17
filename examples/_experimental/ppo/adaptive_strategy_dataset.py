@@ -100,7 +100,8 @@ def full_state_strategy_labels(state, obs, learner_player: int, effective_size: 
     source = main_stack_heatmap(state, learner_player, active)
     no_search_outcomes = jnp.full((1,), -1, dtype=jnp.int32)
     intent = weak_intent_label(obs, state, learner_player, no_search_outcomes)
-    visible_enemy_density = jnp.sum(obs.opponent_cells.astype(jnp.float32) * active.astype(jnp.float32)) / jnp.maximum(
+    visible_enemy_count = jnp.sum(obs.opponent_cells.astype(jnp.float32) * active.astype(jnp.float32))
+    visible_enemy_density = visible_enemy_count / jnp.maximum(
         jnp.sum(active.astype(jnp.float32)),
         1.0,
     )
@@ -114,6 +115,7 @@ def full_state_strategy_labels(state, obs, learner_player: int, effective_size: 
         source,
         enemy_general,
         intent,
+        visible_enemy_count,
         visible_enemy_density,
         contact,
     )
@@ -525,6 +527,7 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         source_heatmap,
         target_heatmap,
         intent,
+        visible_enemy_count,
         visible_enemy_density,
         contact,
     ) = labels
@@ -560,6 +563,7 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         "teacher_logits": logits,
         "grid_size": flat(effective_sizes).astype(np.int16),
         "seat": flat(learner_player_grid).astype(np.int8),
+        "time": flat(infos.time).astype(np.int16),
         "done": flat(dones).astype(np.bool_),
         "winner": flat(infos.winner).astype(np.int8),
         "outcome": flat(outcome_targets).astype(np.int8),
@@ -578,9 +582,113 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         "source_heatmap": flat(source_heatmap).astype(np.float16),
         "target_heatmap": flat(target_heatmap).astype(np.float16),
         "intent": flat(intent).astype(np.int8),
+        "visible_enemy_count": flat(visible_enemy_count).astype(np.int16),
         "visible_enemy_density": flat(visible_enemy_density).astype(np.float16),
         "contact": flat(contact).astype(np.float16),
     }
+
+
+def save_filter_config(args) -> dict[str, int | float | bool | None]:
+    """Return the active sample filter settings for shard metadata."""
+    return {
+        "min_save_turn": args.min_save_turn,
+        "max_save_turn": args.max_save_turn,
+        "require_contact": args.require_contact,
+        "min_visible_enemy_cells": args.min_visible_enemy_cells,
+        "min_visible_enemy_density": args.min_visible_enemy_density,
+        "require_outcome_known": args.require_outcome_known,
+        "require_win": args.require_win,
+        "require_finish_within_250": args.require_finish_within_250,
+        "require_win_or_finish_within_250": args.require_win_or_finish_within_250,
+        "draw_only": args.draw_only,
+        "terminal_window": args.terminal_window,
+    }
+
+
+def active_save_filters(args) -> list[str]:
+    """Return compact labels for non-default save filters."""
+    labels: list[str] = []
+    if args.min_save_turn > 0:
+        labels.append(f"time>={args.min_save_turn}")
+    if args.max_save_turn is not None:
+        labels.append(f"time<={args.max_save_turn}")
+    if args.require_contact:
+        labels.append("contact")
+    if args.min_visible_enemy_cells > 0:
+        labels.append(f"visible_enemy_cells>={args.min_visible_enemy_cells}")
+    if args.min_visible_enemy_density > 0.0:
+        labels.append(f"visible_enemy_density>={args.min_visible_enemy_density:g}")
+    if args.require_outcome_known:
+        labels.append("outcome_known")
+    if args.require_win:
+        labels.append("win")
+    if args.require_finish_within_250:
+        labels.append("finish250")
+    if args.require_win_or_finish_within_250:
+        labels.append("win_or_finish250")
+    if args.draw_only:
+        labels.append("draw_only")
+    if args.terminal_window > 0:
+        labels.append(f"terminal_window<={args.terminal_window}")
+    return labels
+
+
+def apply_save_filters(arrays: dict[str, np.ndarray], args) -> tuple[dict[str, np.ndarray], dict]:
+    """Filter flattened rollout samples before shard saving."""
+    sample_count = int(arrays["obs"].shape[0])
+    keep = np.ones((sample_count,), dtype=np.bool_)
+    filter_stats: list[dict[str, int | str]] = []
+
+    def add_filter(name: str, mask: np.ndarray) -> None:
+        nonlocal keep
+        bool_mask = np.asarray(mask, dtype=np.bool_)
+        filter_stats.append({"name": name, "matches": int(np.sum(bool_mask))})
+        keep &= bool_mask
+
+    if args.min_save_turn > 0:
+        add_filter(f"time>={args.min_save_turn}", arrays["time"] >= args.min_save_turn)
+    if args.max_save_turn is not None:
+        add_filter(f"time<={args.max_save_turn}", arrays["time"] <= args.max_save_turn)
+    if args.require_contact:
+        add_filter("contact", arrays["contact"] > 0.5)
+    if args.min_visible_enemy_cells > 0:
+        add_filter(
+            f"visible_enemy_cells>={args.min_visible_enemy_cells}",
+            arrays["visible_enemy_count"] >= args.min_visible_enemy_cells,
+        )
+    if args.min_visible_enemy_density > 0.0:
+        add_filter(
+            f"visible_enemy_density>={args.min_visible_enemy_density:g}",
+            arrays["visible_enemy_density"] >= args.min_visible_enemy_density,
+        )
+
+    known = arrays["outcome_known"] > 0.0
+    wins = (arrays["outcome"] == OUTCOME_WIN) & known
+    if args.require_outcome_known:
+        add_filter("outcome_known", known)
+    if args.require_win:
+        add_filter("win", wins)
+    if args.require_finish_within_250:
+        add_filter("finish250", arrays["finish_within_250"] > 0.5)
+    if args.require_win_or_finish_within_250:
+        add_filter("win_or_finish250", wins | (arrays["finish_within_250"] > 0.5))
+    if args.draw_only:
+        add_filter("draw_only", arrays["draw_risk"] > 0.5)
+    if args.terminal_window > 0:
+        add_filter(
+            f"terminal_window<={args.terminal_window}",
+            known & (arrays["steps_to_terminal"] <= args.terminal_window),
+        )
+
+    filtered = {name: value[keep] for name, value in arrays.items()}
+    post_count = int(np.sum(keep))
+    stats = {
+        "pre_filter_samples": sample_count,
+        "post_filter_samples": post_count,
+        "dropped_samples": int(sample_count - post_count),
+        "filters": filter_stats,
+    }
+    return filtered, stats
 
 
 def save_shard(path: Path, arrays: dict[str, np.ndarray], metadata: dict) -> None:
@@ -635,6 +743,17 @@ def parse_args():
     parser.add_argument("--output-dir", default="runs/adaptive-strategy-dataset")
     parser.add_argument("--shard-prefix", default="strategy")
     parser.add_argument("--logit-dtype", choices=("float32", "float16"), default="float16")
+    parser.add_argument("--min-save-turn", type=int, default=0)
+    parser.add_argument("--max-save-turn", type=int, default=None)
+    parser.add_argument("--require-contact", action="store_true")
+    parser.add_argument("--min-visible-enemy-cells", type=int, default=0)
+    parser.add_argument("--min-visible-enemy-density", type=float, default=0.0)
+    parser.add_argument("--require-outcome-known", action="store_true")
+    parser.add_argument("--require-win", action="store_true")
+    parser.add_argument("--require-finish-within-250", action="store_true")
+    parser.add_argument("--require-win-or-finish-within-250", action="store_true")
+    parser.add_argument("--draw-only", action="store_true")
+    parser.add_argument("--terminal-window", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -681,6 +800,18 @@ def parse_args():
         parser.error("city count must satisfy 2 <= min <= max")
     if args.city_army_min >= args.city_army_max:
         parser.error("city army range must satisfy min < max")
+    if args.min_save_turn < 0:
+        parser.error("--min-save-turn must be non-negative")
+    if args.max_save_turn is not None and args.max_save_turn < args.min_save_turn:
+        parser.error("--max-save-turn must be >= --min-save-turn")
+    if args.min_visible_enemy_cells < 0:
+        parser.error("--min-visible-enemy-cells must be non-negative")
+    if not (0.0 <= args.min_visible_enemy_density <= 1.0):
+        parser.error("--min-visible-enemy-density must be in [0, 1]")
+    if args.terminal_window < 0:
+        parser.error("--terminal-window must be non-negative")
+    if args.draw_only and (args.require_win or args.require_finish_within_250 or args.require_win_or_finish_within_250):
+        parser.error("--draw-only conflicts with win/finish save filters")
     return args
 
 
@@ -710,6 +841,9 @@ def main():
         print("Global ctx:    enabled")
     if args.fog_memory:
         print("Fog memory:    enabled")
+    filters = active_save_filters(args)
+    if filters:
+        print(f"Save filters:  {', '.join(filters)}")
     print()
 
     teacher_network = None
@@ -807,6 +941,7 @@ def main():
         "scoreboard_history": args.scoreboard_history,
         "fog_memory": args.fog_memory,
         "logit_dtype": args.logit_dtype,
+        "save_filters": save_filter_config(args),
         "seed": args.seed,
     }
 
@@ -854,18 +989,38 @@ def main():
         )
         jax.block_until_ready(states_p0)
         arrays = flatten_rollout_data(rollout_data, learner_players, args.logit_dtype)
-        shard_path = output_dir / f"{args.shard_prefix}-{shard_index:05d}.npz"
-        metadata = dict(metadata_base, shard_index=shard_index, num_samples=int(arrays["obs"].shape[0]))
-        save_shard(shard_path, arrays, metadata)
-
         dones = rollout_data[-2]
         infos = rollout_data[-1]
         episodes = int(jnp.sum(dones))
         wins = int(jnp.sum(dones & (infos.winner == learner_players[None, :])))
         draws = int(jnp.sum(dones & (infos.winner < 0)))
+        pre_filter_samples = int(arrays["obs"].shape[0])
+        arrays, filter_stats = apply_save_filters(arrays, args)
+        sample_count = int(arrays["obs"].shape[0])
+        if sample_count <= 0:
+            print(
+                f"Shard {shard_index:04d} | samples=0/{pre_filter_samples} after filters | "
+                f"episodes={episodes} wins={wins} draws={draws} | skipped | time={time.time() - t0:.2f}s"
+            )
+            continue
+
+        shard_path = output_dir / f"{args.shard_prefix}-{shard_index:05d}.npz"
+        metadata = dict(
+            metadata_base,
+            shard_index=shard_index,
+            num_samples=sample_count,
+            **filter_stats,
+        )
+        save_shard(shard_path, arrays, metadata)
+
+        sample_known = arrays["outcome_known"] > 0.0
+        sample_wins = int(np.sum((arrays["outcome"] == OUTCOME_WIN) & sample_known))
+        sample_draws = int(np.sum(arrays["draw_risk"] > 0.5))
+        sample_contact = float(np.mean(arrays["contact"] > 0.5))
         print(
-            f"Shard {shard_index:04d} | samples={arrays['obs'].shape[0]} | "
+            f"Shard {shard_index:04d} | samples={sample_count}/{pre_filter_samples} | "
             f"episodes={episodes} wins={wins} draws={draws} | "
+            f"sample_wins={sample_wins} sample_draws={sample_draws} contact={sample_contact:.3f} | "
             f"path={shard_path} | time={time.time() - t0:.2f}s"
         )
 

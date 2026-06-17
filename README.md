@@ -611,6 +611,8 @@ uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 16 \
   --output-dir runs/adaptive-strategy-dataset-v0/unet-v3-expander
 ```
 
+For midgame decisive trajectory imitation, use save-time filters so the shard keeps contact-heavy, terminal-window, or gather/attack states instead of every opening move. `--min-save-turn`, `--max-save-turn`, `--require-contact`, `--min-visible-enemy-cells`, `--terminal-window`, `--require-win`, `--require-finish-within-250`, `--require-win-or-finish-within-250`, and `--draw-only` filter rows after rollout labels are computed and before the shard is written. Separate shards are preferred for separate windows, for example terminal-120 wins and draw-heavy contact states, then mix those shards in `adaptive_strategy_supervised.py`.
+
 `adaptive_strategy_supervised.py` consumes those shards and trains only the frozen-base strategy heads. The first stage intentionally leaves the policy/trunk logits unchanged while learning intent, finish-within-250, and enemy-general belief:
 
 ```bash

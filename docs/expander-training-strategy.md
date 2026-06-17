@@ -4467,6 +4467,8 @@ saved arrays:
   source_heatmap
   target_heatmap
   weak intent
+  time
+  visible_enemy_count
   visible_enemy_density
   contact
 ```
@@ -4513,6 +4515,56 @@ source_heatmap is the own largest-stack cell.
 intent labels are weak rule labels without search outcomes.
 No replacement-outcome top-k search rows are saved yet.
 ```
+
+### Midgame decisive save filters
+
+`adaptive_strategy_dataset.py` now supports save-time row filters for decisive
+trajectory imitation:
+
+```text
+--min-save-turn / --max-save-turn
+--require-contact
+--min-visible-enemy-cells
+--min-visible-enemy-density
+--require-outcome-known
+--require-win
+--require-finish-within-250
+--require-win-or-finish-within-250
+--draw-only
+--terminal-window
+```
+
+The collector also saves current `time` and `visible_enemy_count`. Filters run
+after rollout labels are computed and before writing each shard; they do not
+change teacher actions or privileged labels. Empty filtered shards are skipped.
+
+This is the data path for Midgame Decisive Trajectory Imitation:
+
+```text
+A1: fixed v5 / rollout-search winning terminal windows
+A2: active U-Net winning/contact terminal windows
+A3: Plan-Q oracle best-plan leads-to-win windows
+
+primary windows:
+  terminal - 120 to terminal
+  contact-heavy midgame states
+  turn 80 to 180 gather/attack transition
+```
+
+The immediate training target is policy-coupled U-Net strategy supervision:
+
+```text
+policy KL anchor: 1.0
+teacher action CE: 0.3
+finish: 0.5
+outcome: 0.4
+enemy-general belief: 0.25
+intent: 0.2
+```
+
+Current trainer uses the binary `finish_within_250` head; the saved dataset
+already includes `finish_within_50/100/250` for a later multi-horizon finish
+head.
 
 ## 2026-06-17 Frozen Strategy-Head Supervision v0
 
