@@ -19,12 +19,23 @@ ADAPTIVE_GLOBAL_INPUT_CHANNELS = 20
 ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS = 5
 ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS = 10
 ADAPTIVE_HISTORY_INPUT_CHANNELS = ADAPTIVE_GLOBAL_INPUT_CHANNELS + ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS
+ADAPTIVE_FOG_MEMORY_CHANNELS = 5
 ADAPTIVE_MOVE_PLANES = 8
 
 
 class AdaptiveStatePool(NamedTuple):
     states: game.GameState
     effective_sizes: jnp.ndarray
+
+
+class AdaptiveFogMemory(NamedTuple):
+    """Per-player fog-of-war memory carried across an episode."""
+
+    explored_ever: jnp.ndarray
+    last_seen_enemy_owned: jnp.ndarray
+    last_seen_enemy_army: jnp.ndarray
+    seen_city: jnp.ndarray
+    seen_general: jnp.ndarray
 
 
 def parse_grid_sizes(value: str) -> tuple[int, ...]:
@@ -100,9 +111,67 @@ def adaptive_scoreboard_history_context(previous: jnp.ndarray, current: jnp.ndar
     return jnp.concatenate([previous, current - previous], axis=-1)
 
 
+def adaptive_input_channel_count(
+    include_global_context: bool = False,
+    scoreboard_history: bool = False,
+    fog_memory: bool = False,
+) -> int:
+    """Return adaptive observation channels for one feature configuration."""
+    channels = ADAPTIVE_INPUT_CHANNELS
+    if fog_memory:
+        channels += ADAPTIVE_FOG_MEMORY_CHANNELS
+    if scoreboard_history:
+        return channels + ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS + ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS
+    if include_global_context:
+        return channels + ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS
+    return channels
+
+
 def reset_adaptive_scoreboard_history(current: jnp.ndarray, dones: jnp.ndarray) -> jnp.ndarray:
     """Keep current scoreboard features for continuing rows and clear finished rows."""
     return jnp.where(dones[..., None], jnp.zeros_like(current), current)
+
+
+def empty_adaptive_fog_memory(num_envs: int, pad_size: int) -> AdaptiveFogMemory:
+    """Return empty fog memory for vectorized learner observations."""
+    zeros = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
+    return AdaptiveFogMemory(zeros, zeros, zeros, zeros, zeros)
+
+
+def update_adaptive_fog_memory(memory: AdaptiveFogMemory, obs) -> AdaptiveFogMemory:
+    """Update memory with currently visible enemy, city, and general information."""
+    visible = (~obs.fog_cells & ~obs.structures_in_fog).astype(jnp.float32)
+    known = (~obs.fog_cells).astype(jnp.float32)
+    enemy_owned = obs.opponent_cells.astype(jnp.float32)
+    enemy_army = jnp.log1p(jnp.maximum(obs.armies.astype(jnp.float32), 0.0)) * enemy_owned
+    return AdaptiveFogMemory(
+        explored_ever=jnp.maximum(memory.explored_ever, known),
+        last_seen_enemy_owned=jnp.where(visible > 0.0, enemy_owned, memory.last_seen_enemy_owned),
+        last_seen_enemy_army=jnp.where(visible > 0.0, enemy_army, memory.last_seen_enemy_army),
+        seen_city=jnp.maximum(memory.seen_city, obs.cities.astype(jnp.float32)),
+        seen_general=jnp.maximum(memory.seen_general, obs.generals.astype(jnp.float32)),
+    )
+
+
+def reset_adaptive_fog_memory(memory: AdaptiveFogMemory, dones: jnp.ndarray) -> AdaptiveFogMemory:
+    """Clear fog memory for rows that reset to a new episode."""
+    keep = (~dones).astype(jnp.float32)
+    return jax.tree.map(lambda value: value * keep.reshape(value.shape[0], 1, 1), memory)
+
+
+def adaptive_fog_memory_planes(memory: AdaptiveFogMemory, active: jnp.ndarray) -> jnp.ndarray:
+    """Stack one row of fog-memory state into spatial input planes."""
+    active_f = active.astype(jnp.float32)
+    return jnp.stack(
+        [
+            memory.explored_ever,
+            memory.last_seen_enemy_owned,
+            memory.last_seen_enemy_army,
+            memory.seen_city,
+            memory.seen_general,
+        ],
+        axis=0,
+    ) * active_f[None, :, :]
 
 
 def adaptive_obs_to_array(
@@ -111,6 +180,7 @@ def adaptive_obs_to_array(
     pad_size: int,
     include_global_context: bool = False,
     scoreboard_history: jnp.ndarray | None = None,
+    fog_memory: AdaptiveFogMemory | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Convert an observation to adaptive policy channels plus active-cell mask."""
     base = obs_to_array(obs)
@@ -138,6 +208,8 @@ def adaptive_obs_to_array(
         axis=0,
     )
     adaptive = jnp.concatenate([normalized_base, extra], axis=0)
+    if fog_memory is not None:
+        adaptive = jnp.concatenate([adaptive, adaptive_fog_memory_planes(fog_memory, active)], axis=0)
     if not include_global_context:
         return adaptive, active
 

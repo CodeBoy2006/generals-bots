@@ -693,3 +693,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote pyramid add-on checkpoints. Move to a trunk replacement or explicit memory/belief input channels; the add-on branches repair some weak seeds but still shift bottlenecks.
 - **Context:** Pyramid-only looked good at 64 games/row (`73.44%` vs same-seed base `67.19%`) but failed 256-row confirmation (`64.84%` vs base `67.97%`). Low-LR joint pyramid repaired weak seeds only (`67.19%` vs base `62.50%` on one 64-row seed), and pyramid aux direct matched base at `64.06%` min.
+
+## [2026-06-17 14:31] Adaptive U-Net Trunk Bootstrap
+- **Changes:** Added `AdaptiveUNetPolicyValueNetwork`, `train_adaptive.py --network-arch unet`, evaluator support for U-Net checkpoints, explicit adaptive fog-memory input planes, teacher KL anchoring, teacher-driven rollout actions, and teacher action CE for trunk replacement bootstrap. Updated README and strategy docs.
+- **Status:** Completed
+- **Next Steps:** Do not promote the current U-Net checkpoints. Build a dedicated offline teacher-imitation/search-to-strategy dataset so the U-Net can match the legacy CNN teacher at 256 games/row before sparse PPO fine-tuning.
+- **Context:** GPU probes ran under `runs/adaptive-unet-v1*/`. EMA bootstrap v1 saved a near-random policy (`0.00%` min). Best checkpoint v1d reached `62.50%` min on 64-row smoke, but 256-row triage scored `66.41%` min versus same-seed base `69.14%`. U-Net large-map rows are close (`16p0=70.70%`, `16p1=71.09%`), but 8/12 rows remain under-cloned.

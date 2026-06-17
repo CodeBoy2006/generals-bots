@@ -492,6 +492,360 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         return action, value, logprob, entropy
 
 
+class AdaptiveUNetPolicyValueNetwork(eqx.Module):
+    """Small U-Net policy-value network that makes multiscale features the main trunk."""
+
+    enc1: eqx.nn.Conv2d
+    enc2: eqx.nn.Conv2d
+    bottleneck: eqx.nn.Conv2d
+    dec1: eqx.nn.Conv2d
+    dec2: eqx.nn.Conv2d
+    policy_conv: eqx.nn.Conv2d
+    pass_linear: eqx.nn.Linear
+    value_linear1: eqx.nn.Linear
+    value_linear2: eqx.nn.Linear
+    categorical_value_linear2: eqx.nn.Linear | None
+    outcome_linear2: eqx.nn.Linear | None
+    strategy_intent_linear2: eqx.nn.Linear | None
+    strategy_finish_linear2: eqx.nn.Linear | None
+    strategy_q_conv: eqx.nn.Conv2d | None
+    strategy_q_pass_linear: eqx.nn.Linear | None
+    strategy_enemy_general_conv: eqx.nn.Conv2d | None
+    size_value_linear1: tuple[eqx.nn.Linear, ...]
+    size_value_linear2: tuple[eqx.nn.Linear, ...]
+    size_categorical_value_linear2: tuple[eqx.nn.Linear, ...]
+    pad_size: int = eqx.field(static=True)
+    value_head_sizes: tuple[int, ...] = eqx.field(static=True)
+    value_bins: int = eqx.field(static=True)
+    value_min: float = eqx.field(static=True)
+    value_max: float = eqx.field(static=True)
+    value_sigma: float = eqx.field(static=True)
+    outcome_head: bool = eqx.field(static=True)
+    strategy_aux: bool = eqx.field(static=True)
+    global_context: bool = eqx.field(static=True)
+    context_residual: bool = eqx.field(static=True, default=False)
+    pyramid_context: bool = eqx.field(static=True, default=False)
+
+    def __init__(
+        self,
+        key: jnp.ndarray,
+        pad_size: int = 16,
+        channels: PolicyChannels = DEFAULT_POLICY_CHANNELS,
+        input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+        value_head_sizes: tuple[int, ...] | None = None,
+        value_bins: int = 0,
+        value_min: float = -1.0,
+        value_max: float = 1.0,
+        value_sigma: float = 0.04,
+        outcome_head: bool = False,
+        strategy_aux: bool = False,
+        global_context: bool = False,
+        context_residual: bool = False,
+        pyramid_context: bool = False,
+    ):
+        if context_residual or pyramid_context:
+            raise ValueError("AdaptiveUNetPolicyValueNetwork replaces context/pyramid add-on branches")
+        if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
+            input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
+        parsed_value_head_sizes = tuple(value_head_sizes or ())
+        parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
+        categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
+        outcome_keys = 1 if outcome_head else 0
+        strategy_keys = 5 if strategy_aux else 0
+        keys = jrandom.split(
+            key,
+            9 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys + strategy_keys,
+        )
+        self.pad_size = pad_size
+        self.value_head_sizes = parsed_value_head_sizes
+        self.value_bins = parsed_value_bins
+        self.value_min = value_min
+        self.value_max = value_max
+        self.value_sigma = value_sigma
+        self.outcome_head = bool(outcome_head)
+        self.strategy_aux = bool(strategy_aux)
+        self.global_context = bool(global_context)
+        self.context_residual = False
+        self.pyramid_context = False
+        c1, c2, c3, c4 = channels
+        self.enc1 = eqx.nn.Conv2d(input_channels, c1, kernel_size=3, padding=1, key=keys[0])
+        self.enc2 = eqx.nn.Conv2d(c1, c2, kernel_size=3, padding=1, key=keys[1])
+        self.bottleneck = eqx.nn.Conv2d(c2, c3, kernel_size=3, padding=1, key=keys[2])
+        self.dec1 = eqx.nn.Conv2d(c3 + c2, c2, kernel_size=3, padding=1, key=keys[3])
+        self.dec2 = eqx.nn.Conv2d(c2 + c1, c4, kernel_size=3, padding=1, key=keys[4])
+        self.policy_conv = eqx.nn.Conv2d(c4, 8, kernel_size=1, key=keys[5])
+        self.pass_linear = eqx.nn.Linear(c4 * 2, 1, key=keys[6])
+        self.value_linear1 = eqx.nn.Linear(c4 * 2, 64, key=keys[7])
+        value_key_offset = 8
+        self.value_linear2 = eqx.nn.Linear(64, 1, key=keys[value_key_offset])
+        self.size_value_linear1 = tuple(
+            eqx.nn.Linear(c4 * 2, 64, key=keys[value_key_offset + 1 + 2 * index])
+            for index, _ in enumerate(parsed_value_head_sizes)
+        )
+        self.size_value_linear2 = tuple(
+            eqx.nn.Linear(64, 1, key=keys[value_key_offset + 2 + 2 * index])
+            for index, _ in enumerate(parsed_value_head_sizes)
+        )
+        categorical_offset = value_key_offset + 1 + 2 * len(parsed_value_head_sizes)
+        self.categorical_value_linear2 = (
+            eqx.nn.Linear(64, parsed_value_bins, key=keys[categorical_offset]) if parsed_value_bins > 0 else None
+        )
+        self.size_categorical_value_linear2 = tuple(
+            eqx.nn.Linear(64, parsed_value_bins, key=keys[categorical_offset + 1 + index])
+            for index, _ in enumerate(parsed_value_head_sizes)
+            if parsed_value_bins > 0
+        )
+        outcome_offset = categorical_offset + categorical_keys
+        self.outcome_linear2 = eqx.nn.Linear(64, 3, key=keys[outcome_offset]) if outcome_head else None
+        strategy_offset = outcome_offset + outcome_keys
+        if strategy_aux:
+            self.strategy_intent_linear2 = eqx.nn.Linear(64, 8, key=keys[strategy_offset])
+            self.strategy_finish_linear2 = eqx.nn.Linear(64, 2, key=keys[strategy_offset + 1])
+            self.strategy_q_conv = eqx.nn.Conv2d(c4, 8, kernel_size=1, key=keys[strategy_offset + 2])
+            self.strategy_q_pass_linear = eqx.nn.Linear(c4 * 2, 1, key=keys[strategy_offset + 3])
+            self.strategy_enemy_general_conv = eqx.nn.Conv2d(c4, 1, kernel_size=1, key=keys[strategy_offset + 4])
+        else:
+            self.strategy_intent_linear2 = None
+            self.strategy_finish_linear2 = None
+            self.strategy_q_conv = None
+            self.strategy_q_pass_linear = None
+            self.strategy_enemy_general_conv = None
+
+    def _avg_pool2x(self, x: jnp.ndarray) -> jnp.ndarray:
+        pooled = jax.lax.reduce_window(
+            x,
+            0.0,
+            jax.lax.add,
+            window_dimensions=(1, 2, 2),
+            window_strides=(1, 2, 2),
+            padding="VALID",
+        )
+        return pooled * 0.25
+
+    def _resize_nearest(self, x: jnp.ndarray, height: int, width: int) -> jnp.ndarray:
+        src_height = x.shape[1]
+        src_width = x.shape[2]
+        row_idx = jnp.floor(jnp.arange(height, dtype=jnp.float32) * (src_height / height)).astype(jnp.int32)
+        col_idx = jnp.floor(jnp.arange(width, dtype=jnp.float32) * (src_width / width)).astype(jnp.int32)
+        return x[:, row_idx, :][:, :, col_idx]
+
+    def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
+        skip1 = jax.nn.relu(self.enc1(obs))
+        skip2 = jax.nn.relu(self.enc2(self._avg_pool2x(skip1)))
+        bridge = jax.nn.relu(self.bottleneck(self._avg_pool2x(skip2)))
+        up1 = self._resize_nearest(bridge, skip2.shape[1], skip2.shape[2])
+        dec1 = jax.nn.relu(self.dec1(jnp.concatenate([up1, skip2], axis=0)))
+        up2 = self._resize_nearest(dec1, skip1.shape[1], skip1.shape[2])
+        return jax.nn.relu(self.dec2(jnp.concatenate([up2, skip1], axis=0)))
+
+    def _masked_pool(self, x: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
+        active_f = active.astype(jnp.float32)[None, :, :]
+        denom = jnp.maximum(jnp.sum(active_f), 1.0)
+        mean = jnp.sum(x * active_f, axis=(1, 2)) / denom
+        masked = jnp.where(active_f > 0, x, -jnp.inf)
+        max_pool = jnp.max(masked, axis=(1, 2))
+        max_pool = jnp.where(jnp.isfinite(max_pool), max_pool, 0.0)
+        return jnp.concatenate([mean, max_pool], axis=0)
+
+    def _shared_value(self, pooled: jnp.ndarray) -> jnp.ndarray:
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        return self.value_linear2(value_hidden)[0]
+
+    def _shared_value_logits(self, pooled: jnp.ndarray) -> jnp.ndarray:
+        if self.categorical_value_linear2 is None:
+            raise ValueError("categorical value head is not configured")
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        return self.categorical_value_linear2(value_hidden)
+
+    def _outcome_logits(self, pooled: jnp.ndarray) -> jnp.ndarray | None:
+        if self.outcome_linear2 is None:
+            return None
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        return self.outcome_linear2(value_hidden)
+
+    def strategy_auxiliary(self, obs: jnp.ndarray, mask: jnp.ndarray, active: jnp.ndarray) -> StrategyAuxOutputs:
+        """Compute optional strategic auxiliary predictions."""
+        if (
+            self.strategy_intent_linear2 is None
+            or self.strategy_finish_linear2 is None
+            or self.strategy_q_conv is None
+            or self.strategy_q_pass_linear is None
+            or self.strategy_enemy_general_conv is None
+        ):
+            raise ValueError("strategy auxiliary heads are not configured")
+        x = self._features(obs)
+        pooled = self._masked_pool(x, active)
+        value_hidden = jax.nn.relu(self.value_linear1(pooled))
+        move_q = self.strategy_q_conv(x)
+        pass_q = self.strategy_q_pass_linear(pooled)
+        action_q_values = jnp.concatenate([move_q.reshape(-1), pass_q], axis=0)
+        enemy_general_logits = self.strategy_enemy_general_conv(x)[0]
+        enemy_general_logits = jnp.where(active, enemy_general_logits, -10.0)
+        return StrategyAuxOutputs(
+            intent_logits=self.strategy_intent_linear2(value_hidden),
+            finish_logits=self.strategy_finish_linear2(value_hidden),
+            enemy_general_logits=enemy_general_logits,
+            action_q_values=action_q_values,
+        )
+
+    def _size_value(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
+        if not self.value_head_sizes:
+            return self._shared_value(pooled)
+        active_cells = jnp.sum(active.astype(jnp.int32))
+        head_cells = jnp.array([size * size for size in self.value_head_sizes], dtype=jnp.int32)
+        head_index = jnp.argmin(jnp.abs(head_cells - active_cells))
+        branches = tuple(
+            (lambda linear1, linear2: lambda _: linear2(jax.nn.relu(linear1(pooled)))[0])(linear1, linear2)
+            for linear1, linear2 in zip(self.size_value_linear1, self.size_value_linear2, strict=True)
+        )
+        return jax.lax.switch(head_index, branches, None)
+
+    def _size_value_logits(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
+        if self.categorical_value_linear2 is None:
+            raise ValueError("categorical value head is not configured")
+        if not self.value_head_sizes:
+            return self._shared_value_logits(pooled)
+        active_cells = jnp.sum(active.astype(jnp.int32))
+        head_cells = jnp.array([size * size for size in self.value_head_sizes], dtype=jnp.int32)
+        head_index = jnp.argmin(jnp.abs(head_cells - active_cells))
+        branches = tuple(
+            (lambda linear1, linear2: lambda _: linear2(jax.nn.relu(linear1(pooled))))(linear1, linear2)
+            for linear1, linear2 in zip(
+                self.size_value_linear1,
+                self.size_categorical_value_linear2,
+                strict=True,
+            )
+        )
+        return jax.lax.switch(head_index, branches, None)
+
+    def _value_distribution(self, pooled: jnp.ndarray, active: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+        if self.value_bins <= 0:
+            return self._size_value(pooled, active), None
+        value_logits = self._size_value_logits(pooled, active)
+        value = categorical_value_expectation(value_logits, self.value_min, self.value_max)
+        return value, value_logits
+
+    def logits_value(self, obs: jnp.ndarray, mask: jnp.ndarray, active: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Compute movement logits, one global pass logit, and scalar value."""
+        logits, value, _ = self.logits_value_distribution(obs, mask, active)
+        return logits, value
+
+    def logits_value_distribution(
+        self,
+        obs: jnp.ndarray,
+        mask: jnp.ndarray,
+        active: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None]:
+        """Compute policy logits, scalar value, and optional categorical value logits."""
+        logits, value, value_logits, _ = self.logits_value_auxiliary(obs, mask, active)
+        return logits, value, value_logits
+
+    def logits_value_auxiliary(
+        self,
+        obs: jnp.ndarray,
+        mask: jnp.ndarray,
+        active: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
+        """Compute policy/value outputs plus optional auxiliary outcome logits."""
+        x = self._features(obs)
+        pooled = self._masked_pool(x, active)
+        move_logits = self.policy_conv(x)
+        mask_t = jnp.transpose(mask, (2, 0, 1))
+        move_mask = jnp.concatenate([mask_t, mask_t], axis=0)
+        move_logits = move_logits + (1 - move_mask.astype(jnp.float32)) * -1e9
+        pass_logit = self.pass_linear(pooled)
+        value, value_logits = self._value_distribution(pooled, active)
+        outcome_logits = self._outcome_logits(pooled)
+        logits = jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
+        return logits, value, value_logits, outcome_logits
+
+    def __call__(
+        self,
+        obs: jnp.ndarray,
+        mask: jnp.ndarray,
+        active: jnp.ndarray,
+        key: jnp.ndarray | None,
+        action: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Sample or score one action."""
+        logits, value = self.logits_value(obs, mask, active)
+        if action is None:
+            if key is None:
+                raise ValueError("key is required when sampling an action")
+            index = jrandom.categorical(key, logits)
+            action = adaptive_index_to_action(index, self.pad_size)
+        else:
+            index = adaptive_action_to_index(action, self.pad_size)
+        log_probs = jax.nn.log_softmax(logits)
+        logprob = log_probs[index]
+        probs = jax.nn.softmax(logits)
+        entropy = -jnp.sum(probs * log_probs)
+        return action, value, logprob, entropy
+
+
+def _create_adaptive_network(
+    key: jnp.ndarray,
+    network_arch: str,
+    pad_size: int,
+    channels: PolicyChannels,
+    input_channels: int,
+    value_head_sizes: tuple[int, ...],
+    value_bins: int,
+    value_min: float,
+    value_max: float,
+    value_sigma: float,
+    outcome_head: bool,
+    strategy_aux: bool,
+    global_context: bool,
+    context_residual: bool,
+    pyramid_context: bool,
+):
+    if network_arch == "cnn":
+        return AdaptivePolicyValueNetwork(
+            key,
+            pad_size=pad_size,
+            channels=channels,
+            input_channels=input_channels,
+            value_head_sizes=value_head_sizes,
+            value_bins=value_bins,
+            value_min=value_min,
+            value_max=value_max,
+            value_sigma=value_sigma,
+            outcome_head=outcome_head,
+            strategy_aux=strategy_aux,
+            global_context=global_context,
+            context_residual=context_residual,
+            pyramid_context=pyramid_context,
+        )
+    if network_arch == "unet":
+        return AdaptiveUNetPolicyValueNetwork(
+            key,
+            pad_size=pad_size,
+            channels=channels,
+            input_channels=input_channels,
+            value_head_sizes=value_head_sizes,
+            value_bins=value_bins,
+            value_min=value_min,
+            value_max=value_max,
+            value_sigma=value_sigma,
+            outcome_head=outcome_head,
+            strategy_aux=strategy_aux,
+            global_context=global_context,
+            context_residual=context_residual,
+            pyramid_context=pyramid_context,
+        )
+    raise ValueError(f"unknown adaptive network architecture: {network_arch}")
+
+
+def adaptive_network_input_channels(network) -> int:
+    """Return the spatial input channel count for an adaptive policy network."""
+    if hasattr(network, "conv1"):
+        return int(network.conv1.weight.shape[1])
+    if hasattr(network, "enc1"):
+        return int(network.enc1.weight.shape[1])
+    raise TypeError(f"unsupported adaptive network type: {type(network)!r}")
+
+
 def load_or_create_adaptive_network(
     key: jnp.ndarray,
     pad_size: int,
@@ -520,13 +874,21 @@ def load_or_create_adaptive_network(
     init_context_residual: bool | None = None,
     pyramid_context: bool = False,
     init_pyramid_context: bool | None = None,
-) -> AdaptivePolicyValueNetwork:
+    network_arch: str = "cnn",
+    init_network_arch: str | None = None,
+):
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
+    if network_arch not in ("cnn", "unet"):
+        raise ValueError("--network-arch must be 'cnn' or 'unet'")
+    parsed_init_network_arch = network_arch if init_network_arch is None else init_network_arch
+    if parsed_init_network_arch not in ("cnn", "unet"):
+        raise ValueError("--init-network-arch must be 'cnn' or 'unet'")
     parsed_channels = parse_policy_channels(channels)
     parsed_value_head_sizes = _normalize_value_head_sizes(value_head_sizes)
     parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
-    network = AdaptivePolicyValueNetwork(
+    network = _create_adaptive_network(
         key,
+        network_arch,
         pad_size=pad_size,
         channels=parsed_channels,
         input_channels=input_channels,
@@ -570,6 +932,11 @@ def load_or_create_adaptive_network(
         context_residual if init_context_residual is None else bool(init_context_residual)
     )
     parsed_init_pyramid_context = pyramid_context if init_pyramid_context is None else bool(init_pyramid_context)
+    if parsed_init_network_arch != network_arch:
+        raise ValueError(
+            "Cannot warm-start across adaptive network architectures. "
+            "Use --teacher-model-path/--teacher-kl-weight to anchor a new trunk to an old checkpoint."
+        )
     needs_expansion = (
         parsed_init_channels != parsed_channels
         or parsed_init_input_channels != input_channels
@@ -585,6 +952,8 @@ def load_or_create_adaptive_network(
         or parsed_init_pyramid_context != pyramid_context
     )
     if needs_expansion:
+        if network_arch != "cnn":
+            raise ValueError("Only cnn adaptive checkpoints support structural expansion warm starts")
         source_network = AdaptivePolicyValueNetwork(
             key,
             pad_size=pad_size,

@@ -112,6 +112,33 @@ def test_adaptive_obs_to_array_can_append_scoreboard_history_channels():
     assert jnp.all(arr[20:, :, 4:] == 0.0)
 
 
+def test_adaptive_obs_to_array_can_append_fog_memory_channels():
+    from examples._experimental.ppo.adaptive_common import (
+        ADAPTIVE_INPUT_CHANNELS,
+        adaptive_input_channel_count,
+        adaptive_obs_to_array,
+        empty_adaptive_fog_memory,
+        update_adaptive_fog_memory,
+    )
+
+    state = make_padded_state(size=4, pad_to=6)
+    state = state._replace(
+        armies=state.armies.at[0, 1].set(3),
+        ownership=state.ownership.at[1, 0, 1].set(True),
+    )
+    obs = game.get_observation(state, 0)
+    empty_memory = empty_adaptive_fog_memory(1, 6)
+    row_memory = jax.tree.map(lambda value: value[0], empty_memory)
+    memory = update_adaptive_fog_memory(row_memory, obs)
+
+    arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6, fog_memory=memory)
+
+    assert arr.shape == (adaptive_input_channel_count(fog_memory=True), 6, 6)
+    assert active.shape == (6, 6)
+    assert jnp.allclose(arr[:ADAPTIVE_INPUT_CHANNELS], adaptive_obs_to_array(obs, 4, 6)[0])
+    assert arr[ADAPTIVE_INPUT_CHANNELS, 0, 0] == 1.0
+
+
 def test_adaptive_scoreboard_history_context_and_reset():
     from examples._experimental.ppo.adaptive_common import (
         adaptive_scoreboard_history_context,
@@ -176,6 +203,23 @@ def test_adaptive_network_forward_uses_fixed_action_space_and_finite_value():
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
 
     network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6)
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    logits, value = network.logits_value(obs_arr, mask, active)
+
+    assert logits.shape == (8 * 6 * 6 + 1,)
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(logits[-1])
+
+
+def test_adaptive_unet_network_forward_uses_fixed_action_space_and_finite_value():
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptiveUNetPolicyValueNetwork
+
+    network = AdaptiveUNetPolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
     state = make_padded_state(size=4, pad_to=6)
     obs = game.get_observation(state, 0)
     obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
@@ -780,6 +824,17 @@ def test_top_advantage_weights_selects_highest_fraction():
     assert weights.dtype == jnp.float32
     assert jnp.allclose(weights, jnp.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0], dtype=jnp.float32))
     assert jnp.allclose(top_advantage_weights(advantages, 1.0), jnp.ones_like(advantages))
+
+
+def test_teacher_obs_from_student_obs_removes_fog_memory_before_history():
+    from examples._experimental.ppo.train_adaptive import teacher_obs_from_student_obs
+
+    obs = jnp.arange(35 * 2 * 2, dtype=jnp.float32).reshape(35, 2, 2)
+    teacher_obs = teacher_obs_from_student_obs(obs, 30)
+
+    assert teacher_obs.shape == (30, 2, 2)
+    assert jnp.array_equal(teacher_obs[:15], obs[:15])
+    assert jnp.array_equal(teacher_obs[15:], obs[20:])
 
 
 def test_update_ema_network_averages_trainable_arrays():

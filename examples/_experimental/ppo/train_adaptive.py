@@ -23,20 +23,25 @@ import optax
 from adaptive_common import (
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
+    ADAPTIVE_FOG_MEMORY_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
+    adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    empty_adaptive_fog_memory,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
     parse_grid_sizes,
+    reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    update_adaptive_fog_memory,
 )
-from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_network
+from adaptive_network import adaptive_network_input_channels, hl_gauss_value_loss, load_or_create_adaptive_network
 from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
 from generals.core import game
 from generals.core.rewards import composite_reward_fn
@@ -188,6 +193,11 @@ def rollout_step(
     global_context=False,
     scoreboard_history=None,
     scoreboard_history_enabled=False,
+    fog_memory=None,
+    fog_memory_enabled=False,
+    teacher_network=None,
+    teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    teacher_rollout_actions: bool = False,
 ):
     """Collect one vectorized adaptive PPO rollout step."""
     num_envs = states.armies.shape[0]
@@ -198,33 +208,71 @@ def rollout_step(
 
     if scoreboard_history is None:
         scoreboard_history = empty_scoreboard_history(num_envs)
+    if fog_memory is None:
+        fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
+    if fog_memory_enabled:
+        current_fog_memory = jax.vmap(update_adaptive_fog_memory)(fog_memory, learner_obs_prior)
+    else:
+        current_fog_memory = fog_memory
     if scoreboard_history_enabled:
         current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
             learner_obs_prior,
             effective_sizes,
         )
         history_context = adaptive_scoreboard_history_context(scoreboard_history, current_scoreboard)
-        obs_arr, active = jax.vmap(
-            lambda obs, size, history: adaptive_obs_to_array(
-                obs,
-                size,
-                pad_size,
-                include_global_context=True,
-                scoreboard_history=history,
+        if fog_memory_enabled:
+            obs_arr, active = jax.vmap(
+                lambda obs, size, history, memory: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=True,
+                    scoreboard_history=history,
+                    fog_memory=memory,
+                )
+            )(
+                learner_obs_prior,
+                effective_sizes,
+                history_context,
+                current_fog_memory,
             )
-        )(
-            learner_obs_prior,
-            effective_sizes,
-            history_context,
-        )
+        else:
+            obs_arr, active = jax.vmap(
+                lambda obs, size, history: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=True,
+                    scoreboard_history=history,
+                )
+            )(
+                learner_obs_prior,
+                effective_sizes,
+                history_context,
+            )
     else:
         current_scoreboard = scoreboard_history
-        obs_arr, active = jax.vmap(
-            lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
-        )(
-            learner_obs_prior,
-            effective_sizes,
-        )
+        if fog_memory_enabled:
+            obs_arr, active = jax.vmap(
+                lambda obs, size, memory: adaptive_obs_to_array(
+                    obs,
+                    size,
+                    pad_size,
+                    include_global_context=global_context,
+                    fog_memory=memory,
+                )
+            )(
+                learner_obs_prior,
+                effective_sizes,
+                current_fog_memory,
+            )
+        else:
+            obs_arr, active = jax.vmap(
+                lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+            )(
+                learner_obs_prior,
+                effective_sizes,
+            )
     masks = jax.vmap(
         lambda obs, size: compute_adaptive_valid_move_mask(
             obs.armies,
@@ -244,6 +292,24 @@ def rollout_step(
         learner_keys,
         None,
     )
+    if teacher_network is not None and teacher_rollout_actions:
+        key, teacher_key = jrandom.split(key)
+        teacher_obs_arr = jax.vmap(lambda obs: teacher_obs_from_student_obs(obs, teacher_input_channels))(obs_arr)
+        teacher_keys = jrandom.split(teacher_key, num_envs)
+        teacher_actions, _, _, _ = jax.vmap(teacher_network, in_axes=(0, 0, 0, 0, None))(
+            teacher_obs_arr,
+            masks,
+            active,
+            teacher_keys,
+            None,
+        )
+        learner_actions, values, logprobs, entropies = jax.vmap(network, in_axes=(0, 0, 0, 0, 0))(
+            obs_arr,
+            masks,
+            active,
+            learner_keys,
+            teacher_actions,
+        )
 
     key, opponent_key = jrandom.split(key)
     opponent_keys = jrandom.split(opponent_key, num_envs)
@@ -281,10 +347,12 @@ def rollout_step(
     )
     final_sizes = jnp.where(dones, reset_sizes, effective_sizes)
     final_scoreboard_history = reset_adaptive_scoreboard_history(current_scoreboard, dones)
+    final_fog_memory = reset_adaptive_fog_memory(current_fog_memory, dones)
     return (
         final_states,
         final_sizes,
         final_scoreboard_history,
+        final_fog_memory,
         (obs_arr, masks, active, learner_actions, logprobs, values, rewards, dones, infos),
         key,
     )
@@ -307,11 +375,16 @@ def collect_rollout(
     global_context=False,
     scoreboard_history=None,
     scoreboard_history_enabled=False,
+    fog_memory=None,
+    fog_memory_enabled=False,
+    teacher_network=None,
+    teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    teacher_rollout_actions: bool = False,
 ):
     """Collect a Python-loop rollout, stacking step data on axis 0."""
     step_data = []
     for _ in range(num_steps):
-        states, effective_sizes, scoreboard_history, data, key = rollout_step(
+        states, effective_sizes, scoreboard_history, fog_memory, data, key = rollout_step(
             states,
             effective_sizes,
             pool,
@@ -327,10 +400,15 @@ def collect_rollout(
             global_context,
             scoreboard_history,
             scoreboard_history_enabled,
+            fog_memory,
+            fog_memory_enabled,
+            teacher_network,
+            teacher_input_channels,
+            teacher_rollout_actions,
         )
         step_data.append(data)
     rollout_data = jax.tree.map(lambda *xs: jnp.stack(xs), *step_data)
-    return states, effective_sizes, scoreboard_history, rollout_data, key
+    return states, effective_sizes, scoreboard_history, fog_memory, rollout_data, key
 
 
 def collect_mixed_rollout(
@@ -352,10 +430,16 @@ def collect_mixed_rollout(
     scoreboard_history_p0=None,
     scoreboard_history_p1=None,
     scoreboard_history_enabled=False,
+    fog_memory_p0=None,
+    fog_memory_p1=None,
+    fog_memory_enabled=False,
+    teacher_network=None,
+    teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    teacher_rollout_actions: bool = False,
 ):
     """Collect P0 and P1 learner trajectories, then combine them for one PPO update."""
     key, p0_key, p1_key = jrandom.split(key, 3)
-    states_p0, effective_sizes_p0, scoreboard_history_p0, rollout_p0, _ = collect_rollout(
+    states_p0, effective_sizes_p0, scoreboard_history_p0, fog_memory_p0, rollout_p0, _ = collect_rollout(
         states_p0,
         effective_sizes_p0,
         pool,
@@ -372,8 +456,13 @@ def collect_mixed_rollout(
         global_context,
         scoreboard_history_p0,
         scoreboard_history_enabled,
+        fog_memory_p0,
+        fog_memory_enabled,
+        teacher_network,
+        teacher_input_channels,
+        teacher_rollout_actions,
     )
-    states_p1, effective_sizes_p1, scoreboard_history_p1, rollout_p1, _ = collect_rollout(
+    states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_rollout(
         states_p1,
         effective_sizes_p1,
         pool,
@@ -390,15 +479,22 @@ def collect_mixed_rollout(
         global_context,
         scoreboard_history_p1,
         scoreboard_history_enabled,
+        fog_memory_p1,
+        fog_memory_enabled,
+        teacher_network,
+        teacher_input_channels,
+        teacher_rollout_actions,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
         states_p0,
         effective_sizes_p0,
         scoreboard_history_p0,
+        fog_memory_p0,
         states_p1,
         effective_sizes_p1,
         scoreboard_history_p1,
+        fog_memory_p1,
         rollout_data,
         key,
     )
@@ -480,6 +576,42 @@ def ppo_loss(network, obs, mask, active, action, old_logprob, advantage, ret, cl
     return policy_loss + value_loss - 0.01 * entropy
 
 
+def teacher_obs_from_student_obs(obs: jnp.ndarray, teacher_input_channels: int) -> jnp.ndarray:
+    """Drop student-only memory/history planes when querying a legacy teacher."""
+    if obs.shape[0] == teacher_input_channels:
+        return obs
+    if teacher_input_channels == ADAPTIVE_INPUT_CHANNELS:
+        return obs[:ADAPTIVE_INPUT_CHANNELS]
+    fog_end = ADAPTIVE_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS
+    if obs.shape[0] == ADAPTIVE_GLOBAL_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS:
+        if teacher_input_channels == ADAPTIVE_GLOBAL_INPUT_CHANNELS:
+            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 5]], axis=0)
+    if obs.shape[0] == ADAPTIVE_HISTORY_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS:
+        if teacher_input_channels == ADAPTIVE_GLOBAL_INPUT_CHANNELS:
+            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 5]], axis=0)
+        if teacher_input_channels == ADAPTIVE_HISTORY_INPUT_CHANNELS:
+            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 15]], axis=0)
+    return obs[:teacher_input_channels]
+
+
+def teacher_policy_kl(network, teacher_network, obs, mask, active, teacher_input_channels: int) -> jnp.ndarray:
+    """KL(teacher || student) policy anchor for trunk replacement experiments."""
+    student_logits, _ = network.logits_value(obs, mask, active)
+    teacher_obs = teacher_obs_from_student_obs(obs, teacher_input_channels)
+    teacher_logits, _ = teacher_network.logits_value(teacher_obs, mask, active)
+    teacher_log_probs = jax.nn.log_softmax(teacher_logits)
+    teacher_probs = jax.lax.stop_gradient(jax.nn.softmax(teacher_logits))
+    teacher_log_probs = jax.lax.stop_gradient(teacher_log_probs)
+    return jnp.sum(teacher_probs * (teacher_log_probs - jax.nn.log_softmax(student_logits)))
+
+
+def policy_action_cross_entropy(network, obs, mask, active, action) -> jnp.ndarray:
+    """Cross-entropy for an externally supplied adaptive action label."""
+    logits, _ = network.logits_value(obs, mask, active)
+    action_index = adaptive_action_to_index(action, network.pad_size)
+    return -jax.nn.log_softmax(logits)[action_index]
+
+
 @eqx.filter_jit
 def train_minibatch_step(
     network,
@@ -488,6 +620,10 @@ def train_minibatch_step(
     optimizer,
     outcome_aux_weight: float = 0.0,
     context_only_update: bool = False,
+    teacher_network=None,
+    teacher_kl_weight: float = 0.0,
+    teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
+    teacher_action_ce_weight: float = 0.0,
 ):
     """Run one PPO update on a flattened adaptive minibatch."""
     (
@@ -534,7 +670,26 @@ def train_minibatch_step(
         value_loss = jnp.mean(value_losses)
         outcome_normalizer = jnp.maximum(jnp.sum(outcome_weights), 1.0)
         outcome_loss = jnp.sum(outcome_losses) / outcome_normalizer
-        return policy_loss + value_loss + entropy_loss + outcome_aux_weight * outcome_loss
+        teacher_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        if teacher_network is not None and teacher_kl_weight > 0.0:
+            teacher_losses = jax.vmap(
+                lambda o, m, ac: teacher_policy_kl(net, teacher_network, o, m, ac, teacher_input_channels)
+            )(obs, masks, active)
+            teacher_loss = jnp.mean(teacher_losses)
+        teacher_action_ce_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        if teacher_action_ce_weight > 0.0:
+            teacher_action_ce_losses = jax.vmap(
+                lambda o, m, ac, a: policy_action_cross_entropy(net, o, m, ac, a)
+            )(obs, masks, active, actions)
+            teacher_action_ce_loss = jnp.mean(teacher_action_ce_losses)
+        return (
+            policy_loss
+            + value_loss
+            + entropy_loss
+            + outcome_aux_weight * outcome_loss
+            + teacher_kl_weight * teacher_loss
+            + teacher_action_ce_weight * teacher_action_ce_loss
+        )
 
     loss, grads = eqx.filter_value_and_grad(loss_fn)(network)
     if context_only_update:
@@ -588,6 +743,10 @@ def train_epoch(
     minibatch_size=None,
     outcome_aux_weight=0.0,
     context_only_update=False,
+    teacher_network=None,
+    teacher_kl_weight=0.0,
+    teacher_input_channels=ADAPTIVE_INPUT_CHANNELS,
+    teacher_action_ce_weight=0.0,
 ):
     """Run adaptive PPO epochs with optional minibatching."""
     flat_batch = flatten_training_batch(batch)
@@ -612,6 +771,10 @@ def train_epoch(
                 optimizer,
                 outcome_aux_weight,
                 context_only_update,
+                teacher_network,
+                teacher_kl_weight,
+                teacher_input_channels,
+                teacher_action_ce_weight,
             )
             epoch_loss += loss
         avg_loss = epoch_loss / num_complete_batches
@@ -650,10 +813,13 @@ def parse_args():
     parser.add_argument("--max-generals-distance", type=int, default=None)
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
+    parser.add_argument("--network-arch", choices=("cnn", "unet"), default="cnn")
+    parser.add_argument("--init-network-arch", choices=("cnn", "unet"), default=None)
     parser.add_argument("--channels", default=None)
     parser.add_argument("--init-channels", default=None)
     parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--scoreboard-history", action="store_true")
+    parser.add_argument("--fog-memory", action="store_true")
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--context-residual", action="store_true")
     parser.add_argument("--init-context-residual", action="store_true")
@@ -673,6 +839,15 @@ def parse_args():
     parser.add_argument("--outcome-aux-weight", type=float, default=0.0)
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
+    parser.add_argument("--teacher-model-path", default=None)
+    parser.add_argument("--teacher-kl-weight", type=float, default=0.0)
+    parser.add_argument("--teacher-network-arch", choices=("cnn", "unet"), default="cnn")
+    parser.add_argument("--teacher-channels", default=None)
+    parser.add_argument("--teacher-input-channels", type=int, default=None)
+    parser.add_argument("--teacher-global-context", action="store_true")
+    parser.add_argument("--teacher-scoreboard-history", action="store_true")
+    parser.add_argument("--teacher-rollout-actions", action="store_true")
+    parser.add_argument("--teacher-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="runs/generals-adaptive-ppo.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -748,6 +923,20 @@ def parse_args():
         parser.error("--outcome-aux-weight must be non-negative")
     if args.context_only_update and not (args.context_residual or args.pyramid_context):
         parser.error("--context-only-update requires --context-residual or --pyramid-context")
+    if args.network_arch == "unet" and (args.context_residual or args.pyramid_context or args.context_only_update):
+        parser.error("--network-arch unet replaces context/pyramid add-on branches")
+    if args.teacher_kl_weight < 0.0:
+        parser.error("--teacher-kl-weight must be non-negative")
+    if args.teacher_kl_weight > 0.0 and args.teacher_model_path is None:
+        parser.error("--teacher-kl-weight requires --teacher-model-path")
+    if args.teacher_rollout_actions and args.teacher_model_path is None:
+        parser.error("--teacher-rollout-actions requires --teacher-model-path")
+    if args.teacher_action_ce_weight < 0.0:
+        parser.error("--teacher-action-ce-weight must be non-negative")
+    if args.teacher_action_ce_weight > 0.0 and not args.teacher_rollout_actions:
+        parser.error("--teacher-action-ce-weight requires --teacher-rollout-actions")
+    if args.teacher_input_channels is not None and args.teacher_input_channels <= 0:
+        parser.error("--teacher-input-channels must be positive")
     if args.checkpoint_every < 0:
         parser.error("--checkpoint-every cannot be negative")
     if args.keep_checkpoints < 0:
@@ -772,6 +961,7 @@ def main():
     print(f"Opponent:      {args.opponent}")
     print(f"Reward mode:   {args.reward_mode}")
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
+    print(f"Network arch:  {args.network_arch}")
     if args.grid_size_weights is not None:
         weights_label = ",".join(
             f"{size}:{weight:g}" for size, weight in zip(args.grid_sizes, args.grid_size_weights, strict=True)
@@ -812,6 +1002,8 @@ def main():
         print(f"Global ctx:    scoreboard channels ({ADAPTIVE_GLOBAL_INPUT_CHANNELS})")
     if args.scoreboard_history:
         print(f"Score history: previous+delta channels ({ADAPTIVE_HISTORY_INPUT_CHANNELS})")
+    if args.fog_memory:
+        print("Fog memory:    explored/enemy/city/general planes")
     if args.value_heads != "shared":
         print(f"Value heads:   {args.value_heads}")
         if args.init_model_path is not None:
@@ -824,6 +1016,14 @@ def main():
         )
     if args.outcome_aux_weight > 0.0:
         print(f"Outcome aux:   weight={args.outcome_aux_weight:g}")
+    if args.teacher_model_path is not None:
+        print(f"Teacher:       {args.teacher_model_path} arch={args.teacher_network_arch}")
+        if args.teacher_kl_weight > 0.0:
+            print(f"Teacher KL:    weight={args.teacher_kl_weight:g}")
+        if args.teacher_rollout_actions:
+            print("Teacher acts:  rollout bootstrap enabled")
+        if args.teacher_action_ce_weight > 0.0:
+            print(f"Teacher CE:    weight={args.teacher_action_ce_weight:g}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -837,12 +1037,7 @@ def main():
         else 0
     )
     network_global_context = args.global_context or args.scoreboard_history
-    if args.scoreboard_history:
-        input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
-    elif network_global_context:
-        input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
-    else:
-        input_channels = ADAPTIVE_INPUT_CHANNELS
+    input_channels = adaptive_input_channel_count(network_global_context, args.scoreboard_history, args.fog_memory)
     init_input_channels = args.init_input_channels
     if (
         init_input_channels is None
@@ -875,7 +1070,31 @@ def main():
         init_context_residual=args.init_context_residual,
         pyramid_context=args.pyramid_context,
         init_pyramid_context=args.init_pyramid_context,
+        network_arch=args.network_arch,
+        init_network_arch=args.init_network_arch,
     )
+    teacher_network = None
+    teacher_input_channels = ADAPTIVE_INPUT_CHANNELS
+    if args.teacher_model_path is not None:
+        teacher_global_context = args.teacher_global_context or args.teacher_scoreboard_history
+        teacher_input_channels = (
+            args.teacher_input_channels
+            if args.teacher_input_channels is not None
+            else adaptive_input_channel_count(teacher_global_context, args.teacher_scoreboard_history, False)
+        )
+        teacher_network = load_or_create_adaptive_network(
+            net_key,
+            pad_size=args.pad_to,
+            init_model_path=args.teacher_model_path,
+            channels=args.teacher_channels,
+            input_channels=teacher_input_channels,
+            init_input_channels=teacher_input_channels,
+            global_context=teacher_global_context,
+            init_global_context=teacher_global_context,
+            network_arch=args.teacher_network_arch,
+            init_network_arch=args.teacher_network_arch,
+        )
+        teacher_input_channels = adaptive_network_input_channels(teacher_network)
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
     ema_network = network if args.ema_decay > 0.0 else None
@@ -905,6 +1124,8 @@ def main():
         effective_sizes_p1 = mixed_effective_sizes[mixed_p0_envs:]
         scoreboard_history_p0 = empty_scoreboard_history(mixed_p0_envs)
         scoreboard_history_p1 = empty_scoreboard_history(mixed_p1_envs)
+        fog_memory_p0 = empty_adaptive_fog_memory(mixed_p0_envs, args.pad_to)
+        fog_memory_p1 = empty_adaptive_fog_memory(mixed_p1_envs, args.pad_to)
         learner_players_for_log = jnp.concatenate(
             [
                 jnp.zeros((mixed_p0_envs,), dtype=jnp.int32),
@@ -914,11 +1135,12 @@ def main():
     else:
         states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
         scoreboard_history = empty_scoreboard_history(args.num_envs)
+        fog_memory = empty_adaptive_fog_memory(args.num_envs, args.pad_to)
 
     print("Warming up...")
     if mixed_learner:
         key, warmup_p0_key, warmup_p1_key = jrandom.split(key, 3)
-        states_p0, effective_sizes_p0, scoreboard_history_p0, _, _ = rollout_step(
+        states_p0, effective_sizes_p0, scoreboard_history_p0, fog_memory_p0, _, _ = rollout_step(
             states_p0,
             effective_sizes_p0,
             pool,
@@ -934,8 +1156,13 @@ def main():
             network_global_context,
             scoreboard_history_p0,
             args.scoreboard_history,
+            fog_memory_p0,
+            args.fog_memory,
+            teacher_network,
+            teacher_input_channels,
+            args.teacher_rollout_actions,
         )
-        states_p1, effective_sizes_p1, scoreboard_history_p1, _, _ = rollout_step(
+        states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, _, _ = rollout_step(
             states_p1,
             effective_sizes_p1,
             pool,
@@ -951,12 +1178,17 @@ def main():
             network_global_context,
             scoreboard_history_p1,
             args.scoreboard_history,
+            fog_memory_p1,
+            args.fog_memory,
+            teacher_network,
+            teacher_input_channels,
+            args.teacher_rollout_actions,
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
     else:
         warmup_learner_player = resolve_learner_player(args.learner_player, 1)
-        states, effective_sizes, scoreboard_history, _, key = rollout_step(
+        states, effective_sizes, scoreboard_history, fog_memory, _, key = rollout_step(
             states,
             effective_sizes,
             pool,
@@ -972,6 +1204,11 @@ def main():
             network_global_context,
             scoreboard_history,
             args.scoreboard_history,
+            fog_memory,
+            args.fog_memory,
+            teacher_network,
+            teacher_input_channels,
+            args.teacher_rollout_actions,
         )
         jax.block_until_ready(states)
 
@@ -984,9 +1221,11 @@ def main():
                 states_p0,
                 effective_sizes_p0,
                 scoreboard_history_p0,
+                fog_memory_p0,
                 states_p1,
                 effective_sizes_p1,
                 scoreboard_history_p1,
+                fog_memory_p1,
                 rollout_data,
                 key,
             ) = collect_mixed_rollout(
@@ -1008,12 +1247,18 @@ def main():
                 scoreboard_history_p0,
                 scoreboard_history_p1,
                 args.scoreboard_history,
+                fog_memory_p0,
+                fog_memory_p1,
+                args.fog_memory,
+                teacher_network,
+                teacher_input_channels,
+                args.teacher_rollout_actions,
             )
             jax.block_until_ready(states_p0)
             jax.block_until_ready(states_p1)
         else:
             iteration_learner_player = resolve_learner_player(args.learner_player, iteration)
-            states, effective_sizes, scoreboard_history, rollout_data, key = collect_rollout(
+            states, effective_sizes, scoreboard_history, fog_memory, rollout_data, key = collect_rollout(
                 states,
                 effective_sizes,
                 pool,
@@ -1030,6 +1275,11 @@ def main():
                 network_global_context,
                 scoreboard_history,
                 args.scoreboard_history,
+                fog_memory,
+                args.fog_memory,
+                teacher_network,
+                teacher_input_channels,
+                args.teacher_rollout_actions,
             )
             jax.block_until_ready(states)
         obs, masks, active, actions, logprobs, values, rewards, dones, infos = rollout_data
@@ -1064,6 +1314,10 @@ def main():
             args.minibatch_size,
             args.outcome_aux_weight,
             args.context_only_update,
+            teacher_network,
+            args.teacher_kl_weight,
+            teacher_input_channels,
+            args.teacher_action_ce_weight,
         )
         jax.block_until_ready(network)
         if ema_network is not None:

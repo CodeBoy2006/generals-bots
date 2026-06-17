@@ -560,6 +560,32 @@ uv run python examples/_experimental/ppo/evaluate_policy.py runs/generals-ppo-8x
 评估两个 checkpoint 之间的对局时，给 `evaluate_policy.py` 传入 `--opponent-policy-path` 和 `--opponent-policy-mode`。
 评估非默认容量 checkpoint 时，给候选传入 `--channels`；如果对手 checkpoint 容量不同，再传入 `--opponent-channels`。评估非默认输入通道或 privileged 输入时，使用 `--policy-input`、`--input-channels` 和 `--opponent-input-channels` 保持网络结构与 checkpoint 一致。
 
+Adaptive strategic trunk experiments can now use a real U-Net backbone instead of the legacy shallow CNN:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_adaptive.py 128 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --global-context \
+  --scoreboard-history \
+  --fog-memory \
+  --value-heads per-size \
+  --value-loss hl-gauss \
+  --teacher-model-path legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx \
+  --teacher-global-context \
+  --teacher-scoreboard-history \
+  --teacher-input-channels 30 \
+  --teacher-rollout-actions \
+  --teacher-kl-weight 1.0 \
+  --teacher-action-ce-weight 3.0 \
+  --model-path runs/adaptive-unet-v1/generals-adaptive-unet-v1.eqx
+```
+
+`--fog-memory` appends explored-ever, last-seen enemy ownership, last-seen enemy army, seen city, and seen general planes. `--teacher-rollout-actions` lets a legacy adaptive CNN drive bootstrap rollouts while the U-Net records student logprobs; `--teacher-kl-weight` and `--teacher-action-ce-weight` preserve teacher behavior during trunk replacement. U-Net checkpoints must be evaluated with matching `--network-arch unet`, `--channels`, `--scoreboard-history`, `--fog-memory`, and value-head flags.
+
 ## 验证
 
 运行完整测试：

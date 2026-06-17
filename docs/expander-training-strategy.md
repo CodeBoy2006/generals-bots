@@ -3555,3 +3555,74 @@ iter 20: KL 0.00206, Intent 3.63, Belief 0.056
 | same-seed base | `64.06%` | 8p0 |
 
 Conclusion: the pyramid/U-Net-style branch is implemented and trainable, but current PPO and weak-label aux objectives still mostly shift bottlenecks. It can repair some weak seeds but does not produce a promotion candidate. This is stronger evidence that the next architecture step should not be another zero-init add-on branch; it should either replace the trunk with a real U-Net/Transformer policy backbone, or add explicit memory/belief input channels so the policy head receives strategic state rather than relying on weak auxiliary losses to bend a small CNN.
+
+## 2026-06-17 Adaptive U-Net Trunk v1
+
+Implemented the first true trunk-replacement path:
+
+```text
+AdaptiveUNetPolicyValueNetwork
+train_adaptive.py --network-arch unet
+evaluate_adaptive_policy.py --network-arch unet
+adaptive fog-memory input planes
+teacher KL anchor
+teacher rollout action bootstrap
+teacher action CE
+```
+
+The U-Net is not a zero-init add-on branch. It replaces the old four-layer CNN torso with:
+
+```text
+input planes
+  -> enc1 16x16
+  -> avg pool 8x8 -> enc2
+  -> avg pool 4x4 -> bottleneck
+  -> nearest upsample + skip
+  -> nearest upsample + skip
+  -> policy/value heads
+```
+
+The first experiment used `channels=64,96,128,64`, 35 input planes (`15` adaptive base + `5` fog memory + `5` current scoreboard + `10` previous/delta history), per-size HL-Gauss value heads, and the legacy history CNN checkpoint only as teacher:
+
+```text
+teacher: legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx
+teacher input: 30 channels
+student input: 35 channels
+```
+
+Important implementation note: from-scratch U-Net checkpoints should not save high-decay EMA during bootstrap. `adaptive-unet-v1` used `ema_decay=0.99 --eval-ema`; after only 20 iterations the saved EMA remained close to random and scored essentially 0% independent win rate. Later runs saved last iterate.
+
+### Bootstrap Results
+
+All models below use independent student sample-policy evaluation, not teacher-driven rollout.
+
+64 games/row on seed `78680`:
+
+| model | recipe | min win rate | bottleneck |
+| --- | --- | ---: | --- |
+| v1 EMA | KL 0.2, teacher actions, saved EMA | `0.00%` | all rows |
+| v1b | KL 2.0, teacher actions, saved last | `45.31%` | 8p1 |
+| v1c | KL 1.0 + CE 1.0 | `48.44%` | 8p1 |
+| v1d | KL 0.5 + CE 3.0, weights 8:2/12:1/16:2 | `62.50%` | 8p1 |
+| v1e | continue v1d, weights 8:2/12:2/16:1 | `59.38%` | 8p1/16p1 |
+| v1f | zero reward, KL 1.0 + CE 10.0 | `59.38%` | 16p1 |
+
+The best U-Net bootstrap candidate was v1d. It passed only the 64-row smoke gate, so it received a 256-row triage against the same-seed base:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base CNN, seed 78700 | `71.09%` | `69.53%` | `87.50%` | `80.86%` | `69.14%` | `71.88%` | `69.14%` |
+| U-Net v1d, seed 78700 | `66.80%` | `66.41%` | `75.39%` | `76.56%` | `70.70%` | `71.09%` | `66.41%` |
+
+Conclusion: the U-Net trunk, fog-memory input, and teacher bootstrap are wired correctly and train on GPU, but PPO-in-rollout imitation is not enough to reliably clone the legacy CNN across all size/seat rows. The U-Net already matches or slightly improves the large-map rows in some seeds (`16p0=70.70%` vs base `69.14%` in the 256-row triage), but it gives up too much 8x/12x strength.
+
+Do not promote the current U-Net checkpoints. The next U-Net step should be a dedicated offline teacher-imitation or search-to-strategy dataset:
+
+```text
+collect teacher-driven trajectories with stored obs/mask/action/logits/size/seat
+train U-Net with all-active teacher KL + action CE for many epochs
+verify it can match the CNN teacher at 256-row before PPO
+then add belief/finish auxiliary targets and only then resume sparse PPO
+```
+
+This result also confirms that trunk replacement should be staged differently from add-on branches: first clone the existing policy distribution well enough, then fine-tune strategic behavior. PPO bootstrap alone still shifts weak rows before the new trunk has a stable policy prior.

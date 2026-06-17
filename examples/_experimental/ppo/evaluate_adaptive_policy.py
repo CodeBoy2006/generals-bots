@@ -25,13 +25,16 @@ from adaptive_common import (
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
+    adaptive_input_channel_count,
     adaptive_index_to_action,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    empty_adaptive_fog_memory,
     make_adaptive_state_pool,
     parse_grid_sizes,
+    update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
 from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
@@ -126,19 +129,25 @@ def evaluate_batch(
     pad_size,
     global_context=False,
     scoreboard_history=False,
+    fog_memory=False,
     strategy_q_rerank_scale=0.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
     effective_sizes = jnp.full((num_envs,), effective_size, dtype=jnp.int32)
     initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
+    initial_fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
 
     def body(carry, _):
-        states, key, history = carry
+        states, key, history, memory = carry
         obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
         policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
         opponent_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
+        if fog_memory:
+            current_memory = jax.vmap(update_adaptive_fog_memory)(memory, policy_obs)
+        else:
+            current_memory = memory
 
         if scoreboard_history:
             current_scoreboard = jax.vmap(lambda obs, size: adaptive_scoreboard_features(obs, size))(
@@ -146,27 +155,59 @@ def evaluate_batch(
                 effective_sizes,
             )
             history_context = adaptive_scoreboard_history_context(history, current_scoreboard)
-            obs_arr, active = jax.vmap(
-                lambda obs, size, row_history: adaptive_obs_to_array(
-                    obs,
-                    size,
-                    pad_size,
-                    include_global_context=True,
-                    scoreboard_history=row_history,
+            if fog_memory:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size, row_history, row_memory: adaptive_obs_to_array(
+                        obs,
+                        size,
+                        pad_size,
+                        include_global_context=True,
+                        scoreboard_history=row_history,
+                        fog_memory=row_memory,
+                    )
+                )(
+                    policy_obs,
+                    effective_sizes,
+                    history_context,
+                    current_memory,
                 )
-            )(
-                policy_obs,
-                effective_sizes,
-                history_context,
-            )
+            else:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size, row_history: adaptive_obs_to_array(
+                        obs,
+                        size,
+                        pad_size,
+                        include_global_context=True,
+                        scoreboard_history=row_history,
+                    )
+                )(
+                    policy_obs,
+                    effective_sizes,
+                    history_context,
+                )
         else:
             current_scoreboard = history
-            obs_arr, active = jax.vmap(
-                lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
-            )(
-                policy_obs,
-                effective_sizes,
-            )
+            if fog_memory:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size, row_memory: adaptive_obs_to_array(
+                        obs,
+                        size,
+                        pad_size,
+                        include_global_context=global_context,
+                        fog_memory=row_memory,
+                    )
+                )(
+                    policy_obs,
+                    effective_sizes,
+                    current_memory,
+                )
+            else:
+                obs_arr, active = jax.vmap(
+                    lambda obs, size: adaptive_obs_to_array(obs, size, pad_size, include_global_context=global_context)
+                )(
+                    policy_obs,
+                    effective_sizes,
+                )
         masks = jax.vmap(
             lambda obs, size: compute_adaptive_valid_move_mask(
                 obs.armies,
@@ -200,9 +241,10 @@ def evaluate_batch(
             states,
             new_states,
         )
-        return (final_states, key, current_scoreboard), infos
+        final_memory = current_memory
+        return (final_states, key, current_scoreboard, final_memory), infos
 
-    (states, key, _), _ = jax.lax.scan(body, (states, key, initial_history), None, length=max_steps)
+    (states, key, _, _), _ = jax.lax.scan(body, (states, key, initial_history, initial_fog_memory), None, length=max_steps)
     return jax.vmap(game.get_info)(states)
 
 
@@ -223,9 +265,11 @@ def parse_args():
     parser.add_argument("--max-generals-distance", type=int, default=None)
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
+    parser.add_argument("--network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--channels", default=None)
     parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--scoreboard-history", action="store_true")
+    parser.add_argument("--fog-memory", action="store_true")
     parser.add_argument("--context-residual", action="store_true")
     parser.add_argument("--pyramid-context", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
@@ -290,12 +334,7 @@ def main():
     key = jrandom.PRNGKey(args.seed)
     key, net_key = jrandom.split(key)
     network_global_context = args.global_context or args.scoreboard_history
-    if args.scoreboard_history:
-        input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
-    elif network_global_context:
-        input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
-    else:
-        input_channels = ADAPTIVE_INPUT_CHANNELS
+    input_channels = adaptive_input_channel_count(network_global_context, args.scoreboard_history, args.fog_memory)
     network = load_or_create_adaptive_network(
         net_key,
         pad_size=args.pad_to,
@@ -316,6 +355,8 @@ def main():
         init_context_residual=args.context_residual,
         pyramid_context=args.pyramid_context,
         init_pyramid_context=args.pyramid_context,
+        network_arch=args.network_arch,
+        init_network_arch=args.network_arch,
     )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -327,6 +368,7 @@ def main():
     print(f"Grid sizes:  {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Opponent:    {args.opponent}")
     print(f"Mode:        {args.policy_mode}")
+    print(f"Arch:        {args.network_arch}")
     if args.value_heads != "shared":
         print(f"Value heads: {args.value_heads}")
     if args.value_loss == "hl-gauss":
@@ -349,6 +391,8 @@ def main():
         print(f"Global ctx: {input_channels} input channels")
     if args.scoreboard_history:
         print("Score hist: previous+delta channels")
+    if args.fog_memory:
+        print("Fog memory: explored/enemy/city/general planes")
     print()
 
     for grid_size in args.grid_sizes:
@@ -379,6 +423,7 @@ def main():
                 args.pad_to,
                 network_global_context,
                 args.scoreboard_history,
+                args.fog_memory,
                 args.strategy_q_rerank_scale,
             )
             jax.block_until_ready(info.winner)
@@ -407,6 +452,8 @@ def main():
         "max_steps": args.max_steps,
         "global_context": network_global_context,
         "scoreboard_history": args.scoreboard_history,
+        "fog_memory": args.fog_memory,
+        "network_arch": args.network_arch,
         "context_residual": args.context_residual,
         "pyramid_context": args.pyramid_context,
         "strategy_aux": args.strategy_aux,
