@@ -58,7 +58,9 @@ def load_plan_q_dataset(
         "teacher_logits": [],
         "teacher_action": [],
         "plan_action_indices": [],
+        "plan_scores": [],
         "plan_q": [],
+        "plan_outcomes": [],
         "plan_q_gap": [],
     }
     for path in paths:
@@ -77,7 +79,9 @@ def load_plan_q_dataset(
         chunks["teacher_logits"].append(shard["teacher_logits"][indices].astype(np.float32))
         chunks["teacher_action"].append(shard["teacher_action_index"][indices].astype(np.int32))
         chunks["plan_action_indices"].append(shard["plan_action_indices"][indices].astype(np.int32))
+        chunks["plan_scores"].append(shard["plan_scores"][indices].astype(np.float32))
         chunks["plan_q"].append(shard["plan_q"][indices].astype(np.float32))
+        chunks["plan_outcomes"].append(shard["plan_outcomes"][indices].astype(np.int32))
         chunks["plan_q_gap"].append(shard["plan_q_gap"][indices].astype(np.float32))
 
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
@@ -137,6 +141,9 @@ def train_step(
     action_q_weight: float,
     action_q_mse_weight: float,
     action_q_temperature: float,
+    replacement_gate_weight: float,
+    replacement_score_margin: float,
+    replacement_target_margin: float,
     gap_weighting: bool,
     freeze_base: bool,
 ):
@@ -152,7 +159,9 @@ def train_step(
         teacher_logits,
         teacher_actions,
         plan_action_indices,
+        plan_scores,
         plan_q,
+        plan_outcomes,
         plan_q_gap,
     ) = batch
 
@@ -253,6 +262,29 @@ def train_step(
                 )
             )
 
+        replacement_gate_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        replacement_gate_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        replacement_accepted_fraction = jnp.asarray(0.0, dtype=jnp.float32)
+        replacement_pair_fraction = jnp.asarray(0.0, dtype=jnp.float32)
+        replacement_q_margin = jnp.asarray(0.0, dtype=jnp.float32)
+        if replacement_gate_weight > 0.0:
+            (
+                replacement_gate_loss,
+                replacement_gate_accuracy,
+                replacement_accepted_fraction,
+                replacement_pair_fraction,
+                replacement_q_margin,
+            ) = plan_replacement_gate_loss(
+                outputs.action_q_values,
+                teacher_actions,
+                plan_action_indices,
+                plan_scores,
+                plan_outcomes,
+                sample_weight,
+                replacement_score_margin,
+                replacement_target_margin,
+            )
+
         loss = (
             source_weight * source_loss
             + target_weight * target_loss
@@ -261,6 +293,7 @@ def train_step(
             + plan_policy_weight * plan_policy_loss
             + action_q_weight * action_q_rank_loss
             + action_q_mse_weight * action_q_mse_loss
+            + replacement_gate_weight * replacement_gate_loss
         )
         metrics = {
             "source_loss": source_loss,
@@ -282,6 +315,11 @@ def train_step(
             "action_q_candidate_accuracy": action_q_candidate_accuracy,
             "action_q_target_entropy": action_q_target_entropy,
             "action_q_pred_gap": action_q_pred_gap,
+            "replacement_gate_loss": replacement_gate_loss,
+            "replacement_gate_accuracy": replacement_gate_accuracy,
+            "replacement_accepted_fraction": replacement_accepted_fraction,
+            "replacement_pair_fraction": replacement_pair_fraction,
+            "replacement_q_margin": replacement_q_margin,
             "mean_gap": jnp.mean(plan_q_gap),
             "mean_sample_weight": jnp.mean(sample_weight),
         }
@@ -391,6 +429,71 @@ def plan_action_q_losses(
     return rank_loss, mse_loss, action_accuracy, target_entropy, pred_gap
 
 
+def plan_replacement_gate_loss(
+    action_q_values: jnp.ndarray,
+    teacher_actions: jnp.ndarray,
+    plan_action_indices: jnp.ndarray,
+    plan_scores: jnp.ndarray,
+    plan_outcomes: jnp.ndarray,
+    sample_weight: jnp.ndarray,
+    score_margin: float,
+    target_margin: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Train Q margins for plan actions that improve on the teacher action."""
+    flat_action_indices = plan_action_indices.reshape(plan_action_indices.shape[0], -1)
+    flat_scores = plan_scores.reshape(plan_scores.shape[0], -1)
+    flat_outcomes = plan_outcomes.reshape(plan_outcomes.shape[0], -1).astype(jnp.float32)
+    teacher_matches = flat_action_indices == teacher_actions[:, None]
+    has_teacher_plan = jnp.any(teacher_matches, axis=1)
+    teacher_pos = jnp.argmax(teacher_matches.astype(jnp.int32), axis=1)
+
+    best_key = flat_outcomes * 100000.0 + flat_scores
+    best_pos = jnp.argmax(best_key, axis=1)
+    row_ids = jnp.arange(flat_action_indices.shape[0])
+    best_actions = flat_action_indices[row_ids, best_pos]
+    teacher_scores = flat_scores[row_ids, teacher_pos]
+    teacher_outcomes = flat_outcomes[row_ids, teacher_pos]
+    best_scores = flat_scores[row_ids, best_pos]
+    best_outcomes = flat_outcomes[row_ids, best_pos]
+
+    switched = best_actions != teacher_actions
+    outcome_improved = best_outcomes > teacher_outcomes
+    score_improved = (best_outcomes == teacher_outcomes) & ((best_scores - teacher_scores) >= score_margin)
+    accepted = has_teacher_plan & switched & (outcome_improved | score_improved)
+    comparable = has_teacher_plan & switched
+
+    best_q = action_q_values[row_ids, best_actions]
+    teacher_q = action_q_values[row_ids, teacher_actions]
+    q_margin = best_q - teacher_q
+    positive_losses = jax.nn.softplus(target_margin - q_margin)
+    negative_losses = jax.nn.softplus(target_margin + q_margin)
+
+    positives = comparable & accepted
+    negatives = comparable & ~accepted
+    positive_weight = sample_weight * positives.astype(jnp.float32)
+    negative_weight = sample_weight * negatives.astype(jnp.float32)
+    positive_norm = jnp.maximum(jnp.sum(positive_weight), 1.0)
+    negative_norm = jnp.maximum(jnp.sum(negative_weight), 1.0)
+    positive_loss = jnp.sum(positive_losses * positive_weight) / positive_norm
+    negative_loss = jnp.sum(negative_losses * negative_weight) / negative_norm
+    positive_present = (jnp.sum(positive_weight) > 0.0).astype(jnp.float32)
+    negative_present = (jnp.sum(negative_weight) > 0.0).astype(jnp.float32)
+    loss = (positive_loss * positive_present + negative_loss * negative_present) / jnp.maximum(
+        positive_present + negative_present,
+        1.0,
+    )
+
+    predictions = q_margin >= target_margin
+    labels = accepted
+    pair_weight = sample_weight * comparable.astype(jnp.float32)
+    pair_norm = jnp.maximum(jnp.sum(pair_weight), 1.0)
+    accuracy = jnp.sum((predictions == labels).astype(jnp.float32) * pair_weight) / pair_norm
+    accepted_fraction = jnp.mean(accepted.astype(jnp.float32))
+    pair_fraction = jnp.mean(comparable.astype(jnp.float32))
+    mean_q_margin = jnp.sum(q_margin * pair_weight) / pair_norm
+    return loss, accuracy, accepted_fraction, pair_fraction, mean_q_margin
+
+
 def train_epoch(
     network,
     opt_state,
@@ -406,6 +509,9 @@ def train_epoch(
     action_q_weight: float,
     action_q_mse_weight: float,
     action_q_temperature: float,
+    replacement_gate_weight: float,
+    replacement_score_margin: float,
+    replacement_target_margin: float,
     gap_weighting: bool,
     freeze_base: bool,
 ):
@@ -430,7 +536,9 @@ def train_epoch(
             dataset["teacher_logits"][idx],
             dataset["teacher_action"][idx],
             dataset["plan_action_indices"][idx],
+            dataset["plan_scores"][idx],
             dataset["plan_q"][idx],
+            dataset["plan_outcomes"][idx],
             dataset["plan_q_gap"][idx],
         )
         network, opt_state, loss, metrics = train_step(
@@ -446,6 +554,9 @@ def train_epoch(
             action_q_weight,
             action_q_mse_weight,
             action_q_temperature,
+            replacement_gate_weight,
+            replacement_score_margin,
+            replacement_target_margin,
             gap_weighting,
             freeze_base,
         )
@@ -495,6 +606,9 @@ def parse_args():
     parser.add_argument("--action-q-weight", type=float, default=0.0)
     parser.add_argument("--action-q-mse-weight", type=float, default=0.0)
     parser.add_argument("--action-q-temperature", type=float, default=0.25)
+    parser.add_argument("--replacement-gate-weight", type=float, default=0.0)
+    parser.add_argument("--replacement-score-margin", type=float, default=25.0)
+    parser.add_argument("--replacement-target-margin", type=float, default=1.0)
     parser.add_argument("--gap-weighting", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -538,11 +652,16 @@ def parse_args():
             args.plan_policy_weight,
             args.action_q_weight,
             args.action_q_mse_weight,
+            args.replacement_gate_weight,
         )
     ):
         parser.error("loss weights must be non-negative")
     if args.action_q_temperature <= 0.0:
         parser.error("--action-q-temperature must be positive")
+    if args.replacement_score_margin < 0.0:
+        parser.error("--replacement-score-margin must be non-negative")
+    if args.replacement_target_margin < 0.0:
+        parser.error("--replacement-target-margin must be non-negative")
     if args.update_scope == "all" and args.policy_kl_weight <= 0.0:
         parser.error("--update-scope all requires a positive --policy-kl-weight to anchor policy drift")
     if args.plan_policy_weight > 0.0 and args.update_scope != "all":
@@ -579,9 +698,15 @@ def main():
         f"source={args.source_weight:g}, target={args.target_weight:g}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
         f"plan_policy={args.plan_policy_weight:g}, "
-        f"action_q={args.action_q_weight:g}, action_q_mse={args.action_q_mse_weight:g}"
+        f"action_q={args.action_q_weight:g}, action_q_mse={args.action_q_mse_weight:g}, "
+        f"replacement_gate={args.replacement_gate_weight:g}"
     )
     print(f"Action-Q temp: {args.action_q_temperature:g}")
+    if args.replacement_gate_weight > 0.0:
+        print(
+            "Replacement:  "
+            f"score_margin={args.replacement_score_margin:g}, target_margin={args.replacement_target_margin:g}"
+        )
     print(f"Update scope:  {args.update_scope}")
     print(f"Gap weighting: {args.gap_weighting}")
     print()
@@ -630,6 +755,9 @@ def main():
             args.action_q_weight,
             args.action_q_mse_weight,
             args.action_q_temperature,
+            args.replacement_gate_weight,
+            args.replacement_score_margin,
+            args.replacement_target_margin,
             args.gap_weighting,
             args.update_scope == "strategy-heads",
         )
@@ -652,6 +780,11 @@ def main():
             f"{float(metrics['action_q_mse_loss']):.4f}/"
             f"{float(metrics['action_q_candidate_accuracy']) * 100:5.1f}% | "
             f"AQgap {float(metrics['action_q_pred_gap']):.3f} | "
+            f"Repl {float(metrics['replacement_gate_loss']):.4f}/"
+            f"{float(metrics['replacement_gate_accuracy']) * 100:5.1f}%/"
+            f"{float(metrics['replacement_accepted_fraction']) * 100:4.1f}%acc/"
+            f"{float(metrics['replacement_pair_fraction']) * 100:4.1f}%pair/"
+            f"{float(metrics['replacement_q_margin']):.3f} | "
             f"Gap {float(metrics['mean_gap']):.4f} | "
             f"W {float(metrics['mean_sample_weight']):.3f} | "
             f"Time {time.time() - t0:.2f}s"

@@ -831,3 +831,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-plan-q-action-q-v1` or continue threshold sweeps. Build a true accepted-replacement/policy-improvement head from rows labeled by full replacement outcomes instead of using the current scalar action-Q head directly as the gate.
 - **Context:** Fixed-v5 max250 128-row threshold `4` gave a weak signal (`9.38%` min vs `7.81%` off), but 256-row confirmation only improved p0 (`9.77% -> 13.28%`) while p1 remained the bottleneck (`8.20%`), so min stayed `8.20%`. Policy margins `2` and `4` both fell to `7.81%` min.
+
+## [2026-06-17 19:39] Plan-Q Replacement Gate Probe
+- **Changes:** Added `adaptive_plan_q_supervised.py` pairwise accepted-replacement training flags for Plan-Q shards, documented the CLI in README/zh manual, and recorded fixed-v5 max250 replacement-gate results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-plan-q-replacement-gate-v1`; next Plan-Q work should score generated source-target candidates directly or add legal non-candidate negatives before using a replacement gate.
+- **Context:** The v1 gate trained offline from 41.6% to 52.8% replacement accuracy, but 256-row fixed-v5 max250 confirmation dropped min win rate from 8.20% baseline to 7.81% while lowering draw, indicating the gate converts some draws into losses rather than producing reliable wins.

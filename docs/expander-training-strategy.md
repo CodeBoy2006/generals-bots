@@ -5646,3 +5646,97 @@ Policy-margin support makes the gate more conservative but removes the p0 gain a
 Do not promote adaptive-plan-q-action-q-v1 or continue threshold sweeps.
 Next step should train a true accepted-replacement/policy-improvement head from rows labeled by full replacement outcomes, rather than using the current action-Q scalar as the gate directly.
 ```
+
+## 2026-06-17 Plan-Q Accepted-Replacement Gate Training
+
+Added pairwise accepted-replacement supervision to `adaptive_plan_q_supervised.py`:
+
+```text
+--replacement-gate-weight
+--replacement-score-margin
+--replacement-target-margin
+```
+
+The loss uses rows where the teacher/base action appears in the Plan-Q candidate
+set. It compares that teacher action against the best source-target plan action,
+ordered first by replacement outcome and then by shaped plan score. A replacement
+is labeled accepted when it changes the teacher action and either improves
+loss/draw/win outcome or clears the same-outcome score margin. The action-Q head
+then gets a pairwise margin objective:
+
+```text
+accepted: Q(best_plan_action) - Q(teacher_action) >= target_margin
+rejected: Q(best_plan_action) - Q(teacher_action) <  target_margin
+```
+
+Training run:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz
+init:    runs/adaptive-plan-q-action-q-v1/generals-adaptive-plan-q-action-q-v1.eqx
+output:  runs/adaptive-plan-q-replacement-gate-v1/generals-adaptive-plan-q-replacement-gate-v1.eqx
+loss:    replacement_gate_weight=1.0, score_margin=25, target_margin=1.0
+scope:   frozen trunk/policy, strategy heads only
+epochs:  120
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| replacement loss | `1.6937` | `1.4027` |
+| replacement accuracy | `41.6%` | `52.8%` |
+| accepted fraction | `17.6%` | `17.6%` |
+| comparable pair fraction | `47.9%` | `47.9%` |
+| mean Q margin | `-1.042` | `-0.805` |
+
+The loss is trainable, but the Q margin remains negative and separation is weak.
+That immediately suggests risk: a full legal-action argmax over action-Q may
+select actions that were never supervised by the candidate-pair loss.
+
+Fixed-v5 max250, 128 games/row on seed `83840`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `7.81%` | `10.94%` | `7.81%` | `64.84%` | `61.72%` |
+| threshold `0` | `1.56%` | `3.12%` | `1.56%` | `28.12%` | `27.34%` |
+| threshold `0.5` | `2.34%` | `3.12%` | `2.34%` | `28.12%` | `35.16%` |
+| threshold `1` | `2.34%` | `0.78%` | `0.78%` | `40.62%` | `44.53%` |
+
+Low-threshold replacement lowers draw, but mostly by turning draws into losses.
+The conservative policy-support gate was safer.
+
+Fixed-v5 max250, 128 games/row on seed `83842`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `7.81%` | `12.50%` | `7.81%` | `53.91%` | `57.03%` |
+| threshold `1`, margin `2` | `9.38%` | `12.50%` | `9.38%` | `56.25%` | `53.91%` |
+| threshold `1`, margin `4` | `11.72%` | `9.38%` | `9.38%` | `51.56%` | `46.88%` |
+
+The margin-4 row had the best 128-row tradeoff, so it received 256-row
+confirmation.
+
+Fixed-v5 max250, 256 games/row on seed `83860`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `12.50%` | `8.20%` | `8.20%` | `54.30%` | `60.94%` |
+| threshold `1`, margin `4` | `10.16%` | `7.81%` | `7.81%` | `50.78%` | `43.36%` |
+
+Conclusion:
+
+```text
+Pairwise accepted-replacement loss is implemented and trains, but v1 is not
+promotion-ready.
+The conservative gate can reduce fixed-v5 max250 draw, but 256-row min win rate
+does not improve and p1 remains weak.
+The likely failure is action-space coverage: the loss supervises only candidate
+plan actions, while inference chooses the best Q among every legal primitive
+action.
+Do not continue threshold sweeps on this checkpoint.
+Next useful step is either a larger accepted-replacement dataset with explicit
+legal non-candidate negatives, or a separate replacement/gate head that scores
+only generated source-target plan candidates before a target-conditioned Worker
+executes them.
+```
