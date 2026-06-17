@@ -85,9 +85,10 @@ def _policy_action(
     strategy_q_rerank_scale: float,
     strategy_target_rerank_scale: float,
     strategy_target_finish_gate: bool,
+    strategy_spatial_rerank_scale: float,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
-    if strategy_q_rerank_scale > 0.0 or strategy_target_rerank_scale > 0.0:
+    if strategy_q_rerank_scale > 0.0 or strategy_target_rerank_scale > 0.0 or strategy_spatial_rerank_scale > 0.0:
         aux = network.strategy_auxiliary(obs_arr, mask, active)
     if strategy_q_rerank_scale > 0.0:
         logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
@@ -99,6 +100,14 @@ def _policy_action(
             network.pad_size,
             strategy_target_rerank_scale,
             strategy_target_finish_gate,
+        )[0]
+    if strategy_spatial_rerank_scale > 0.0:
+        logits = strategy_spatial_rerank_logits(
+            logits[None, :],
+            aux.source_logits[None, :, :],
+            aux.target_logits[None, :, :],
+            network.pad_size,
+            strategy_spatial_rerank_scale,
         )[0]
     index = jax.lax.cond(
         policy_mode == 0,
@@ -161,6 +170,46 @@ def strategy_target_rerank_logits(
     return policy_logits + scale * centered_bias
 
 
+def strategy_spatial_rerank_logits(
+    policy_logits: jnp.ndarray,
+    source_logits: jnp.ndarray,
+    target_logits: jnp.ndarray,
+    pad_size: int,
+    scale: float,
+) -> jnp.ndarray:
+    """Bias moves from predicted source cells toward the predicted target heatmap."""
+    target_probs = jax.nn.softmax(target_logits.reshape(target_logits.shape[0], -1), axis=-1)
+    coords = jnp.arange(pad_size, dtype=jnp.float32)
+    rows = jnp.repeat(coords, pad_size)
+    cols = jnp.tile(coords, pad_size)
+    target_row = jnp.sum(target_probs * rows[None, :], axis=-1)
+    target_col = jnp.sum(target_probs * cols[None, :], axis=-1)
+
+    direction_ids = jnp.arange(8) % 4
+    dest_rows = rows[None, :] + DIRECTIONS[direction_ids, 0][:, None]
+    dest_cols = cols[None, :] + DIRECTIONS[direction_ids, 1][:, None]
+    source_distance = jnp.abs(rows[None, None, :] - target_row[:, None, None])
+    source_distance += jnp.abs(cols[None, None, :] - target_col[:, None, None])
+    dest_distance = jnp.abs(dest_rows[None, :, :] - target_row[:, None, None])
+    dest_distance += jnp.abs(dest_cols[None, :, :] - target_col[:, None, None])
+    target_progress = (source_distance - dest_distance).reshape(target_logits.shape[0], 8 * pad_size * pad_size)
+
+    centered_source = source_logits.reshape(source_logits.shape[0], -1)
+    centered_source = centered_source - jnp.mean(centered_source, axis=-1, keepdims=True)
+    source_bias = jnp.tile(centered_source[:, None, :], (1, 8, 1)).reshape(
+        source_logits.shape[0],
+        8 * pad_size * pad_size,
+    )
+    move_bias = 0.5 * source_bias + target_progress
+    action_bias = jnp.concatenate([move_bias, jnp.zeros((source_logits.shape[0], 1), dtype=move_bias.dtype)], axis=-1)
+
+    legal = policy_logits > -1.0e8
+    legal_count = jnp.maximum(jnp.sum(legal, axis=-1, keepdims=True), 1)
+    legal_mean = jnp.sum(jnp.where(legal, action_bias, 0.0), axis=-1, keepdims=True) / legal_count
+    centered_bias = jnp.where(legal, action_bias - legal_mean, 0.0)
+    return policy_logits + scale * centered_bias
+
+
 def crop_observation(obs, size: int):
     """Crop padded adaptive observations before feeding a fixed-size policy."""
     return obs._replace(
@@ -209,6 +258,7 @@ def evaluate_batch(
     strategy_q_rerank_scale=0.0,
     strategy_target_rerank_scale=0.0,
     strategy_target_finish_gate=False,
+    strategy_spatial_rerank_scale=0.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -309,6 +359,7 @@ def evaluate_batch(
                 strategy_q_rerank_scale,
                 strategy_target_rerank_scale,
                 strategy_target_finish_gate,
+                strategy_spatial_rerank_scale,
             )
         )(
             obs_arr,
@@ -354,6 +405,7 @@ def evaluate_policy_opponent_batch(
     strategy_q_rerank_scale=0.0,
     strategy_target_rerank_scale=0.0,
     strategy_target_finish_gate=False,
+    strategy_spatial_rerank_scale=0.0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -455,6 +507,7 @@ def evaluate_policy_opponent_batch(
                 strategy_q_rerank_scale,
                 strategy_target_rerank_scale,
                 strategy_target_finish_gate,
+                strategy_spatial_rerank_scale,
             )
         )(
             obs_arr,
@@ -517,9 +570,11 @@ def parse_args():
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
+    parser.add_argument("--strategy-spatial-aux", action="store_true")
     parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-target-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-target-finish-gate", action="store_true")
+    parser.add_argument("--strategy-spatial-rerank-scale", type=float, default=0.0)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -574,6 +629,10 @@ def parse_args():
         parser.error("--strategy-target-rerank-scale requires --strategy-aux")
     if args.strategy_target_finish_gate and args.strategy_target_rerank_scale <= 0.0:
         parser.error("--strategy-target-finish-gate requires --strategy-target-rerank-scale")
+    if args.strategy_spatial_rerank_scale < 0.0:
+        parser.error("--strategy-spatial-rerank-scale must be non-negative")
+    if args.strategy_spatial_rerank_scale > 0.0 and not (args.strategy_aux and args.strategy_spatial_aux):
+        parser.error("--strategy-spatial-rerank-scale requires --strategy-aux --strategy-spatial-aux")
     return args
 
 
@@ -608,6 +667,7 @@ def main():
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_head,
         strategy_aux=args.strategy_aux,
+        strategy_spatial_aux=args.strategy_spatial_aux,
         global_context=network_global_context,
         init_global_context=network_global_context,
         context_residual=args.context_residual,
@@ -657,11 +717,15 @@ def main():
         print("Outcome:    auxiliary head loaded")
     if args.strategy_aux:
         print("Strategy:   auxiliary heads loaded")
+    if args.strategy_spatial_aux:
+        print("Spatial:    source/target strategy heads loaded")
     if args.strategy_q_rerank_scale > 0.0:
         print(f"StratQ bias: scale={args.strategy_q_rerank_scale:g}")
     if args.strategy_target_rerank_scale > 0.0:
         gate_label = " finish-gated" if args.strategy_target_finish_gate else ""
         print(f"Target bias: scale={args.strategy_target_rerank_scale:g}{gate_label}")
+    if args.strategy_spatial_rerank_scale > 0.0:
+        print(f"Spatial bias: scale={args.strategy_spatial_rerank_scale:g}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -707,6 +771,7 @@ def main():
                     args.strategy_q_rerank_scale,
                     args.strategy_target_rerank_scale,
                     args.strategy_target_finish_gate,
+                    args.strategy_spatial_rerank_scale,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -726,6 +791,7 @@ def main():
                     args.strategy_q_rerank_scale,
                     args.strategy_target_rerank_scale,
                     args.strategy_target_finish_gate,
+                    args.strategy_spatial_rerank_scale,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -763,9 +829,11 @@ def main():
         "context_residual": args.context_residual,
         "pyramid_context": args.pyramid_context,
         "strategy_aux": args.strategy_aux,
+        "strategy_spatial_aux": args.strategy_spatial_aux,
         "strategy_q_rerank_scale": args.strategy_q_rerank_scale,
         "strategy_target_rerank_scale": args.strategy_target_rerank_scale,
         "strategy_target_finish_gate": args.strategy_target_finish_gate,
+        "strategy_spatial_rerank_scale": args.strategy_spatial_rerank_scale,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

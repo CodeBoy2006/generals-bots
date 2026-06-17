@@ -4922,3 +4922,86 @@ Finish gating did not stabilize the bias, probably because the finish head is no
 Fixed-v5 remained far below the gate; the p1 tick-up was too small and too noisy to matter.
 Next step should learn a target/source head or replacement-outcome correction directly, rather than deriving a hand-coded Manhattan target bias from enemy-general belief.
 ```
+
+## 2026-06-17 Explicit Source/Target Spatial Heads
+
+Added optional source/target spatial strategy heads:
+
+```text
+Adaptive*PolicyValueNetwork:
+  --strategy-aux
+  --strategy-spatial-aux
+
+StrategyAuxOutputs:
+  source_logits
+  target_logits
+
+adaptive_strategy_supervised.py:
+  --source-weight
+  --target-weight
+  --init-strategy-spatial-aux
+
+evaluate_adaptive_policy.py:
+  --strategy-spatial-aux
+  --strategy-spatial-rerank-scale
+```
+
+The new `strategy_spatial_aux` flag is separate from `strategy_aux`, so older intent/finish/belief/Q checkpoints can still load with `init_strategy_spatial_aux=False` and expand only the new 1x1 source/target convs. This avoids invalidating `adaptive-strategy-q-rerank-v1` and prior strategy head checkpoints.
+
+Training run:
+
+```text
+model: runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+init:  runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx
+data:  v4-expander-balanced + fixed-v5 max250/max500/max750
+cap:   4096 samples/shard, 24576 samples total
+loss:  source=0.5, target=0.5, all other losses 0
+scope: frozen base, strategy heads only
+device: cuda:0
+```
+
+Training curve:
+
+| epoch | source CE / acc | target CE / acc |
+| ---: | ---: | ---: |
+| 1 | `6.1933 / 0.0%` | `5.1836 / 0.4%` |
+| 4 | `3.4716 / 13.4%` | `4.5406 / 1.6%` |
+| 8 | `3.1697 / 16.1%` | `4.3413 / 5.8%` |
+
+The source head learns a real signal. The target head is much harder; this is expected because the current label is usually the true enemy general cell, which is often hidden and underdetermined from short fog-memory context.
+
+Expander 128-row, seed 82040:
+
+| spatial scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `70.31%` | `70.31%` | `80.47%` | `80.47%` | `81.25%` | `85.94%` | `70.31%` |
+| 0.05 | `75.00%` | `75.78%` | `82.81%` | `83.59%` | `80.47%` | `78.12%` | `75.00%` |
+| 0.10 | `69.53%` | `75.78%` | `78.12%` | `82.03%` | `79.69%` | `80.47%` | `69.53%` |
+
+Expander 256-row confirmation, seed 82060:
+
+| spatial scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `76.95%` | `73.83%` | `82.03%` | `83.59%` | `80.86%` | `80.47%` | `73.83%` |
+| 0.05 | `73.05%` | `77.73%` | `81.25%` | `86.33%` | `81.64%` | `78.12%` | `73.05%` |
+
+Fixed-v5 max250 128-row, seed 82080:
+
+| spatial scale | p0 | p1 | min | draw p0/p1 |
+| ---: | ---: | ---: | ---: | --- |
+| 0 | `10.94%` | `11.72%` | `10.94%` | `52.34% / 55.47%` |
+| 0.05 | `10.16%` | `9.38%` | `9.38%` | `55.47% / 55.47%` |
+
+Conclusion:
+
+```text
+Do not promote adaptive-strategy-spatial-v1.
+Explicit source/target heads are wired and trainable, but the current direct rerank still behaves like a diagnostic bias rather than a reliable policy improvement.
+The 128-row Expander gain at scale 0.05 was another short-sample false positive; 256-row confirmation regressed versus scale 0.
+Fixed-v5 max250 worsened and draw did not fall.
+
+Next aligned step:
+  keep the source/target heads as supervised probes,
+  improve target labels from true-general one-hot to richer target/intent maps,
+  or train replacement-outcome/search target heads before using spatial bias in inference.
+```

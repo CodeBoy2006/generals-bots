@@ -771,3 +771,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote target-rerank inference. The next useful branch should train explicit target/source heads or replacement-outcome correction targets instead of deriving a hand-coded Manhattan movement bias from belief logits.
 - **Context:** Ungated target scale `0.50` looked best at 128-row Expander (`74.22%` min), but 256-row confirmation regressed against no target bias (`73.44%` vs `75.78%` min), mostly by hurting 8x while helping 16x. Finish gating did not stabilize the effect. Fixed-v5 max250 stayed far below gate (`6.25%` min at target scale `0.50` vs `5.47%` same-seed baseline).
+
+## [2026-06-17 18:10] Explicit Source Target Strategy Heads
+- **Changes:** Added optional `strategy_spatial_aux` source/target heads to adaptive CNN and U-Net networks with backward-compatible checkpoint expansion; extended `adaptive_strategy_supervised.py` to train `source_heatmap`/`target_heatmap` spatial CE losses; added `evaluate_adaptive_policy.py --strategy-spatial-rerank-scale`; documented commands/results.
+- **Status:** Completed
+- **Next Steps:** Do not promote `runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx`. Keep the spatial heads as diagnostics, then improve target labels or train replacement-outcome/search target heads before using source/target bias in policy selection.
+- **Context:** CUDA training on 24576 offline samples learned source/target labels (`Src CE 6.19 -> 3.17`, `Tgt CE 5.18 -> 4.34`). Expander 128-row scale `0.05` looked good (`75.00%` min vs `70.31%`), but 256-row confirmation regressed (`73.05%` vs scale-0 `73.83%`). Fixed-v5 max250 also regressed (`9.38%` min vs `10.94%`) and draw did not fall.

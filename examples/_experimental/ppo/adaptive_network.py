@@ -37,6 +37,8 @@ class StrategyAuxOutputs(NamedTuple):
     finish_logits: jnp.ndarray
     enemy_general_logits: jnp.ndarray
     action_q_values: jnp.ndarray
+    source_logits: jnp.ndarray | None
+    target_logits: jnp.ndarray | None
 
 
 def value_bin_centers(value_bins: int, value_min: float = -1.0, value_max: float = 1.0) -> jnp.ndarray:
@@ -105,6 +107,8 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     strategy_q_conv: eqx.nn.Conv2d | None
     strategy_q_pass_linear: eqx.nn.Linear | None
     strategy_enemy_general_conv: eqx.nn.Conv2d | None
+    strategy_source_conv: eqx.nn.Conv2d | None
+    strategy_target_conv: eqx.nn.Conv2d | None
     context_conv1: eqx.nn.Conv2d | None
     context_conv2: eqx.nn.Conv2d | None
     pyramid_down1: eqx.nn.Conv2d | None
@@ -124,6 +128,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_sigma: float = eqx.field(static=True)
     outcome_head: bool = eqx.field(static=True)
     strategy_aux: bool = eqx.field(static=True)
+    strategy_spatial_aux: bool = eqx.field(static=True)
     global_context: bool = eqx.field(static=True)
     context_residual: bool = eqx.field(static=True)
     pyramid_context: bool = eqx.field(static=True)
@@ -141,10 +146,13 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         value_sigma: float = 0.04,
         outcome_head: bool = False,
         strategy_aux: bool = False,
+        strategy_spatial_aux: bool = False,
         global_context: bool = False,
         context_residual: bool = False,
         pyramid_context: bool = False,
     ):
+        if strategy_spatial_aux and not strategy_aux:
+            raise ValueError("strategy_spatial_aux requires strategy_aux")
         if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
             input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
         parsed_value_head_sizes = tuple(value_head_sizes or ())
@@ -152,6 +160,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
         outcome_keys = 1 if outcome_head else 0
         strategy_keys = 5 if strategy_aux else 0
+        strategy_spatial_keys = 2 if strategy_spatial_aux else 0
         global_keys = 2 if global_context else 0
         context_keys = 2 if context_residual else 0
         pyramid_keys = 4 if pyramid_context else 0
@@ -163,6 +172,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             + outcome_keys
             + global_keys
             + strategy_keys
+            + strategy_spatial_keys
             + context_keys
             + pyramid_keys,
         )
@@ -174,6 +184,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.value_sigma = value_sigma
         self.outcome_head = bool(outcome_head)
         self.strategy_aux = bool(strategy_aux)
+        self.strategy_spatial_aux = bool(strategy_spatial_aux)
         self.global_context = bool(global_context)
         self.context_residual = bool(context_residual)
         self.pyramid_context = bool(pyramid_context)
@@ -236,7 +247,24 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             self.strategy_q_conv = None
             self.strategy_q_pass_linear = None
             self.strategy_enemy_general_conv = None
-        context_offset = strategy_offset + strategy_keys
+        strategy_spatial_offset = strategy_offset + strategy_keys
+        if strategy_spatial_aux:
+            self.strategy_source_conv = eqx.nn.Conv2d(
+                channels[3],
+                1,
+                kernel_size=1,
+                key=keys[strategy_spatial_offset],
+            )
+            self.strategy_target_conv = eqx.nn.Conv2d(
+                channels[3],
+                1,
+                kernel_size=1,
+                key=keys[strategy_spatial_offset + 1],
+            )
+        else:
+            self.strategy_source_conv = None
+            self.strategy_target_conv = None
+        context_offset = strategy_spatial_offset + strategy_spatial_keys
         if context_residual:
             self.context_conv1 = eqx.nn.Conv2d(channels[3], channels[3], kernel_size=5, padding=2, key=keys[context_offset])
             context_conv2 = eqx.nn.Conv2d(
@@ -385,11 +413,20 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         action_q_values = jnp.concatenate([move_q.reshape(-1), pass_q], axis=0)
         enemy_general_logits = self.strategy_enemy_general_conv(x)[0]
         enemy_general_logits = jnp.where(active, enemy_general_logits, -10.0)
+        source_logits = None
+        target_logits = None
+        if self.strategy_source_conv is not None and self.strategy_target_conv is not None:
+            source_logits = self.strategy_source_conv(x)[0]
+            target_logits = self.strategy_target_conv(x)[0]
+            source_logits = jnp.where(active, source_logits, -10.0)
+            target_logits = jnp.where(active, target_logits, -10.0)
         return StrategyAuxOutputs(
             intent_logits=self.strategy_intent_linear2(value_hidden),
             finish_logits=self.strategy_finish_linear2(value_hidden),
             enemy_general_logits=enemy_general_logits,
             action_q_values=action_q_values,
+            source_logits=source_logits,
+            target_logits=target_logits,
         )
 
     def _size_value(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
@@ -511,6 +548,8 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
     strategy_q_conv: eqx.nn.Conv2d | None
     strategy_q_pass_linear: eqx.nn.Linear | None
     strategy_enemy_general_conv: eqx.nn.Conv2d | None
+    strategy_source_conv: eqx.nn.Conv2d | None
+    strategy_target_conv: eqx.nn.Conv2d | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
     size_value_linear2: tuple[eqx.nn.Linear, ...]
     size_categorical_value_linear2: tuple[eqx.nn.Linear, ...]
@@ -522,6 +561,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
     value_sigma: float = eqx.field(static=True)
     outcome_head: bool = eqx.field(static=True)
     strategy_aux: bool = eqx.field(static=True)
+    strategy_spatial_aux: bool = eqx.field(static=True)
     global_context: bool = eqx.field(static=True)
     context_residual: bool = eqx.field(static=True, default=False)
     pyramid_context: bool = eqx.field(static=True, default=False)
@@ -539,12 +579,15 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         value_sigma: float = 0.04,
         outcome_head: bool = False,
         strategy_aux: bool = False,
+        strategy_spatial_aux: bool = False,
         global_context: bool = False,
         context_residual: bool = False,
         pyramid_context: bool = False,
     ):
         if context_residual or pyramid_context:
             raise ValueError("AdaptiveUNetPolicyValueNetwork replaces context/pyramid add-on branches")
+        if strategy_spatial_aux and not strategy_aux:
+            raise ValueError("strategy_spatial_aux requires strategy_aux")
         if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
             input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
         parsed_value_head_sizes = tuple(value_head_sizes or ())
@@ -552,9 +595,15 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
         outcome_keys = 1 if outcome_head else 0
         strategy_keys = 5 if strategy_aux else 0
+        strategy_spatial_keys = 2 if strategy_spatial_aux else 0
         keys = jrandom.split(
             key,
-            9 + 2 * len(parsed_value_head_sizes) + categorical_keys + outcome_keys + strategy_keys,
+            9
+            + 2 * len(parsed_value_head_sizes)
+            + categorical_keys
+            + outcome_keys
+            + strategy_keys
+            + strategy_spatial_keys,
         )
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
@@ -564,6 +613,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         self.value_sigma = value_sigma
         self.outcome_head = bool(outcome_head)
         self.strategy_aux = bool(strategy_aux)
+        self.strategy_spatial_aux = bool(strategy_spatial_aux)
         self.global_context = bool(global_context)
         self.context_residual = False
         self.pyramid_context = False
@@ -610,6 +660,13 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
             self.strategy_q_conv = None
             self.strategy_q_pass_linear = None
             self.strategy_enemy_general_conv = None
+        strategy_spatial_offset = strategy_offset + strategy_keys
+        if strategy_spatial_aux:
+            self.strategy_source_conv = eqx.nn.Conv2d(c4, 1, kernel_size=1, key=keys[strategy_spatial_offset])
+            self.strategy_target_conv = eqx.nn.Conv2d(c4, 1, kernel_size=1, key=keys[strategy_spatial_offset + 1])
+        else:
+            self.strategy_source_conv = None
+            self.strategy_target_conv = None
 
     def _avg_pool2x(self, x: jnp.ndarray) -> jnp.ndarray:
         pooled = jax.lax.reduce_window(
@@ -681,11 +738,20 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         action_q_values = jnp.concatenate([move_q.reshape(-1), pass_q], axis=0)
         enemy_general_logits = self.strategy_enemy_general_conv(x)[0]
         enemy_general_logits = jnp.where(active, enemy_general_logits, -10.0)
+        source_logits = None
+        target_logits = None
+        if self.strategy_source_conv is not None and self.strategy_target_conv is not None:
+            source_logits = self.strategy_source_conv(x)[0]
+            target_logits = self.strategy_target_conv(x)[0]
+            source_logits = jnp.where(active, source_logits, -10.0)
+            target_logits = jnp.where(active, target_logits, -10.0)
         return StrategyAuxOutputs(
             intent_logits=self.strategy_intent_linear2(value_hidden),
             finish_logits=self.strategy_finish_linear2(value_hidden),
             enemy_general_logits=enemy_general_logits,
             action_q_values=action_q_values,
+            source_logits=source_logits,
+            target_logits=target_logits,
         )
 
     def _size_value(self, pooled: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
@@ -796,6 +862,7 @@ def _create_adaptive_network(
     value_sigma: float,
     outcome_head: bool,
     strategy_aux: bool,
+    strategy_spatial_aux: bool,
     global_context: bool,
     context_residual: bool,
     pyramid_context: bool,
@@ -813,6 +880,7 @@ def _create_adaptive_network(
             value_sigma=value_sigma,
             outcome_head=outcome_head,
             strategy_aux=strategy_aux,
+            strategy_spatial_aux=strategy_spatial_aux,
             global_context=global_context,
             context_residual=context_residual,
             pyramid_context=pyramid_context,
@@ -830,6 +898,7 @@ def _create_adaptive_network(
             value_sigma=value_sigma,
             outcome_head=outcome_head,
             strategy_aux=strategy_aux,
+            strategy_spatial_aux=strategy_spatial_aux,
             global_context=global_context,
             context_residual=context_residual,
             pyramid_context=pyramid_context,
@@ -868,6 +937,8 @@ def load_or_create_adaptive_network(
     init_outcome_head: bool | None = None,
     strategy_aux: bool = False,
     init_strategy_aux: bool | None = None,
+    strategy_spatial_aux: bool = False,
+    init_strategy_spatial_aux: bool | None = None,
     global_context: bool = False,
     init_global_context: bool | None = None,
     context_residual: bool = False,
@@ -899,6 +970,7 @@ def load_or_create_adaptive_network(
         value_sigma=value_sigma,
         outcome_head=outcome_head,
         strategy_aux=strategy_aux,
+        strategy_spatial_aux=strategy_spatial_aux,
         global_context=global_context,
         context_residual=context_residual,
         pyramid_context=pyramid_context,
@@ -927,6 +999,9 @@ def load_or_create_adaptive_network(
     )
     parsed_init_outcome_head = outcome_head if init_outcome_head is None else bool(init_outcome_head)
     parsed_init_strategy_aux = strategy_aux if init_strategy_aux is None else bool(init_strategy_aux)
+    parsed_init_strategy_spatial_aux = (
+        strategy_spatial_aux if init_strategy_spatial_aux is None else bool(init_strategy_spatial_aux)
+    )
     parsed_init_global_context = global_context if init_global_context is None else bool(init_global_context)
     parsed_init_context_residual = (
         context_residual if init_context_residual is None else bool(init_context_residual)
@@ -947,6 +1022,7 @@ def load_or_create_adaptive_network(
         or parsed_init_value_sigma != value_sigma
         or parsed_init_outcome_head != outcome_head
         or parsed_init_strategy_aux != strategy_aux
+        or parsed_init_strategy_spatial_aux != strategy_spatial_aux
         or parsed_init_global_context != global_context
         or parsed_init_context_residual != context_residual
         or parsed_init_pyramid_context != pyramid_context
@@ -965,6 +1041,7 @@ def load_or_create_adaptive_network(
             value_sigma=parsed_init_value_sigma,
             outcome_head=parsed_init_outcome_head,
             strategy_aux=parsed_init_strategy_aux,
+            strategy_spatial_aux=parsed_init_strategy_spatial_aux,
             global_context=parsed_init_global_context,
             context_residual=parsed_init_context_residual,
             pyramid_context=parsed_init_pyramid_context,
@@ -1191,6 +1268,18 @@ def expand_adaptive_network_channels(
             target,
             _copy_conv_prefix(target.strategy_enemy_general_conv, source.strategy_enemy_general_conv),
         )
+    if target.strategy_source_conv is not None and source.strategy_source_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_source_conv,
+            target,
+            _copy_conv_prefix(target.strategy_source_conv, source.strategy_source_conv),
+        )
+    if target.strategy_target_conv is not None and source.strategy_target_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_target_conv,
+            target,
+            _copy_conv_prefix(target.strategy_target_conv, source.strategy_target_conv),
+        )
     if target.context_conv1 is not None and source.context_conv1 is not None:
         target = eqx.tree_at(
             lambda net: net.context_conv1,
@@ -1372,5 +1461,17 @@ def expand_adaptive_unet_network(
             lambda net: net.strategy_enemy_general_conv,
             target,
             _copy_conv_prefix(target.strategy_enemy_general_conv, source.strategy_enemy_general_conv),
+        )
+    if target.strategy_source_conv is not None and source.strategy_source_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_source_conv,
+            target,
+            _copy_conv_prefix(target.strategy_source_conv, source.strategy_source_conv),
+        )
+    if target.strategy_target_conv is not None and source.strategy_target_conv is not None:
+        target = eqx.tree_at(
+            lambda net: net.strategy_target_conv,
+            target,
+            _copy_conv_prefix(target.strategy_target_conv, source.strategy_target_conv),
         )
     return target

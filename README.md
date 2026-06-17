@@ -714,6 +714,37 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 Evaluate Q reranking with `evaluate_adaptive_policy.py --strategy-aux --strategy-q-rerank-scale <scale>`. Treat this as a probe: current results show the Q head can learn the offline teacher distribution, but direct all-action reranking has not passed 512-row promotion.
 
+The strategy supervised trainer can also add explicit source/target spatial heads from `source_heatmap` and `target_heatmap` shard labels. Use `--strategy-spatial-aux` when creating the target checkpoint and leave `--init-strategy-spatial-aux` off when expanding an older strategy checkpoint that does not yet contain these heads:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v1/v4-expander-balanced/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max250/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max750/*.npz' \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --strategy-spatial-aux \
+  --init-model-path runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx \
+  --source-weight 0.5 \
+  --target-weight 0.5 \
+  --model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+```
+
+Evaluate explicit source/target inference bias with `evaluate_adaptive_policy.py --strategy-aux --strategy-spatial-aux --strategy-spatial-rerank-scale <scale>`. This is still a probe; the current spatial v1 run learned the labels offline but did not pass 256-row Expander or fixed-v5 promotion.
+
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
 
 ```bash

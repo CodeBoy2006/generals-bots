@@ -61,6 +61,8 @@ def load_strategy_dataset(
         "outcome": [],
         "outcome_weight": [],
         "enemy_general": [],
+        "source_heatmap": [],
+        "target_heatmap": [],
         "teacher_logits": [],
         "teacher_action": [],
     }
@@ -79,6 +81,8 @@ def load_strategy_dataset(
         chunks["outcome"].append(shard["outcome"][shard_indices].astype(np.int32))
         chunks["outcome_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
         chunks["enemy_general"].append(shard["enemy_general_heatmap"][shard_indices].astype(np.float32))
+        chunks["source_heatmap"].append(shard["source_heatmap"][shard_indices].astype(np.float32))
+        chunks["target_heatmap"].append(shard["target_heatmap"][shard_indices].astype(np.float32))
         chunks["teacher_logits"].append(shard["teacher_logits"][shard_indices].astype(np.float32))
         chunks["teacher_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
 
@@ -103,7 +107,29 @@ def mask_strategy_supervised_grads(grads, keep_outcome: bool):
         masked = eqx.tree_at(lambda net: net.strategy_q_pass_linear, masked, grads.strategy_q_pass_linear)
     if grads.strategy_enemy_general_conv is not None:
         masked = eqx.tree_at(lambda net: net.strategy_enemy_general_conv, masked, grads.strategy_enemy_general_conv)
+    if grads.strategy_source_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_source_conv, masked, grads.strategy_source_conv)
+    if grads.strategy_target_conv is not None:
+        masked = eqx.tree_at(lambda net: net.strategy_target_conv, masked, grads.strategy_target_conv)
     return masked
+
+
+def spatial_ce_metrics(logits: jnp.ndarray, targets: jnp.ndarray, active: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Cross-entropy and argmax accuracy for one-hot or soft spatial heatmap targets."""
+    active_f = active.astype(jnp.float32)
+    target_mass = jnp.sum(targets * active_f, axis=(1, 2))
+    valid = target_mass > 1.0e-6
+    target_probs = targets * active_f / jnp.maximum(target_mass[:, None, None], 1.0e-6)
+    masked_logits = jnp.where(active, logits, -1.0e9).reshape(logits.shape[0], -1)
+    log_probs = jax.nn.log_softmax(masked_logits, axis=-1).reshape(logits.shape)
+    per_sample_loss = -jnp.sum(target_probs * log_probs, axis=(1, 2))
+    normalizer = jnp.maximum(jnp.sum(valid.astype(jnp.float32)), 1.0)
+    loss = jnp.sum(per_sample_loss * valid.astype(jnp.float32)) / normalizer
+
+    predicted = jnp.argmax(masked_logits, axis=-1)
+    target_index = jnp.argmax(target_probs.reshape(targets.shape[0], -1), axis=-1)
+    accuracy = jnp.sum((predicted == target_index).astype(jnp.float32) * valid.astype(jnp.float32)) / normalizer
+    return loss, accuracy
 
 
 @eqx.filter_jit
@@ -120,6 +146,8 @@ def train_step(
     action_ce_weight: float,
     q_kl_weight: float,
     q_action_ce_weight: float,
+    source_weight: float,
+    target_weight: float,
     freeze_base: bool,
 ):
     """Train one minibatch of frozen-trunk strategy auxiliary losses."""
@@ -133,6 +161,8 @@ def train_step(
         outcome_targets,
         outcome_weights,
         enemy_general,
+        source_heatmap,
+        target_heatmap,
         teacher_logits,
         teacher_actions,
     ) = batch
@@ -210,6 +240,16 @@ def train_step(
             q_action_ce = jnp.mean(q_action_ce_losses)
             q_action_accuracy = jnp.mean((jnp.argmax(q_logits, axis=-1) == teacher_actions).astype(jnp.float32))
 
+        source_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        source_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        target_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        if source_weight > 0.0 or target_weight > 0.0:
+            if outputs.source_logits is None or outputs.target_logits is None:
+                raise ValueError("source/target losses require strategy_spatial_aux")
+            source_loss, source_accuracy = spatial_ce_metrics(outputs.source_logits, source_heatmap, active)
+            target_loss, target_accuracy = spatial_ce_metrics(outputs.target_logits, target_heatmap, active)
+
         loss = (
             intent_weight * intent_loss
             + finish_weight * finish_loss
@@ -219,6 +259,8 @@ def train_step(
             + action_ce_weight * action_ce
             + q_kl_weight * q_policy_kl
             + q_action_ce_weight * q_action_ce
+            + source_weight * source_loss
+            + target_weight * target_loss
         )
         metrics = {
             "intent_loss": intent_loss,
@@ -229,11 +271,15 @@ def train_step(
             "action_ce": action_ce,
             "q_policy_kl": q_policy_kl,
             "q_action_ce": q_action_ce,
+            "source_loss": source_loss,
+            "target_loss": target_loss,
             "intent_accuracy": intent_accuracy,
             "finish_accuracy": finish_accuracy,
             "outcome_accuracy": outcome_accuracy,
             "teacher_action_accuracy": teacher_action_accuracy,
             "q_action_accuracy": q_action_accuracy,
+            "source_accuracy": source_accuracy,
+            "target_accuracy": target_accuracy,
             "finish_weight_mean": jnp.mean(finish_weights),
             "outcome_weight_mean": jnp.mean(outcome_weights),
         }
@@ -262,6 +308,8 @@ def train_epoch(
     action_ce_weight: float,
     q_kl_weight: float,
     q_action_ce_weight: float,
+    source_weight: float,
+    target_weight: float,
     freeze_base: bool,
 ):
     """Shuffle one full pass over the loaded shards."""
@@ -284,6 +332,8 @@ def train_epoch(
             dataset["outcome"][idx],
             dataset["outcome_weight"][idx],
             dataset["enemy_general"][idx],
+            dataset["source_heatmap"][idx],
+            dataset["target_heatmap"][idx],
             dataset["teacher_logits"][idx],
             dataset["teacher_action"][idx],
         )
@@ -300,6 +350,8 @@ def train_epoch(
             action_ce_weight,
             q_kl_weight,
             q_action_ce_weight,
+            source_weight,
+            target_weight,
             freeze_base,
         )
         loss_sum += loss
@@ -330,6 +382,8 @@ def parse_args():
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
+    parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--init-strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-model-path", required=True)
     parser.add_argument("--model-path", default="runs/adaptive-strategy-supervised/generals-adaptive-strategy-supervised.eqx")
     parser.add_argument("--num-epochs", type=int, default=10)
@@ -345,6 +399,8 @@ def parse_args():
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
     parser.add_argument("--q-kl-weight", type=float, default=0.0)
     parser.add_argument("--q-action-ce-weight", type=float, default=0.0)
+    parser.add_argument("--source-weight", type=float, default=0.0)
+    parser.add_argument("--target-weight", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -388,6 +444,8 @@ def parse_args():
             args.action_ce_weight,
             args.q_kl_weight,
             args.q_action_ce_weight,
+            args.source_weight,
+            args.target_weight,
         )
     ):
         parser.error("loss weights must be non-negative")
@@ -395,6 +453,8 @@ def parse_args():
         parser.error("--outcome-weight requires --outcome-head")
     if args.update_scope == "all" and args.policy_kl_weight <= 0.0:
         parser.error("--update-scope all requires a positive --policy-kl-weight to anchor policy drift")
+    if (args.source_weight > 0.0 or args.target_weight > 0.0) and not args.strategy_spatial_aux:
+        parser.error("--source-weight/--target-weight require --strategy-spatial-aux")
     return args
 
 
@@ -423,7 +483,8 @@ def main():
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
         f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
-        f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}"
+        f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}, "
+        f"source={args.source_weight:g}, target={args.target_weight:g}"
     )
     if args.update_scope == "strategy-heads":
         scope_label = "strategy auxiliary heads" + (" + outcome head" if args.outcome_weight > 0.0 else "")
@@ -448,6 +509,8 @@ def main():
         init_outcome_head=args.init_outcome_head,
         strategy_aux=True,
         init_strategy_aux=args.init_strategy_aux,
+        strategy_spatial_aux=args.strategy_spatial_aux,
+        init_strategy_spatial_aux=args.init_strategy_spatial_aux,
         global_context=args.global_context,
         init_global_context=args.global_context,
         network_arch=args.network_arch,
@@ -474,6 +537,8 @@ def main():
             args.action_ce_weight,
             args.q_kl_weight,
             args.q_action_ce_weight,
+            args.source_weight,
+            args.target_weight,
             args.update_scope == "strategy-heads",
         )
         jax.block_until_ready(network)
@@ -487,6 +552,8 @@ def main():
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"QKL {float(metrics['q_policy_kl']):.4f} | "
             f"QCE {float(metrics['q_action_ce']):.4f}/{float(metrics['q_action_accuracy']) * 100:5.1f}% | "
+            f"Src {float(metrics['source_loss']):.4f}/{float(metrics['source_accuracy']) * 100:5.1f}% | "
+            f"Tgt {float(metrics['target_loss']):.4f}/{float(metrics['target_accuracy']) * 100:5.1f}% | "
             f"Time {time.time() - t0:.2f}s"
         )
 
