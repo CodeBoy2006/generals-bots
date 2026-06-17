@@ -844,6 +844,8 @@ Plan action labels use the standard adaptive action index, including the single 
 
 `adaptive_plan_q_supervised.py --replacement-gate-weight` trains the same action-Q head as a pairwise accepted-replacement gate. It compares the best source-target plan action with the teacher/base action when both appear in the candidate set, using `--replacement-score-margin` to define same-outcome improvements and `--replacement-target-margin` as the desired Q gap. This is still a diagnostic path: the first fixed-v5 shard run reduced draw under conservative replacement but did not improve 256-row min win rate.
 
+`evaluate_adaptive_policy.py --strategy-q-replace-worker-candidate` restricts the replacement gate to the single source/target worker action produced by the spatial heads instead of taking the best Q over every legal primitive action. Use it with `--strategy-q-replace-threshold` and `--strategy-aux --strategy-spatial-aux`. Early probes did not improve fixed-v5 max250 either, so this is useful mainly for separating action-Q calibration failures from candidate-generation failures.
+
 `--plan-policy-weight` uses the same aggregated Plan-Q action target to update policy logits directly. Use it only with `--update-scope all` and a positive `--policy-kl-weight`; early probes showed it can damage seat balance even when KL anchored.
 
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:

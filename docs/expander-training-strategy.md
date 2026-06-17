@@ -5740,3 +5740,54 @@ legal non-candidate negatives, or a separate replacement/gate head that scores
 only generated source-target plan candidates before a target-conditioned Worker
 executes them.
 ```
+
+## 2026-06-17 Candidate-Only Strategy-Q Replacement Gate
+
+Added `evaluate_adaptive_policy.py --strategy-q-replace-worker-candidate`.
+When combined with `--strategy-q-replace-threshold`, the replacement gate no
+longer searches over every legal primitive action. Instead it:
+
+```text
+1. samples/chooses the base policy action normally
+2. builds one source-target worker candidate from the spatial heads
+3. compares Q(worker_candidate) - Q(policy_action)
+4. optionally requires policy logit support with --strategy-q-replace-policy-margin
+5. replaces only if the candidate clears the gate
+```
+
+This tests whether the previous replacement failure was mostly caused by
+unsupervised legal actions receiving arbitrary high Q values.
+
+Fixed-v5 max250, 128 games/row on seed `83880`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `6.25%` | `12.50%` | `6.25%` | `57.81%` | `48.44%` |
+| candidate threshold `0` | `5.47%` | `7.81%` | `5.47%` | `50.00%` | `42.19%` |
+| candidate threshold `0`, margin `4` | `8.59%` | `7.81%` | `7.81%` | `53.12%` | `50.78%` |
+| candidate threshold `1`, margin `4` | `7.81%` | `10.16%` | `7.81%` | `52.34%` | `53.12%` |
+
+The conservative candidate gate again moved weakness between seats instead of
+improving both. The best 128-row setting received 256-row confirmation.
+
+Fixed-v5 max250, 256 games/row on seed `83900`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `10.55%` | `9.77%` | `9.77%` | `54.30%` | `54.69%` |
+| candidate threshold `1`, margin `4` | `9.38%` | `11.72%` | `9.38%` | `60.55%` | `51.56%` |
+
+Conclusion:
+
+```text
+Candidate-only replacement is safer than full legal-action Q argmax, but still
+does not improve fixed-v5 max250.
+The failure is no longer just arbitrary unsupervised legal actions; the
+source/target worker candidate itself is not reliable enough and the Q gap is
+not calibrated enough to pick useful interventions.
+Do not continue candidate-only threshold sweeps.
+Next useful implementation should train a target-conditioned Worker action head
+from successful Plan-Q/worker trajectories, or collect a larger accepted-plan
+dataset with explicit positive/negative candidate labels and a separate gate
+head that scores candidates rather than primitive actions.
+```

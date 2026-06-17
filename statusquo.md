@@ -837,3 +837,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-plan-q-replacement-gate-v1`; next Plan-Q work should score generated source-target candidates directly or add legal non-candidate negatives before using a replacement gate.
 - **Context:** The v1 gate trained offline from 41.6% to 52.8% replacement accuracy, but 256-row fixed-v5 max250 confirmation dropped min win rate from 8.20% baseline to 7.81% while lowering draw, indicating the gate converts some draws into losses rather than producing reliable wins.
+
+## [2026-06-17 19:44] Candidate-Only Strategy-Q Gate
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-q-replace-worker-candidate`, which restricts strategy-Q replacement to the source/target worker candidate instead of all legal actions. Documented the option and fixed-v5 max250 results.
+- **Status:** Completed
+- **Next Steps:** Do not keep sweeping candidate gate thresholds; move toward a trained target-conditioned Worker action head or a larger accepted-plan dataset with an explicit candidate-scoring gate.
+- **Context:** Candidate-only gate avoided the worst full-legal argmax failures but still did not confirm. At 256 fixed-v5 max250, baseline was `10.55%/9.77%` p0/p1 wins (`9.77%` min), while candidate threshold `1` with policy margin `4` scored `9.38%/11.72%` (`9.38%` min), again moving weakness between seats rather than increasing min win rate.
