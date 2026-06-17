@@ -5594,3 +5594,55 @@ Mixed-target Worker improves 16p0 but sacrifices the 8x rows.
 Do not keep sweeping worker-logit scale.
 The next Worker route needs a dedicated policy-improvement gate or accepted-replacement dataset, not raw Worker logits as a centered fallback-policy bias.
 ```
+
+## 2026-06-17 Strategy-Q Replacement Gate Probe
+
+Added a conservative strategy-Q replacement gate to `evaluate_adaptive_policy.py`:
+
+```text
+--strategy-q-replace-threshold <q_advantage>
+--strategy-q-replace-policy-margin <logit_margin>
+```
+
+Unlike `--strategy-q-rerank-scale`, this does not bias every legal action. The
+policy first chooses its normal action. The evaluator then compares the learned
+strategy-Q value of the best legal Q action with the chosen policy action:
+
+```text
+replace only if Q(best_legal_action) - Q(policy_action) >= threshold
+optional: also require policy_logit(best_q_action) within policy_margin of top policy logit
+```
+
+This is a lightweight policy-improvement gate probe for
+`runs/adaptive-plan-q-action-q-v1/generals-adaptive-plan-q-action-q-v1.eqx`.
+
+Fixed-v5 max250, 128 games/row on seed `83720`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `7.81%` | `11.72%` | `7.81%` | `60.16%` | `42.97%` |
+| threshold `0` | `9.38%` | `5.47%` | `5.47%` | `29.69%` | `31.25%` |
+| threshold `2` | `6.25%` | `6.25%` | `6.25%` | `63.28%` | `55.47%` |
+| threshold `4` | `9.38%` | `10.16%` | `9.38%` | `53.91%` | `52.34%` |
+
+Only threshold `4` had a weak positive 128-row signal, so it received 256-row
+confirmation.
+
+Fixed-v5 max250, 256 games/row on seed `83740`:
+
+| gate | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `9.77%` | `8.20%` | `8.20%` | `51.95%` | `51.56%` |
+| threshold `4` | `13.28%` | `8.20%` | `8.20%` | `47.66%` | `55.08%` |
+| threshold `4`, margin `2` | `10.55%` | `7.81%` | `7.81%` | `53.91%` | `50.78%` |
+| threshold `4`, margin `4` | `10.55%` | `7.81%` | `7.81%` | `52.34%` | `51.17%` |
+
+Conclusion:
+
+```text
+The thresholded gate is safer than raw centered Q bias, but the current action-Q head still does not improve the fixed-v5 gate.
+Threshold 4 improves p0 in the 256-row confirmation, but p1 remains the bottleneck, so min win rate is unchanged.
+Policy-margin support makes the gate more conservative but removes the p0 gain and slightly hurts p1.
+Do not promote adaptive-plan-q-action-q-v1 or continue threshold sweeps.
+Next step should train a true accepted-replacement/policy-improvement head from rows labeled by full replacement outcomes, rather than using the current action-Q scalar as the gate directly.
+```

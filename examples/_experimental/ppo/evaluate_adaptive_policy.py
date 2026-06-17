@@ -84,6 +84,8 @@ def _policy_action(
     key,
     policy_mode,
     strategy_q_rerank_scale: float,
+    strategy_q_replace_threshold: float,
+    strategy_q_replace_policy_margin: float,
     strategy_target_rerank_scale: float,
     strategy_target_finish_gate: bool,
     strategy_spatial_rerank_scale: float,
@@ -94,6 +96,7 @@ def _policy_action(
     logits, _ = network.logits_value(obs_arr, mask, active)
     needs_aux = (
         strategy_q_rerank_scale > 0.0
+        or strategy_q_replace_threshold >= 0.0
         or strategy_target_rerank_scale > 0.0
         or strategy_spatial_rerank_scale > 0.0
         or strategy_worker_mix_prob > 0.0
@@ -126,6 +129,16 @@ def _policy_action(
         lambda _: jrandom.categorical(action_key, logits),
         None,
     )
+    if strategy_q_replace_threshold >= 0.0:
+        legal = logits > -1.0e8
+        replacement_index = jnp.argmax(jnp.where(legal, aux.action_q_values, -1.0e9))
+        q_advantage = aux.action_q_values[replacement_index] - aux.action_q_values[index]
+        if strategy_q_replace_policy_margin >= 0.0:
+            policy_supported = logits[replacement_index] >= jnp.max(logits) - strategy_q_replace_policy_margin
+        else:
+            policy_supported = jnp.asarray(True)
+        use_replacement = (q_advantage >= strategy_q_replace_threshold) & policy_supported
+        index = jnp.where(use_replacement, replacement_index, index)
     if strategy_worker_mix_prob > 0.0:
         finish_probability = (
             jax.nn.softmax(aux.finish_logits, axis=-1)[1] if strategy_worker_finish_gate else jnp.asarray(1.0)
@@ -334,6 +347,8 @@ def evaluate_batch(
     scoreboard_history=False,
     fog_memory=False,
     strategy_q_rerank_scale=0.0,
+    strategy_q_replace_threshold=-1.0,
+    strategy_q_replace_policy_margin=-1.0,
     strategy_target_rerank_scale=0.0,
     strategy_target_finish_gate=False,
     strategy_spatial_rerank_scale=0.0,
@@ -438,6 +453,8 @@ def evaluate_batch(
                 k,
                 policy_mode,
                 strategy_q_rerank_scale,
+                strategy_q_replace_threshold,
+                strategy_q_replace_policy_margin,
                 strategy_target_rerank_scale,
                 strategy_target_finish_gate,
                 strategy_spatial_rerank_scale,
@@ -487,6 +504,8 @@ def evaluate_policy_opponent_batch(
     scoreboard_history=False,
     fog_memory=False,
     strategy_q_rerank_scale=0.0,
+    strategy_q_replace_threshold=-1.0,
+    strategy_q_replace_policy_margin=-1.0,
     strategy_target_rerank_scale=0.0,
     strategy_target_finish_gate=False,
     strategy_spatial_rerank_scale=0.0,
@@ -592,6 +611,8 @@ def evaluate_policy_opponent_batch(
                 k,
                 policy_mode,
                 strategy_q_rerank_scale,
+                strategy_q_replace_threshold,
+                strategy_q_replace_policy_margin,
                 strategy_target_rerank_scale,
                 strategy_target_finish_gate,
                 strategy_spatial_rerank_scale,
@@ -662,6 +683,8 @@ def parse_args():
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--strategy-spatial-aux", action="store_true")
     parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
+    parser.add_argument("--strategy-q-replace-threshold", type=float, default=-1.0)
+    parser.add_argument("--strategy-q-replace-policy-margin", type=float, default=-1.0)
     parser.add_argument("--strategy-target-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-target-finish-gate", action="store_true")
     parser.add_argument("--strategy-spatial-rerank-scale", type=float, default=0.0)
@@ -716,6 +739,12 @@ def parse_args():
         parser.error("--strategy-q-rerank-scale must be non-negative")
     if args.strategy_q_rerank_scale > 0.0 and not args.strategy_aux:
         parser.error("--strategy-q-rerank-scale requires --strategy-aux")
+    if args.strategy_q_replace_threshold >= 0.0 and not args.strategy_aux:
+        parser.error("--strategy-q-replace-threshold requires --strategy-aux")
+    if args.strategy_q_replace_policy_margin < 0.0 and args.strategy_q_replace_policy_margin != -1.0:
+        parser.error("--strategy-q-replace-policy-margin must be non-negative, or -1 to disable")
+    if args.strategy_q_replace_policy_margin >= 0.0 and args.strategy_q_replace_threshold < 0.0:
+        parser.error("--strategy-q-replace-policy-margin requires --strategy-q-replace-threshold")
     if args.strategy_target_rerank_scale < 0.0:
         parser.error("--strategy-target-rerank-scale must be non-negative")
     if args.strategy_target_rerank_scale > 0.0 and not args.strategy_aux:
@@ -822,6 +851,10 @@ def main():
         print("Spatial:    source/target strategy heads loaded")
     if args.strategy_q_rerank_scale > 0.0:
         print(f"StratQ bias: scale={args.strategy_q_rerank_scale:g}")
+    if args.strategy_q_replace_threshold >= 0.0:
+        print(f"StratQ gate: threshold={args.strategy_q_replace_threshold:g}")
+        if args.strategy_q_replace_policy_margin >= 0.0:
+            print(f"StratQ gate: policy_margin={args.strategy_q_replace_policy_margin:g}")
     if args.strategy_target_rerank_scale > 0.0:
         gate_label = " finish-gated" if args.strategy_target_finish_gate else ""
         print(f"Target bias: scale={args.strategy_target_rerank_scale:g}{gate_label}")
@@ -878,6 +911,8 @@ def main():
                     args.scoreboard_history,
                     args.fog_memory,
                     args.strategy_q_rerank_scale,
+                    args.strategy_q_replace_threshold,
+                    args.strategy_q_replace_policy_margin,
                     args.strategy_target_rerank_scale,
                     args.strategy_target_finish_gate,
                     args.strategy_spatial_rerank_scale,
@@ -901,6 +936,8 @@ def main():
                     args.scoreboard_history,
                     args.fog_memory,
                     args.strategy_q_rerank_scale,
+                    args.strategy_q_replace_threshold,
+                    args.strategy_q_replace_policy_margin,
                     args.strategy_target_rerank_scale,
                     args.strategy_target_finish_gate,
                     args.strategy_spatial_rerank_scale,
@@ -946,6 +983,8 @@ def main():
         "strategy_aux": args.strategy_aux,
         "strategy_spatial_aux": args.strategy_spatial_aux,
         "strategy_q_rerank_scale": args.strategy_q_rerank_scale,
+        "strategy_q_replace_threshold": args.strategy_q_replace_threshold,
+        "strategy_q_replace_policy_margin": args.strategy_q_replace_policy_margin,
         "strategy_target_rerank_scale": args.strategy_target_rerank_scale,
         "strategy_target_finish_gate": args.strategy_target_finish_gate,
         "strategy_spatial_rerank_scale": args.strategy_spatial_rerank_scale,

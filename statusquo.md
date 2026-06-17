@@ -825,3 +825,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote learned Worker rerank or keep sweeping `worker-logit-scale`. Next useful branch should train a dedicated accepted-replacement/policy-improvement gate, or collect stronger decisive Plan-Q/Worker trajectories before letting Worker logits affect the production policy.
 - **Context:** General-target Worker rerank scale `0.10` looked positive at 128 games/row (`72.66%` min vs `71.09%` baseline), but failed 256-row confirmation (`70.31%` min vs `75.00%` baseline), mostly hurting 8p1. A mixed-target Worker continuation reached supervised `Src 71.1%`, `Dir 48.7%`, `Useful 70.6%`, but Expander 128-row hybrid still regressed to `69.53%` min while only improving 16p0.
+
+## [2026-06-17 19:29] Strategy-Q Replacement Gate Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-q-replace-threshold` and `--strategy-q-replace-policy-margin`, a conservative action-Q replacement gate that only swaps the policy action for the best legal strategy-Q action when predicted Q advantage clears a threshold. Updated README/manual and documented fixed-v5 gate results.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-plan-q-action-q-v1` or continue threshold sweeps. Build a true accepted-replacement/policy-improvement head from rows labeled by full replacement outcomes instead of using the current scalar action-Q head directly as the gate.
+- **Context:** Fixed-v5 max250 128-row threshold `4` gave a weak signal (`9.38%` min vs `7.81%` off), but 256-row confirmation only improved p0 (`9.77% -> 13.28%`) while p1 remained the bottleneck (`8.20%`), so min stayed `8.20%`. Policy margins `2` and `4` both fell to `7.81%` min.

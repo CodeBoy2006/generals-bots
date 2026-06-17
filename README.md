@@ -840,7 +840,7 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
   --model-path runs/adaptive-plan-q-action-q-v1/generals-adaptive-plan-q-action-q-v1.eqx
 ```
 
-Plan action labels use the standard adaptive action index, including the single global pass index. The action-Q loss aggregates duplicate plan slots onto their shared primitive action before applying ranking CE, then can be probed with `evaluate_adaptive_policy.py --strategy-q-rerank-scale <scale>`.
+Plan action labels use the standard adaptive action index, including the single global pass index. The action-Q loss aggregates duplicate plan slots onto their shared primitive action before applying ranking CE, then can be probed with `evaluate_adaptive_policy.py --strategy-q-rerank-scale <scale>`. A more conservative diagnostic is `--strategy-q-replace-threshold <q_advantage>`, which keeps the sampled/greedy policy action unless the best legal strategy-Q action clears a predicted advantage threshold; `--strategy-q-replace-policy-margin <logit_margin>` can additionally require policy support.
 
 `--plan-policy-weight` uses the same aggregated Plan-Q action target to update policy logits directly. Use it only with `--update-scope all` and a positive `--policy-kl-weight`; early probes showed it can damage seat balance even when KL anchored.
 
