@@ -4566,6 +4566,54 @@ Current trainer uses the binary `finish_within_250` head; the saved dataset
 already includes `finish_within_50/100/250` for a later multi-horizon finish
 head.
 
+### Midgame decisive trajectory imitation v0
+
+Collected GPU shards under ignored `runs/adaptive-strategy-midgame-decisive-v0/`:
+
+| source | shards | rows | known wins | draws | finish50 / 100 / 250 | median turn | notes |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| `unet-v4-expander-win` | 4 | 4059 | 4059 | 0 | `2180 / 3659 / 4059` | 236 | 8/12/16 active U-Net wins vs Expander |
+| `fixed-v5-expander-win` | 4 | 5432 | 5432 | 0 | `3379 / 5102 / 5432` | 134 | fixed v5 8x8 wins vs Expander |
+| `fixed-v5-vs-v5-draw` | 2 | 4853 | 0 | 4853 | `0 / 0 / 0` | 193 | draw-heavy contact states |
+| `unet-v4-vs-v5-win` | 8 | 3168 | 3168 | 0 | not separately aggregated | contact terminal window | active U-Net true wins vs fixed v5 |
+
+Training probes:
+
+| model | init | data | key settings | fixed-v5 max250 64-row | fixed-v5 max250 256-row | Expander smoke | verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `adaptive-midgame-decisive-imitation-v0` | `adaptive-strategy-spatial-v1` | first 3 dirs | KL `1`, CE `0.3`, finish/outcome/belief/intent | min `3.12%` | not run | Expander 64 min `71.88%` | inherited spatial bias, not useful |
+| `adaptive-midgame-decisive-imitation-v1` | `adaptive-unet-ppo-v4` | first 3 dirs | KL `2`, CE `0.2`, lr `2e-6` | min `15.62%` | min `10.16%` | Expander 64 min `71.88%` | 64-row false positive |
+| `adaptive-midgame-decisive-imitation-v2` | `adaptive-unet-ppo-v4` | all 4 dirs capped to 512 rows/shard | KL `2`, CE `0.3`, includes v5-win rows | min `14.06%` | min `12.11%` | Expander 64 min `70.31%` | weak positive vs same-seed base, not promotion |
+| `adaptive-midgame-decisive-imitation-v3` | `adaptive-unet-ppo-v4` | win-only dirs | KL `1`, CE `0.5`, no outcome | min `12.50%` | min `9.77%` | not run | finish head learned but gameplay regressed |
+| `adaptive-midgame-decisive-imitation-v2-cont` | v2 | all 4 dirs capped | continue lr `1e-6` | min `10.94%` | not run | not run | continuing v2 did not help |
+
+Same-seed active-base control for fixed-v5 max250 256-row:
+
+```text
+runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+seed 94600:
+  p0 25/95/136 = 9.77%
+  p1 24/97/135 = 9.38%
+  min 9.38%
+```
+
+Interpretation:
+
+```text
+Midgame decisive filtering works and gives dense, relevant contact/terminal rows.
+Adding true U-Net-vs-v5 win trajectories improves fixed-v5 256-row slightly over
+the same-seed active base, but the gain is too small and Expander 64-row drops.
+
+The current binary finish head is a bottleneck: mixed win/draw training keeps
+finish accuracy near the negative-class baseline for many epochs, while win-only
+training learns finish but does not improve gameplay. The next iteration should
+either add a multi-horizon finish head (50/100/250 BCE logits) or upweight/oversample
+true wins-vs-v5 before any more full-policy imitation.
+
+Do not promote v0-v3 or v2-cont. Best diagnostic artifact is v2, but only as a
+weak positive data-quality signal.
+```
+
 ## 2026-06-17 Frozen Strategy-Head Supervision v0
 
 Implemented `examples/_experimental/ppo/adaptive_strategy_supervised.py`, a first offline trainer for strategy heads on top of the validated U-Net imitation v3 base.

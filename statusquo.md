@@ -945,3 +945,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect A2 U-Net active-base midgame decisive shards on GPU, then run policy-coupled `adaptive_strategy_supervised.py` with KL anchor plus finish/outcome/belief/intent losses.
 - **Context:** CUDA smoke wrote an ignored shard under `runs/adaptive-strategy-filter-smoke/` using `teacher-kind expander` and `--min-save-turn 1`; models and future training artifacts remain under ignored `runs/`, not cache directories.
+
+## [2026-06-17 22:10] Midgame Decisive Imitation Probe
+- **Changes:** Collected ignored GPU trajectory shards under `runs/adaptive-strategy-midgame-decisive-v0/`, trained `adaptive-midgame-decisive-imitation-v0/v1/v2/v3/v2-cont`, and documented results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote these checkpoints. Add a real multi-horizon finish head or oversample true U-Net-vs-v5 winning trajectories before the next full-policy imitation run.
+- **Context:** Best diagnostic checkpoint was v2: fixed-v5 max250 256-row min `12.11%`, above same-seed active base `9.38%`, but Expander 64-row min was only `70.31%`. v1/v3 64-row positives did not survive 256-row fixed-v5 confirmation. All model artifacts are in ignored `runs/`, not cache directories.
