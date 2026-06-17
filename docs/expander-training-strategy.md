@@ -6794,3 +6794,45 @@ rows, train a separate decisive-plan scorer, or downsample low-gap draw-heavy
 states. Do not train the evaluator-facing scorer directly on unfiltered
 draw-heavy mixed rows.
 ```
+
+### High-gap Plan-Q save filter
+
+Added save-time filtering to `adaptive_plan_q_dataset.py`:
+
+```text
+--min-plan-gap <gap>
+--require-best-plan-win
+```
+
+The filter runs after each scored rollout is flattened and before the shard is
+written. It does not change plan scoring, behavior rollout, candidate
+generation, or model checkpoints. It only controls which rows are saved to the
+ignored `runs/` dataset shard.
+
+Metadata now records:
+
+```text
+min_plan_gap
+require_best_plan_win
+num_samples_before_filter
+num_samples_dropped
+```
+
+If a shard has no kept rows, the script prints a skipped-shard line and
+continues. This keeps high-threshold collection runs from writing empty NPZ
+files that later break validation splits.
+
+Recommended next collection probe:
+
+```text
+output: runs/adaptive-plan-q-model-worker-highgap-v0/
+candidate_source: model-worker
+candidate_target: model
+min_plan_gap: 0.25
+plan_worker_steps: 16
+plan_rollout_steps: 64
+warmup_steps: 190
+```
+
+Use `--require-best-plan-win` only for a smaller decisive-plan dataset or a
+positive-class Commander scorer; it will discard many rows.

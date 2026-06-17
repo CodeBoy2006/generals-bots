@@ -1116,6 +1116,32 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
     }
 
 
+def best_plan_outcomes_from_arrays(arrays: dict[str, np.ndarray], target_count: int) -> np.ndarray:
+    """Return the outcome label for each row's saved best source-target plan."""
+    outcomes = arrays["plan_outcomes"].reshape(arrays["plan_outcomes"].shape[0], -1)
+    best_flat = arrays["best_source_pos"].astype(np.int32) * target_count + arrays["best_target_pos"].astype(np.int32)
+    return outcomes[np.arange(outcomes.shape[0]), best_flat]
+
+
+def filter_plan_q_arrays(
+    arrays: dict[str, np.ndarray],
+    target_count: int,
+    min_plan_gap: float,
+    require_best_plan_win: bool,
+) -> tuple[dict[str, np.ndarray], int, int]:
+    """Filter rows before writing a shard while preserving aligned array axes."""
+    original_count = int(arrays["obs"].shape[0])
+    if min_plan_gap <= 0.0 and not require_best_plan_win:
+        return arrays, original_count, original_count
+    keep = np.ones((original_count,), dtype=np.bool_)
+    if min_plan_gap > 0.0:
+        keep &= arrays["plan_q_gap"].astype(np.float32) >= min_plan_gap
+    if require_best_plan_win:
+        keep &= best_plan_outcomes_from_arrays(arrays, target_count) == 2
+    filtered = {name: value[keep] for name, value in arrays.items()}
+    return filtered, original_count, int(np.sum(keep))
+
+
 def save_shard(path: Path, arrays: dict[str, np.ndarray], metadata: dict) -> None:
     """Write one compressed NPZ shard and sidecar metadata."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1178,6 +1204,8 @@ def parse_args():
     parser.add_argument("--output-dir", default="runs/adaptive-plan-q-dataset")
     parser.add_argument("--shard-prefix", default="plan-q")
     parser.add_argument("--logit-dtype", choices=("float32", "float16"), default="float16")
+    parser.add_argument("--min-plan-gap", type=float, default=0.0)
+    parser.add_argument("--require-best-plan-win", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -1225,6 +1253,8 @@ def parse_args():
         parser.error("--plan-worker-steps must be less than or equal to --plan-rollout-steps")
     if args.score_scale <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--score-scale and --score-temperature must be positive")
+    if args.min_plan_gap < 0.0:
+        parser.error("--min-plan-gap must be non-negative")
     if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
         parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.opponent_input_channels <= 0:
@@ -1267,6 +1297,11 @@ def main():
         print(f"Plan worker:   {args.plan_worker_steps} extra target-conditioned steps")
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} behavior steps before scoring")
+    if args.min_plan_gap > 0.0 or args.require_best_plan_win:
+        print(
+            "Save filter:   "
+            f"min_gap={args.min_plan_gap:g}, require_best_win={args.require_best_plan_win}"
+        )
     print(f"Output:        {args.output_dir}")
     if args.scoreboard_history:
         print("Score history: enabled")
@@ -1421,6 +1456,8 @@ def main():
         "fog_memory": args.fog_memory,
         "score_scale": args.score_scale,
         "score_temperature": args.score_temperature,
+        "min_plan_gap": args.min_plan_gap,
+        "require_best_plan_win": args.require_best_plan_win,
         "seed": args.seed,
     }
 
@@ -1478,15 +1515,31 @@ def main():
         )
         jax.block_until_ready(states_p0.armies)
         arrays = flatten_plan_q_data(rollout_data, learner_players, args.logit_dtype)
+        arrays, original_samples, kept_samples = filter_plan_q_arrays(
+            arrays,
+            args.target_count,
+            args.min_plan_gap,
+            args.require_best_plan_win,
+        )
+        if kept_samples == 0:
+            print(
+                f"Shard {shard_index:04d} skipped | samples=0/{original_samples} after save filter | "
+                f"time={time.time() - t0:.2f}s"
+            )
+            continue
         shard_path = output_dir / f"{args.shard_prefix}-{shard_index:05d}.npz"
-        metadata = dict(metadata_base, shard_index=shard_index, num_samples=int(arrays["obs"].shape[0]))
+        metadata = dict(
+            metadata_base,
+            shard_index=shard_index,
+            num_samples=int(arrays["obs"].shape[0]),
+            num_samples_before_filter=original_samples,
+            num_samples_dropped=original_samples - kept_samples,
+        )
         save_shard(shard_path, arrays, metadata)
 
-        best_outcomes = arrays["plan_outcomes"].reshape(arrays["plan_outcomes"].shape[0], -1)
-        best_flat = arrays["best_source_pos"].astype(np.int32) * args.target_count + arrays["best_target_pos"].astype(np.int32)
-        best_plan_outcomes = best_outcomes[np.arange(best_outcomes.shape[0]), best_flat]
+        best_plan_outcomes = best_plan_outcomes_from_arrays(arrays, args.target_count)
         print(
-            f"Shard {shard_index:04d} | samples={arrays['obs'].shape[0]} | "
+            f"Shard {shard_index:04d} | samples={arrays['obs'].shape[0]}/{original_samples} | "
             f"mean_gap={float(np.mean(arrays['plan_q_gap'])):.4f} | "
             f"best_q={float(np.mean(arrays['best_plan_q'])):.4f} | "
             f"best_win={float(np.mean(best_plan_outcomes == 2)):.3f} | "

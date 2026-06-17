@@ -903,3 +903,9 @@
 - **Status:** Completed
 - **Next Steps:** Use high-gap filtering or a decisive-plan curriculum for Commander scorer training; collect more high-gap model-worker rows before evaluator integration.
 - **Context:** v1 dataset had 2048 rows, overall best_win `10.1%`, draw `86.4%`; `gap>=0.25` kept 779 rows with win `26.4%`, `gap>=0.5` kept 374 with win `46.3%`. Full scorer v3 best val pair top1 `11.3%` vs additive `9.34%`; `min_gap=0.25` reached `16.8%`, `min_gap=0.5` reached `22.2%`.
+
+## [2026-06-17 21:16] High-Gap Plan-Q Collection Filter
+- **Changes:** Added save-time `--min-plan-gap` and `--require-best-plan-win` filters to `adaptive_plan_q_dataset.py`, with metadata for pre-filter sample count and dropped rows. Updated README, zh manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Collect a high-gap model-worker dataset under `runs/adaptive-plan-q-model-worker-highgap-v0/`, then retrain the explicit pair scorer on filtered rows instead of unfiltered draw-heavy shards.
+- **Context:** Filtering happens after scoring and before shard write, so it does not alter counterfactual plan labels. Empty filtered shards are skipped to avoid downstream validation split failures.
