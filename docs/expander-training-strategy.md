@@ -7310,3 +7310,130 @@ PPO configurations have too few decisive episodes and shift weak rows badly; the
 KL-anchored version still regressed at 64 rows. Keep the new teacher-loader
 support, but do not continue this path without either larger-memory microbatch
 work, richer rollout signal, or a better value/finish/search target.
+
+### High-gap search trajectory imitation
+
+Added search-score diagnostics to `adaptive_strategy_dataset.py --teacher-kind
+search`:
+
+```text
+search_candidate_indices
+search_prior_scores
+search_scores
+search_outcomes
+search_best_position
+search_best_score
+search_mean_score
+search_score_gap
+search_best_outcome
+```
+
+`search_score_gap` is now best score minus the second valid prior candidate.
+This matters because early pass-only states can include invalid top-k candidates
+with very negative prior logits; using the raw mean made those states look like
+fake high-gap examples. A CUDA smoke confirmed pass-only opening rows now have
+gap `0.0`.
+
+The collector also accepts:
+
+```text
+--min-search-score-gap
+--require-search-best-win
+--teacher-strategy-aux
+--teacher-strategy-spatial-aux
+--teacher-strategy-finish-outputs
+```
+
+Collected high-gap search decisive data from `adaptive-midgame-search-imitation-v1`
+against Expander:
+
+```text
+output: runs/adaptive-strategy-search-highgap-v1/
+teacher: adaptive-midgame-search-imitation-v1
+filters:
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+  win_or_finish250
+  terminal_window <= 120
+  search_score_gap >= 0.25
+budget:
+  32 envs
+  4 shards x 256 steps
+  top_k=4, rollout_steps=8, rollouts/action=1
+rows:
+  shard0 289 / 8192
+  shard1 682 / 8192
+  shard2 587 / 8192
+  shard3 736 / 8192
+  total 2294
+```
+
+The first single-shard diagnostic had healthy labels:
+
+```text
+all kept rows: outcome win
+finish_within_250: 100%
+finish_within_100: 98.0%
+search_best_outcome: 76 win / 130 draw
+gap median: 1.37
+gap p75: ~1012
+steps_to_terminal median: 23
+```
+
+This confirms the data filter is selecting real decisive midgame/terminal
+windows. However, direct main-policy trajectory imitation still produced a
+seat-specific regression.
+
+Training probes from `adaptive-midgame-search-imitation-v1`:
+
+```text
+v0:
+  data: highgap-v1 only
+  weights: KL=1.0, action CE=0.30, finish=0.50, outcome=0.40, belief=0.25, intent=0.20
+  lr=3e-6
+  Expander 64-row seed85280 min: 62.50%
+  weak row: 8p1 = 62.50%
+  same-seed v1 baseline min: 73.44%
+
+v1:
+  data: highgap-v1 only
+  weights: KL=4.0, action CE=0.08, same aux weights
+  lr=2e-6
+  Expander 64-row seed85280 min: 65.62%
+  weak row: 8p1 = 65.62%
+
+v2-balanced:
+  data: highgap-v1 only
+  balance: size-seat, 1230 rows
+  weights: KL=4.0, action CE=0.08
+  Expander 64-row seed85280 min: 64.06%
+  weak row: 8p1 = 64.06%
+
+v3-mixed:
+  data: v4-expander-balanced + highgap-v1
+  cap: 512 rows/shard
+  balance: size-seat, 1260 rows
+  weights: KL=4.0, action CE=0.08
+  lr=1e-6
+  Expander 64-row seed85280 min: 62.50%
+  weak row: 8p1 = 62.50%
+```
+
+Conclusion:
+
+```text
+High-gap search trajectory filtering is useful infrastructure.
+The current direct action-CE route is not promotion-worthy.
+Even balanced and mixed broad-anchor variants damage 8x8 p1.
+```
+
+The next use of these shards should move their signal away from primitive action
+CE and into value/finish/search-target supervision:
+
+```text
+1. train finish/outcome/belief heads or value targets from high-gap rows;
+2. use high-gap rows as weighted auxiliary replay, not as dominant action CE;
+3. if policy is updated, require per-row or per-stratum KL/behavior preservation
+   and confirm 8p1 before any 256-row promotion run.
+```

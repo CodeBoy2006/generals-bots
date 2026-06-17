@@ -613,7 +613,39 @@ uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 16 \
 
 For midgame decisive trajectory imitation, use save-time filters so the shard keeps contact-heavy, terminal-window, or gather/attack states instead of every opening move. `--min-save-turn`, `--max-save-turn`, `--require-contact`, `--min-visible-enemy-cells`, `--terminal-window`, `--require-win`, `--require-finish-within-250`, `--require-win-or-finish-within-250`, and `--draw-only` filter rows after rollout labels are computed and before the shard is written. Separate shards are preferred for separate windows, for example terminal-120 wins and draw-heavy contact states, then mix those shards in `adaptive_strategy_supervised.py`.
 
-`adaptive_strategy_dataset.py --teacher-kind search` uses an adaptive checkpoint as the policy prior, scores its top-k actions with short rollouts, and saves the best search action as the imitation action while still storing the prior logits for KL anchoring. It supports scoreboard-history and fog-memory U-Net checkpoints, so current 35-channel models can generate midgame decisive trajectory shards. Keep the search budget small for smoke runs, then raise `--search-top-k`, `--search-rollout-steps`, and `--search-rollouts-per-action` for production shards.
+`adaptive_strategy_dataset.py --teacher-kind search` uses an adaptive checkpoint as the policy prior, scores its top-k actions with short rollouts, and saves the best search action as the imitation action while still storing the prior logits for KL anchoring. It supports scoreboard-history and fog-memory U-Net checkpoints, so current 35-channel models can generate midgame decisive trajectory shards. Complex teacher checkpoints that include auxiliary heads can be loaded with `--teacher-strategy-aux`, `--teacher-strategy-spatial-aux`, and `--teacher-strategy-finish-outputs`. Keep the search budget small for smoke runs, then raise `--search-top-k`, `--search-rollout-steps`, and `--search-rollouts-per-action` for production shards.
+
+Search teacher shards also store `search_candidate_indices`, `search_scores`, `search_outcomes`, `search_best_outcome`, and `search_score_gap`. The gap is computed as best score minus the second valid prior candidate, so pass-only opening states do not get fake high-margin labels. Use `--min-search-score-gap` and optionally `--require-search-best-win` to keep only high-confidence search decisions:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 32 \
+  --grid-sizes 8,12,16 \
+  --teacher-kind search \
+  --teacher-model-path runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx \
+  --teacher-network-arch unet \
+  --teacher-channels 64,96,128,64 \
+  --teacher-input-channels 35 \
+  --teacher-scoreboard-history \
+  --teacher-value-heads per-size \
+  --teacher-value-head-sizes 8,12,16 \
+  --teacher-value-loss hl-gauss \
+  --teacher-outcome-head \
+  --teacher-strategy-aux \
+  --teacher-strategy-finish-outputs 3 \
+  --scoreboard-history \
+  --fog-memory \
+  --search-top-k 4 \
+  --search-rollout-steps 8 \
+  --search-rollouts-per-action 1 \
+  --min-save-turn 80 \
+  --require-contact \
+  --min-visible-enemy-cells 1 \
+  --require-win-or-finish-within-250 \
+  --terminal-window 120 \
+  --min-search-score-gap 0.25 \
+  --output-dir runs/adaptive-strategy-search-highgap-v1
+```
 
 `adaptive_strategy_supervised.py` consumes those shards and trains only the frozen-base strategy heads. The first stage intentionally leaves the policy/trunk logits unchanged while learning intent, finish-within-250, and enemy-general belief:
 
@@ -648,6 +680,8 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 For multi-horizon finishability, use `--finish-head-mode multi-horizon`. This expands the strategy finish head to three independent BCE logits for `finish_within_50`, `finish_within_100`, and `finish_within_250`; warm-start old binary-finish checkpoints with `--init-finish-head-mode binary`. Evaluation and PPO warm-starts that need to load such checkpoints should pass `--strategy-finish-outputs 3` or `--init-strategy-finish-outputs 3` respectively.
 
 Draw-heavy shards should not usually contribute action CE. `adaptive_strategy_supervised.py --action-ce-weight-mode non-draw` keeps policy KL, outcome, finish, belief, and intent losses on known draw samples, but removes those rows from action CE/QCE. `wins` is stricter and only applies action CE/QCE to known winning rows; `all` preserves the historical behavior.
+
+Use `adaptive_strategy_supervised.py --balance-strata size-seat` when a filtered shard is concentrated in a few grid-size or learner-seat rows. It downsamples to equal `(grid_size, seat)` counts before shuffling, which is useful for high-gap or terminal-window imitation probes where raw row counts can hide seat tradeoffs.
 
 This is a representation-learning step, not a gameplay promotion step. Use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head.
 

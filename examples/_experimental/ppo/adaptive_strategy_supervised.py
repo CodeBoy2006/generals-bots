@@ -30,6 +30,7 @@ OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
 ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins")
+BALANCE_STRATA_MODES = ("none", "size-seat")
 
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
@@ -73,6 +74,8 @@ def load_strategy_dataset(
         "teacher_logits": [],
         "teacher_action": [],
         "action_weight": [],
+        "grid_size": [],
+        "seat": [],
     }
     for path in paths:
         shard = np.load(path)
@@ -105,6 +108,8 @@ def load_strategy_dataset(
         chunks["target_heatmap"].append(shard["target_heatmap"][shard_indices].astype(np.float32))
         chunks["teacher_logits"].append(shard["teacher_logits"][shard_indices].astype(np.float32))
         chunks["teacher_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
+        chunks["grid_size"].append(shard["grid_size"][shard_indices].astype(np.int32))
+        chunks["seat"].append(shard["seat"][shard_indices].astype(np.int32))
         outcome = shard["outcome"][shard_indices].astype(np.int32)
         outcome_known = shard["outcome_known"][shard_indices].astype(np.float32) > 0.0
         if action_ce_weight_mode == "non-draw":
@@ -119,6 +124,32 @@ def load_strategy_dataset(
     if max_samples is not None:
         arrays = {name: value[:max_samples] for name, value in arrays.items()}
     return {name: jnp.asarray(value) for name, value in arrays.items()}
+
+
+def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: int) -> dict[str, jnp.ndarray]:
+    """Downsample strategy rows to equal task strata before JAX training."""
+    if mode == "none":
+        return dataset
+    if mode != "size-seat":
+        raise ValueError(f"unknown balance mode: {mode}")
+    grid_size = np.asarray(dataset["grid_size"])
+    seat = np.asarray(dataset["seat"])
+    rng = np.random.default_rng(seed)
+    groups: list[np.ndarray] = []
+    for size in sorted(np.unique(grid_size)):
+        for player in sorted(np.unique(seat)):
+            indices = np.flatnonzero((grid_size == size) & (seat == player))
+            if indices.size > 0:
+                groups.append(indices)
+    if not groups:
+        return dataset
+    target_count = min(group.size for group in groups)
+    selected = np.concatenate(
+        [np.sort(rng.choice(group, size=target_count, replace=False)) for group in groups],
+        axis=0,
+    )
+    rng.shuffle(selected)
+    return {name: value[selected] for name, value in dataset.items()}
 
 
 def mask_strategy_supervised_grads(grads, keep_outcome: bool):
@@ -413,6 +444,7 @@ def parse_args():
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-shard", type=int, default=None)
+    parser.add_argument("--balance-strata", choices=BALANCE_STRATA_MODES, default="none")
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
@@ -521,6 +553,7 @@ def main():
         args.finish_head_mode,
         args.action_ce_weight_mode,
     )
+    dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
     key = jrandom.PRNGKey(args.seed)
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
     init_value_bins = (
@@ -537,6 +570,8 @@ def main():
     print(f"Samples:       {dataset['obs'].shape[0]}")
     if args.max_samples_per_shard is not None:
         print(f"Shard cap:     {args.max_samples_per_shard}")
+    if args.balance_strata != "none":
+        print(f"Balance:       {args.balance_strata}")
     print(f"Network arch:  {args.network_arch}")
     print(f"Warm start:    {args.init_model_path}")
     print(f"Finish head:   {args.finish_head_mode} ({finish_outputs} logits)")

@@ -975,3 +975,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote PPO probes. Use the teacher-loader support for future KL-anchored experiments, but avoid direct small PPO from v1 until rollout signal or microbatching is improved.
 - **Context:** `48 env x 128 steps` with minibatch 256 ran but fell to Expander 256-row min `69.53%`; teacher-KL `0.1` to v1 loaded correctly but fell to 64-row min `67.19%`. Larger U-Net PPO configs hit GPU memory/compile pressure.
+
+## [2026-06-17 23:33] High-Gap Search Trajectory Probe
+- **Changes:** Added search top-k score/outcome fields and high-gap save filters to `adaptive_strategy_dataset.py`, added complex search-teacher aux flags, and added `adaptive_strategy_supervised.py --balance-strata size-seat`. Updated README, zh manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-midgame-highgap-imitation-v0/v1/v2-balanced/v3-mixed`. Use high-gap search rows for value/finish/outcome supervision or carefully weighted auxiliary replay, not dominant primitive action CE.
+- **Context:** CUDA high-gap search collection from `adaptive-midgame-search-imitation-v1` produced 2294 decisive rows under ignored `runs/adaptive-strategy-search-highgap-v1/`. Direct main-policy imitation regressed Expander 64-row min versus same-seed v1 baseline `73.44%`: v0 `62.50%`, v1 `65.62%`, v2-balanced `64.06%`, v3-mixed `62.50%`, all weak on 8x8 p1.

@@ -307,7 +307,7 @@ def collect_strategy_step(
             lambda _: empty_fog_memory,
             None,
         )
-        search_actions, _, _, search_scores, _ = jax.vmap(
+        search_actions, search_candidate_indices, search_prior_scores, search_scores, search_outcomes = jax.vmap(
             lambda state, size, action_key, previous_p0, previous_p1, previous_fog_p0, previous_fog_p1: adaptive_rollout_search_candidates(
                 teacher_network,
                 state,
@@ -342,8 +342,33 @@ def collect_strategy_step(
         )
         best_search_positions = jnp.argmax(search_scores, axis=-1)
         learner_actions = jnp.take_along_axis(search_actions, best_search_positions[:, None, None], axis=1)[:, 0]
+        search_best_scores = jnp.take_along_axis(search_scores, best_search_positions[:, None], axis=1)[:, 0]
+        valid_search_candidates = search_prior_scores > -1.0e8
+        finite_count = jnp.sum(valid_search_candidates.astype(jnp.float32), axis=-1)
+        finite_score_sum = jnp.sum(jnp.where(valid_search_candidates, search_scores, 0.0), axis=-1)
+        search_mean_scores = finite_score_sum / jnp.maximum(finite_count, 1.0)
+        candidate_positions = jnp.arange(search_top_k)[None, :]
+        second_scores = jnp.max(
+            jnp.where(
+                valid_search_candidates & (candidate_positions != best_search_positions[:, None]),
+                search_scores,
+                -jnp.inf,
+            ),
+            axis=-1,
+        )
+        search_score_gaps = jnp.where(finite_count > 1.0, search_best_scores - second_scores, 0.0)
+        search_best_outcomes = jnp.take_along_axis(search_outcomes, best_search_positions[:, None], axis=1)[:, 0]
     else:
         learner_actions = prior_actions
+        search_candidate_indices = jnp.zeros((num_envs, search_top_k), dtype=jnp.int32)
+        search_prior_scores = jnp.zeros((num_envs, search_top_k), dtype=jnp.float32)
+        search_scores = jnp.zeros((num_envs, search_top_k), dtype=jnp.float32)
+        search_outcomes = jnp.full((num_envs, search_top_k), -1, dtype=jnp.int32)
+        best_search_positions = jnp.zeros((num_envs,), dtype=jnp.int32)
+        search_best_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
+        search_mean_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
+        search_score_gaps = jnp.zeros((num_envs,), dtype=jnp.float32)
+        search_best_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
     teacher_indices = jax.vmap(lambda action: adaptive_action_to_index(action, pad_size))(learner_actions)
     prior_greedy_indices = jnp.argmax(teacher_logits, axis=-1).astype(jnp.int32)
     if teacher_kind_id == TEACHER_KIND_TO_ID["search"]:
@@ -409,6 +434,17 @@ def collect_strategy_step(
             teacher_logits,
             effective_sizes,
             labels,
+            (
+                search_candidate_indices,
+                search_prior_scores,
+                search_scores,
+                search_outcomes,
+                best_search_positions,
+                search_best_scores,
+                search_mean_scores,
+                search_score_gaps,
+                search_best_outcomes,
+            ),
             dones,
             infos,
         ),
@@ -627,6 +663,7 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         teacher_logits,
         effective_sizes,
         labels,
+        search_labels,
         dones,
         infos,
     ) = rollout_data
@@ -643,6 +680,17 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         visible_enemy_density,
         contact,
     ) = labels
+    (
+        search_candidate_indices,
+        search_prior_scores,
+        search_scores,
+        search_outcomes,
+        search_best_positions,
+        search_best_scores,
+        search_mean_scores,
+        search_score_gaps,
+        search_best_outcomes,
+    ) = search_labels
     outcome_targets, outcome_known = rollout_outcome_targets(infos.winner, dones, learner_players)
     steps_to_terminal = rollout_steps_to_next_done(dones)
     terminal_times = terminal_time_targets(infos.time, dones)
@@ -664,6 +712,9 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
     logits = flat(teacher_logits)
     if logit_dtype == "float16":
         logits = np.clip(logits, -1.0e4, 1.0e4).astype(np.float16)
+
+    def score16(array):
+        return np.clip(flat(array), -1.0e4, 1.0e4).astype(np.float16)
 
     return {
         "obs": flat(obs).astype(np.float16),
@@ -697,6 +748,15 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         "visible_enemy_count": flat(visible_enemy_count).astype(np.int16),
         "visible_enemy_density": flat(visible_enemy_density).astype(np.float16),
         "contact": flat(contact).astype(np.float16),
+        "search_candidate_indices": flat(search_candidate_indices).astype(np.int32),
+        "search_prior_scores": score16(search_prior_scores),
+        "search_scores": score16(search_scores),
+        "search_outcomes": flat(search_outcomes).astype(np.int8),
+        "search_best_position": flat(search_best_positions).astype(np.int8),
+        "search_best_score": score16(search_best_scores),
+        "search_mean_score": score16(search_mean_scores),
+        "search_score_gap": score16(search_score_gaps),
+        "search_best_outcome": flat(search_best_outcomes).astype(np.int8),
     }
 
 
@@ -714,6 +774,8 @@ def save_filter_config(args) -> dict[str, int | float | bool | None]:
         "require_win_or_finish_within_250": args.require_win_or_finish_within_250,
         "draw_only": args.draw_only,
         "terminal_window": args.terminal_window,
+        "min_search_score_gap": args.min_search_score_gap,
+        "require_search_best_win": args.require_search_best_win,
     }
 
 
@@ -742,6 +804,10 @@ def active_save_filters(args) -> list[str]:
         labels.append("draw_only")
     if args.terminal_window > 0:
         labels.append(f"terminal_window<={args.terminal_window}")
+    if args.min_search_score_gap > 0.0:
+        labels.append(f"search_gap>={args.min_search_score_gap:g}")
+    if args.require_search_best_win:
+        labels.append("search_best_win")
     return labels
 
 
@@ -791,6 +857,13 @@ def apply_save_filters(arrays: dict[str, np.ndarray], args) -> tuple[dict[str, n
             f"terminal_window<={args.terminal_window}",
             known & (arrays["steps_to_terminal"] <= args.terminal_window),
         )
+    if args.min_search_score_gap > 0.0:
+        add_filter(
+            f"search_gap>={args.min_search_score_gap:g}",
+            arrays["search_score_gap"].astype(np.float32) >= args.min_search_score_gap,
+        )
+    if args.require_search_best_win:
+        add_filter("search_best_win", arrays["search_best_outcome"] == OUTCOME_WIN)
 
     filtered = {name: value[keep] for name, value in arrays.items()}
     post_count = int(np.sum(keep))
@@ -832,6 +905,9 @@ def parse_args():
     parser.add_argument("--teacher-value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--teacher-value-bins", type=int, default=128)
     parser.add_argument("--teacher-outcome-head", action="store_true")
+    parser.add_argument("--teacher-strategy-aux", action="store_true")
+    parser.add_argument("--teacher-strategy-spatial-aux", action="store_true")
+    parser.add_argument("--teacher-strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--fixed-teacher-model-path", default=None)
     parser.add_argument("--fixed-teacher-channels", default=None)
     parser.add_argument("--fixed-teacher-input-channels", type=int, default=9)
@@ -873,6 +949,8 @@ def parse_args():
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
     parser.add_argument("--draw-only", action="store_true")
     parser.add_argument("--terminal-window", type=int, default=0)
+    parser.add_argument("--min-search-score-gap", type=float, default=0.0)
+    parser.add_argument("--require-search-best-win", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -919,6 +997,10 @@ def parse_args():
         parser.error("--search-terminal-score must be positive")
     if args.teacher_value_loss == "hl-gauss" and args.teacher_value_bins <= 1:
         parser.error("--teacher-value-bins must be greater than 1 for --teacher-value-loss hl-gauss")
+    if args.teacher_strategy_finish_outputs <= 0:
+        parser.error("--teacher-strategy-finish-outputs must be positive")
+    if args.teacher_strategy_spatial_aux and not args.teacher_strategy_aux:
+        parser.error("--teacher-strategy-spatial-aux requires --teacher-strategy-aux")
     if args.fixed_teacher_input_channels <= 0 or args.opponent_input_channels <= 0:
         parser.error("policy input channel counts must be positive")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
@@ -937,6 +1019,10 @@ def parse_args():
         parser.error("--min-visible-enemy-density must be in [0, 1]")
     if args.terminal_window < 0:
         parser.error("--terminal-window must be non-negative")
+    if args.min_search_score_gap < 0.0:
+        parser.error("--min-search-score-gap must be non-negative")
+    if (args.min_search_score_gap > 0.0 or args.require_search_best_win) and args.teacher_kind != "search":
+        parser.error("search score filters require --teacher-kind search")
     if args.draw_only and (args.require_win or args.require_finish_within_250 or args.require_win_or_finish_within_250):
         parser.error("--draw-only conflicts with win/finish save filters")
     return args
@@ -1002,6 +1088,12 @@ def main():
             init_value_bins=teacher_value_bins,
             outcome_head=args.teacher_outcome_head,
             init_outcome_head=args.teacher_outcome_head,
+            strategy_aux=args.teacher_strategy_aux,
+            init_strategy_aux=args.teacher_strategy_aux,
+            strategy_spatial_aux=args.teacher_strategy_spatial_aux,
+            init_strategy_spatial_aux=args.teacher_strategy_spatial_aux,
+            strategy_finish_outputs=args.teacher_strategy_finish_outputs,
+            init_strategy_finish_outputs=args.teacher_strategy_finish_outputs,
             global_context=teacher_global_context,
             init_global_context=teacher_global_context,
             network_arch=args.teacher_network_arch,
@@ -1063,6 +1155,17 @@ def main():
         "pad_to": args.pad_to,
         "teacher_kind": args.teacher_kind,
         "teacher_model_path": args.teacher_model_path,
+        "teacher_network_arch": args.teacher_network_arch,
+        "teacher_channels": args.teacher_channels,
+        "teacher_input_channels": teacher_input_channels,
+        "teacher_value_head_sizes": list(args.teacher_value_head_sizes)
+        if args.teacher_value_heads == "per-size"
+        else [],
+        "teacher_value_loss": args.teacher_value_loss,
+        "teacher_outcome_head": args.teacher_outcome_head,
+        "teacher_strategy_aux": args.teacher_strategy_aux,
+        "teacher_strategy_spatial_aux": args.teacher_strategy_spatial_aux,
+        "teacher_strategy_finish_outputs": args.teacher_strategy_finish_outputs,
         "fixed_teacher_model_path": args.fixed_teacher_model_path,
         "teacher_policy_mode": args.teacher_policy_mode,
         "opponent": args.opponent,
