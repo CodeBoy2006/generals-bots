@@ -615,3 +615,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not reuse raw Worker action logits as production bias. Next Worker branch should train explicit source/direction heads or a dedicated candidate-rerank head against fallback-success/search-Q labels.
 - **Context:** On seed 74820 with 64 games/row, rerank scale `0.00` matched fallback at `68.75%` min, scale `0.05` stayed `68.75%` but hurt 16x p1 and draw rate, and scale `0.10` dropped to `67.19%` min. The result rejects raw Worker-logit bias for promotion.
+
+## [2026-06-17 12:12] Strategy-Q Rerank Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-q-rerank-scale`, which centers legal strategy auxiliary Q predictions and applies them as a policy-logit bias for `--strategy-aux` checkpoints. Added a focused helper test and documented 64/256 games-per-row GPU probes.
+- **Status:** Completed
+- **Next Steps:** Do not promote raw strategy-Q rerank. If Q is pursued further, train/calibrate a dedicated candidate-ranking head with seat/size-balanced batches and inference-scaled targets.
+- **Context:** On v3 iter8, 64 games/row seed 74900 peaked at `67.19%` min with scale `0.02`, but 256 games/row seed 74920 showed only a tiny best improvement: scale `0.01` reached `67.97%` min versus `67.58%` at scale `0.00`, still far below the `71.29%` candidate. Q bias mostly moves weakness between 16p0/16p1 instead of solving it.

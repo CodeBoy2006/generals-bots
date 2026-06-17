@@ -1632,6 +1632,20 @@ def test_worker_rerank_logits_centers_legal_worker_bias_only_when_triggered():
     assert reranked[0, 2] < -1.0e8
 
 
+def test_strategy_q_rerank_logits_centers_legal_q_bias():
+    from examples._experimental.ppo.evaluate_adaptive_policy import strategy_q_rerank_logits
+
+    policy_logits = jnp.array([[1.0, 2.0, -1.0e9]], dtype=jnp.float32)
+    action_q_values = jnp.array([[0.0, 4.0, 100.0]], dtype=jnp.float32)
+
+    zero_scale = strategy_q_rerank_logits(policy_logits, action_q_values, scale=0.0)
+    reranked = strategy_q_rerank_logits(policy_logits, action_q_values, scale=0.5)
+
+    assert jnp.allclose(zero_scale, policy_logits)
+    assert jnp.allclose(reranked[0, :2], jnp.array([0.0, 3.0], dtype=jnp.float32))
+    assert reranked[0, 2] < -1.0e8
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess

@@ -70,8 +70,11 @@ class AdaptiveEvalRow:
 
 
 @eqx.filter_jit
-def _policy_action(network, obs_arr, mask, active, key, policy_mode):
+def _policy_action(network, obs_arr, mask, active, key, policy_mode, strategy_q_rerank_scale: float):
     logits, _ = network.logits_value(obs_arr, mask, active)
+    if strategy_q_rerank_scale > 0.0:
+        aux = network.strategy_auxiliary(obs_arr, mask, active)
+        logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
     index = jax.lax.cond(
         policy_mode == 0,
         lambda _: jnp.argmax(logits),
@@ -79,6 +82,19 @@ def _policy_action(network, obs_arr, mask, active, key, policy_mode):
         None,
     )
     return adaptive_index_to_action(index, network.pad_size)
+
+
+def strategy_q_rerank_logits(
+    policy_logits: jnp.ndarray,
+    action_q_values: jnp.ndarray,
+    scale: float,
+) -> jnp.ndarray:
+    """Use centered legal strategy-Q predictions as a bias on policy logits."""
+    legal = policy_logits > -1.0e8
+    legal_count = jnp.maximum(jnp.sum(legal, axis=-1, keepdims=True), 1)
+    legal_mean = jnp.sum(jnp.where(legal, action_q_values, 0.0), axis=-1, keepdims=True) / legal_count
+    q_bias = jnp.where(legal, action_q_values - legal_mean, 0.0)
+    return policy_logits + scale * q_bias
 
 
 def summarize_row(info, grid_size: int, policy_player: int, num_games: int) -> AdaptiveEvalRow:
@@ -110,6 +126,7 @@ def evaluate_batch(
     pad_size,
     global_context=False,
     scoreboard_history=False,
+    strategy_q_rerank_scale=0.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -162,7 +179,9 @@ def evaluate_batch(
 
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
-        policy_actions = jax.vmap(lambda o, m, a, k: _policy_action(network, o, m, a, k, policy_mode))(
+        policy_actions = jax.vmap(
+            lambda o, m, a, k: _policy_action(network, o, m, a, k, policy_mode, strategy_q_rerank_scale)
+        )(
             obs_arr,
             masks,
             active,
@@ -215,6 +234,7 @@ def parse_args():
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
+    parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -245,6 +265,10 @@ def parse_args():
             parser.error("--value-sigma must be positive")
     if args.require_win_rate is not None and not (0.0 <= args.require_win_rate <= 1.0):
         parser.error("--require-win-rate must be between 0 and 1")
+    if args.strategy_q_rerank_scale < 0.0:
+        parser.error("--strategy-q-rerank-scale must be non-negative")
+    if args.strategy_q_rerank_scale > 0.0 and not args.strategy_aux:
+        parser.error("--strategy-q-rerank-scale requires --strategy-aux")
     return args
 
 
@@ -309,6 +333,8 @@ def main():
         print("Outcome:    auxiliary head loaded")
     if args.strategy_aux:
         print("Strategy:   auxiliary heads loaded")
+    if args.strategy_q_rerank_scale > 0.0:
+        print(f"StratQ bias: scale={args.strategy_q_rerank_scale:g}")
     if network_global_context:
         print(f"Global ctx: {input_channels} input channels")
     if args.scoreboard_history:
@@ -343,6 +369,7 @@ def main():
                 args.pad_to,
                 network_global_context,
                 args.scoreboard_history,
+                args.strategy_q_rerank_scale,
             )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -370,6 +397,8 @@ def main():
         "max_steps": args.max_steps,
         "global_context": network_global_context,
         "scoreboard_history": args.scoreboard_history,
+        "strategy_aux": args.strategy_aux,
+        "strategy_q_rerank_scale": args.strategy_q_rerank_scale,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

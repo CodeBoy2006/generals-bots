@@ -2909,3 +2909,39 @@ seed:     74820
 | `0.10` | `67.19%` | 16x16 p0 | 12x16/16x16 draw damage increased |
 
 Conclusion: the split Worker is useful as a supervised representation probe but its raw action logits should not bias the production policy yet. The next Worker branch should either expose explicit source/direction heads and use them only to generate a small candidate set, or train a dedicated rerank head against fallback-success/search-Q labels instead of reusing the Worker action logits.
+
+## 2026-06-17 Strategy-Q Rerank Probe
+
+Added `evaluate_adaptive_policy.py --strategy-q-rerank-scale <x>` for checkpoints loaded with `--strategy-aux`. This uses the strategy auxiliary Q head at inference:
+
+```text
+combined_logits = policy_logits + scale * centered_legal_strategy_q
+```
+
+The probe targets the question left open by the strategy-aux runs: the policy logits from v3/v5 did not promote, but the search-Q head might still contain useful candidate-ranking signal.
+
+Tested checkpoint:
+
+```text
+runs/adaptive-strategy-aux-v3/ckpts/generals-adaptive-strategy-aux-v3-iter-000008.eqx
+template: --channels 32,32,32,16 --scoreboard-history --strategy-aux
+```
+
+64 games/row sweep on seed `74900`:
+
+| scale | min win rate | key rows |
+| ---: | ---: | --- |
+| `0.00` | `64.06%` | 16p0 `64.06%`, 16p1 `67.19%` |
+| `0.01` | `65.62%` | 16p0 improved to `76.56%`; 8p0 bottleneck `65.62%` |
+| `0.02` | `67.19%` | 8p0 `71.88%`, 16p0 `75.00%`, 16p1 bottleneck `67.19%` |
+| `0.03` | `60.94%` | over-bias hurts 16p0 |
+
+256 games/row same-seed triage on seed `74920`:
+
+| scale | min win rate | rows summary |
+| ---: | ---: | --- |
+| `0.00` | `67.58%` | 16p0 and 16p1 both `67.58%` |
+| `0.01` | `67.97%` | 16p0 `73.05%`, 16p1 `67.97%`; small positive but not promotion |
+| `0.02` | `67.19%` | 16p0 `72.27%`, 16p1 `67.19%`; seat tradeoff returns |
+
+Conclusion: strategy-Q inference bias is a useful diagnostic and mildly improves the best 256-row row balance at scale `0.01`, but it is nowhere near the existing `71.29%` promotion bar. The failure mode is again seat/size transfer: Q bias helps 16p0 finish/draw, then pushes weakness into 16p1 or 8p0. Next step should train/calibrate Q for inference directly, e.g. Q-rank loss on candidate set with seat/size-balanced batches, not merely reuse the high-noise auxiliary Q head.
