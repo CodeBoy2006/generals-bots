@@ -227,6 +227,7 @@ def parse_args():
     parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--context-residual", action="store_true")
+    parser.add_argument("--pyramid-context", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
@@ -313,6 +314,8 @@ def main():
         init_global_context=network_global_context,
         context_residual=args.context_residual,
         init_context_residual=args.context_residual,
+        pyramid_context=args.pyramid_context,
+        init_pyramid_context=args.pyramid_context,
     )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -340,6 +343,8 @@ def main():
         print(f"StratQ bias: scale={args.strategy_q_rerank_scale:g}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
+    if args.pyramid_context:
+        print("Pyramid ctx: U-Net branch")
     if network_global_context:
         print(f"Global ctx: {input_channels} input channels")
     if args.scoreboard_history:
@@ -403,6 +408,7 @@ def main():
         "global_context": network_global_context,
         "scoreboard_history": args.scoreboard_history,
         "context_residual": args.context_residual,
+        "pyramid_context": args.pyramid_context,
         "strategy_aux": args.strategy_aux,
         "strategy_q_rerank_scale": args.strategy_q_rerank_scale,
         "min_win_rate": min_win_rate,

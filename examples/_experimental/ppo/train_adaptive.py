@@ -135,10 +135,17 @@ def zero_inexact_tree(tree):
 def context_only_grad_tree(grads):
     """Keep gradients only for the optional residual context branch."""
     zeroed = zero_inexact_tree(grads)
-    return eqx.tree_at(
+    zeroed = eqx.tree_at(
         lambda net: (net.context_conv1, net.context_conv2),
         zeroed,
         (grads.context_conv1, grads.context_conv2),
+        is_leaf=lambda value: value is None,
+    )
+    return eqx.tree_at(
+        lambda net: (net.pyramid_down1, net.pyramid_down2, net.pyramid_up1, net.pyramid_up2),
+        zeroed,
+        (grads.pyramid_down1, grads.pyramid_down2, grads.pyramid_up1, grads.pyramid_up2),
+        is_leaf=lambda value: value is None,
     )
 
 
@@ -650,6 +657,8 @@ def parse_args():
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--context-residual", action="store_true")
     parser.add_argument("--init-context-residual", action="store_true")
+    parser.add_argument("--pyramid-context", action="store_true")
+    parser.add_argument("--init-pyramid-context", action="store_true")
     parser.add_argument("--context-only-update", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
@@ -737,8 +746,8 @@ def parse_args():
         parser.error("--init-value-bins requires --init-value-loss hl-gauss")
     if args.outcome_aux_weight < 0.0:
         parser.error("--outcome-aux-weight must be non-negative")
-    if args.context_only_update and not args.context_residual:
-        parser.error("--context-only-update requires --context-residual")
+    if args.context_only_update and not (args.context_residual or args.pyramid_context):
+        parser.error("--context-only-update requires --context-residual or --pyramid-context")
     if args.checkpoint_every < 0:
         parser.error("--checkpoint-every cannot be negative")
     if args.keep_checkpoints < 0:
@@ -788,12 +797,16 @@ def main():
             print("Warm global:   enabled")
         if args.init_context_residual:
             print("Warm context:  enabled")
+        if args.init_pyramid_context:
+            print("Warm pyramid:  enabled")
         if args.init_strategy_aux:
             print("Warm strategy: enabled")
     if args.context_residual:
         print("Context res:   5x5 zero-init residual branch")
+    if args.pyramid_context:
+        print("Pyramid ctx:   16->8->4 zero-init U-Net branch")
     if args.context_only_update:
-        print("Update scope:  context residual branch only")
+        print("Update scope:  context/pyramid branch only")
     network_global_context = args.global_context or args.scoreboard_history
     if network_global_context:
         print(f"Global ctx:    scoreboard channels ({ADAPTIVE_GLOBAL_INPUT_CHANNELS})")
@@ -860,6 +873,8 @@ def main():
         init_global_context=args.init_global_context,
         context_residual=args.context_residual,
         init_context_residual=args.init_context_residual,
+        pyramid_context=args.pyramid_context,
+        init_pyramid_context=args.init_pyramid_context,
     )
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))

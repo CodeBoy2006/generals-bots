@@ -323,6 +323,14 @@ def mask_context_strategy_aux_grads(grads):
         masked = eqx.tree_at(lambda net: net.context_conv1, masked, grads.context_conv1)
     if grads.context_conv2 is not None:
         masked = eqx.tree_at(lambda net: net.context_conv2, masked, grads.context_conv2)
+    if grads.pyramid_down1 is not None:
+        masked = eqx.tree_at(lambda net: net.pyramid_down1, masked, grads.pyramid_down1)
+    if grads.pyramid_down2 is not None:
+        masked = eqx.tree_at(lambda net: net.pyramid_down2, masked, grads.pyramid_down2)
+    if grads.pyramid_up1 is not None:
+        masked = eqx.tree_at(lambda net: net.pyramid_up1, masked, grads.pyramid_up1)
+    if grads.pyramid_up2 is not None:
+        masked = eqx.tree_at(lambda net: net.pyramid_up2, masked, grads.pyramid_up2)
     return masked
 
 
@@ -2021,6 +2029,8 @@ def parse_args():
     parser.add_argument("--init-global-context", action="store_true")
     parser.add_argument("--context-residual", action="store_true")
     parser.add_argument("--init-context-residual", action="store_true")
+    parser.add_argument("--pyramid-context", action="store_true")
+    parser.add_argument("--init-pyramid-context", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
@@ -2159,8 +2169,8 @@ def parse_args():
     if args.freeze_context_strategy_aux:
         if args.target_mode != "soft":
             parser.error("--freeze-context-strategy-aux requires --target-mode soft")
-        if not args.context_residual:
-            parser.error("--freeze-context-strategy-aux requires --context-residual")
+        if not (args.context_residual or args.pyramid_context):
+            parser.error("--freeze-context-strategy-aux requires --context-residual or --pyramid-context")
         if args.freeze_strategy_aux_only:
             parser.error("--freeze-context-strategy-aux cannot be combined with --freeze-strategy-aux-only")
         if not (
@@ -2233,8 +2243,12 @@ def main():
         print("Warm global:   enabled")
     if args.init_context_residual:
         print("Warm context:  enabled")
+    if args.init_pyramid_context:
+        print("Warm pyramid:  enabled")
     if args.context_residual:
         print("Context res:   5x5 zero-init residual branch")
+    if args.pyramid_context:
+        print("Pyramid ctx:   16->8->4 zero-init U-Net branch")
     if args.scoreboard_history:
         print("Score history: enabled")
     elif network_global_context:
@@ -2306,6 +2320,8 @@ def main():
         init_global_context=args.init_global_context,
         context_residual=args.context_residual,
         init_context_residual=args.init_context_residual,
+        pyramid_context=args.pyramid_context,
+        init_pyramid_context=args.init_pyramid_context,
     )
     base_network = load_or_create_adaptive_network(
         base_key,

@@ -107,6 +107,10 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     strategy_enemy_general_conv: eqx.nn.Conv2d | None
     context_conv1: eqx.nn.Conv2d | None
     context_conv2: eqx.nn.Conv2d | None
+    pyramid_down1: eqx.nn.Conv2d | None
+    pyramid_down2: eqx.nn.Conv2d | None
+    pyramid_up1: eqx.nn.Conv2d | None
+    pyramid_up2: eqx.nn.Conv2d | None
     global_linear1: eqx.nn.Linear | None
     global_linear2: eqx.nn.Linear | None
     size_value_linear1: tuple[eqx.nn.Linear, ...]
@@ -122,6 +126,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     strategy_aux: bool = eqx.field(static=True)
     global_context: bool = eqx.field(static=True)
     context_residual: bool = eqx.field(static=True)
+    pyramid_context: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -138,6 +143,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         strategy_aux: bool = False,
         global_context: bool = False,
         context_residual: bool = False,
+        pyramid_context: bool = False,
     ):
         if global_context and input_channels == ADAPTIVE_INPUT_CHANNELS:
             input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
@@ -148,6 +154,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         strategy_keys = 5 if strategy_aux else 0
         global_keys = 2 if global_context else 0
         context_keys = 2 if context_residual else 0
+        pyramid_keys = 4 if pyramid_context else 0
         keys = jrandom.split(
             key,
             8
@@ -156,7 +163,8 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             + outcome_keys
             + global_keys
             + strategy_keys
-            + context_keys,
+            + context_keys
+            + pyramid_keys,
         )
         self.pad_size = pad_size
         self.value_head_sizes = parsed_value_head_sizes
@@ -168,6 +176,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.strategy_aux = bool(strategy_aux)
         self.global_context = bool(global_context)
         self.context_residual = bool(context_residual)
+        self.pyramid_context = bool(pyramid_context)
         self.conv1 = eqx.nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1, key=keys[0])
         self.conv2 = eqx.nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1, key=keys[1])
         self.conv3 = eqx.nn.Conv2d(channels[1], channels[2], kernel_size=3, padding=1, key=keys[2])
@@ -245,6 +254,40 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         else:
             self.context_conv1 = None
             self.context_conv2 = None
+        pyramid_offset = context_offset + context_keys
+        if pyramid_context:
+            self.pyramid_down1 = eqx.nn.Conv2d(channels[3], channels[3], kernel_size=3, padding=1, key=keys[pyramid_offset])
+            self.pyramid_down2 = eqx.nn.Conv2d(
+                channels[3],
+                channels[3],
+                kernel_size=3,
+                padding=1,
+                key=keys[pyramid_offset + 1],
+            )
+            self.pyramid_up1 = eqx.nn.Conv2d(
+                channels[3],
+                channels[3],
+                kernel_size=3,
+                padding=1,
+                key=keys[pyramid_offset + 2],
+            )
+            pyramid_up2 = eqx.nn.Conv2d(
+                channels[3],
+                channels[3],
+                kernel_size=3,
+                padding=1,
+                key=keys[pyramid_offset + 3],
+            )
+            self.pyramid_up2 = eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                pyramid_up2,
+                (jnp.zeros_like(pyramid_up2.weight), jnp.zeros_like(pyramid_up2.bias)),
+            )
+        else:
+            self.pyramid_down1 = None
+            self.pyramid_down2 = None
+            self.pyramid_up1 = None
+            self.pyramid_up2 = None
 
     def _features(self, obs: jnp.ndarray) -> jnp.ndarray:
         x = jax.nn.relu(self.conv1(obs))
@@ -253,9 +296,41 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         x = jax.nn.relu(self.conv4(x))
         if self.context_conv1 is not None and self.context_conv2 is not None:
             x = x + self.context_conv2(jax.nn.relu(self.context_conv1(x)))
+        if (
+            self.pyramid_down1 is not None
+            and self.pyramid_down2 is not None
+            and self.pyramid_up1 is not None
+            and self.pyramid_up2 is not None
+        ):
+            x = x + self._pyramid_context_features(x)
         if self.global_context:
             x = x + self._global_context_vector(obs)[:, None, None]
         return x
+
+    def _avg_pool2x(self, x: jnp.ndarray) -> jnp.ndarray:
+        pooled = jax.lax.reduce_window(
+            x,
+            0.0,
+            jax.lax.add,
+            window_dimensions=(1, 2, 2),
+            window_strides=(1, 2, 2),
+            padding="VALID",
+        )
+        return pooled * 0.25
+
+    def _resize_nearest(self, x: jnp.ndarray, height: int, width: int) -> jnp.ndarray:
+        src_height = x.shape[1]
+        src_width = x.shape[2]
+        row_idx = jnp.floor(jnp.arange(height, dtype=jnp.float32) * (src_height / height)).astype(jnp.int32)
+        col_idx = jnp.floor(jnp.arange(width, dtype=jnp.float32) * (src_width / width)).astype(jnp.int32)
+        return x[:, row_idx, :][:, :, col_idx]
+
+    def _pyramid_context_features(self, x: jnp.ndarray) -> jnp.ndarray:
+        p1 = jax.nn.relu(self.pyramid_down1(self._avg_pool2x(x)))
+        p2 = jax.nn.relu(self.pyramid_down2(self._avg_pool2x(p1)))
+        p1 = p1 + self._resize_nearest(p2, p1.shape[1], p1.shape[2])
+        up = jax.nn.relu(self.pyramid_up1(self._resize_nearest(p1, x.shape[1], x.shape[2])))
+        return self.pyramid_up2(up)
 
     def _global_context_vector(self, obs: jnp.ndarray) -> jnp.ndarray:
         if self.global_linear1 is None or self.global_linear2 is None:
@@ -443,6 +518,8 @@ def load_or_create_adaptive_network(
     init_global_context: bool | None = None,
     context_residual: bool = False,
     init_context_residual: bool | None = None,
+    pyramid_context: bool = False,
+    init_pyramid_context: bool | None = None,
 ) -> AdaptivePolicyValueNetwork:
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
     parsed_channels = parse_policy_channels(channels)
@@ -462,6 +539,7 @@ def load_or_create_adaptive_network(
         strategy_aux=strategy_aux,
         global_context=global_context,
         context_residual=context_residual,
+        pyramid_context=pyramid_context,
     )
     if init_model_path is None:
         return network
@@ -491,6 +569,7 @@ def load_or_create_adaptive_network(
     parsed_init_context_residual = (
         context_residual if init_context_residual is None else bool(init_context_residual)
     )
+    parsed_init_pyramid_context = pyramid_context if init_pyramid_context is None else bool(init_pyramid_context)
     needs_expansion = (
         parsed_init_channels != parsed_channels
         or parsed_init_input_channels != input_channels
@@ -503,6 +582,7 @@ def load_or_create_adaptive_network(
         or parsed_init_strategy_aux != strategy_aux
         or parsed_init_global_context != global_context
         or parsed_init_context_residual != context_residual
+        or parsed_init_pyramid_context != pyramid_context
     )
     if needs_expansion:
         source_network = AdaptivePolicyValueNetwork(
@@ -519,6 +599,7 @@ def load_or_create_adaptive_network(
             strategy_aux=parsed_init_strategy_aux,
             global_context=parsed_init_global_context,
             context_residual=parsed_init_context_residual,
+            pyramid_context=parsed_init_pyramid_context,
         )
         source_network = eqx.tree_deserialise_leaves(path, source_network)
         return expand_adaptive_network_channels(network, source_network)
@@ -749,6 +830,30 @@ def expand_adaptive_network_channels(
             lambda net: net.context_conv2,
             target,
             _copy_conv_prefix(target.context_conv2, source.context_conv2),
+        )
+    if target.pyramid_down1 is not None and source.pyramid_down1 is not None:
+        target = eqx.tree_at(
+            lambda net: net.pyramid_down1,
+            target,
+            _copy_conv_prefix(target.pyramid_down1, source.pyramid_down1),
+        )
+    if target.pyramid_down2 is not None and source.pyramid_down2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.pyramid_down2,
+            target,
+            _copy_conv_prefix(target.pyramid_down2, source.pyramid_down2),
+        )
+    if target.pyramid_up1 is not None and source.pyramid_up1 is not None:
+        target = eqx.tree_at(
+            lambda net: net.pyramid_up1,
+            target,
+            _copy_conv_prefix(target.pyramid_up1, source.pyramid_up1),
+        )
+    if target.pyramid_up2 is not None and source.pyramid_up2 is not None:
+        target = eqx.tree_at(
+            lambda net: net.pyramid_up2,
+            target,
+            _copy_conv_prefix(target.pyramid_up2, source.pyramid_up2),
         )
     if (
         target.global_linear1 is not None

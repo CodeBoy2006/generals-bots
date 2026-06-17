@@ -687,3 +687,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote these checkpoints. The next architecture branch should be an actual U-Net/Transformer torso or richer memory/belief-map input, since the small residual context branch still leaves 16x draw/finish bottlenecks.
 - **Context:** Context aux v1 reduced intent loss from `10.25` to `4.98` and belief loss from `20.25` to `8.38` with KL only `0.017`, but direct 64-row eval was only `65.62%` min versus base `64.06%`. Aux->PPO improved a weak 64-row seed from base `60.94%` to `64.06%`, still far below the promotion platform.
+
+## [2026-06-17 13:46] Pyramid Context Torso Probe
+- **Changes:** Added optional zero-output U-Net-style pyramid branch (`--pyramid-context`, `--init-pyramid-context`) to adaptive training/evaluation/distillation, extended context-only update and context+strategy-aux freezing to include pyramid fields, and documented GPU probes under `runs/adaptive-pyramid-context-only-v1/`, `runs/adaptive-pyramid-context-joint-v2/`, and `runs/adaptive-pyramid-aux-v1/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote pyramid add-on checkpoints. Move to a trunk replacement or explicit memory/belief input channels; the add-on branches repair some weak seeds but still shift bottlenecks.
+- **Context:** Pyramid-only looked good at 64 games/row (`73.44%` vs same-seed base `67.19%`) but failed 256-row confirmation (`64.84%` vs base `67.97%`). Low-LR joint pyramid repaired weak seeds only (`67.19%` vs base `62.50%` on one 64-row seed), and pyramid aux direct matched base at `64.06%` min.

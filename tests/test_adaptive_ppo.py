@@ -545,6 +545,41 @@ def test_load_or_create_adaptive_network_adds_zero_context_residual_without_chan
     assert jnp.allclose(loaded.context_conv2.bias, 0.0)
 
 
+def test_load_or_create_adaptive_network_adds_zero_pyramid_context_without_changing_outputs(tmp_path):
+    import equinox as eqx
+
+    from examples._experimental.ppo.adaptive_common import adaptive_obs_to_array, compute_adaptive_valid_move_mask
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork, load_or_create_adaptive_network
+
+    channels = (16, 16, 16, 8)
+    source = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=channels)
+    model_path = tmp_path / "adaptive-source.eqx"
+    eqx.tree_serialise_leaves(model_path, source)
+
+    state = make_padded_state(size=4, pad_to=6)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=6)
+    mask = compute_adaptive_valid_move_mask(state.armies, obs.owned_cells, obs.mountains, effective_size=4, pad_size=6)
+
+    expected_logits, expected_value = source.logits_value(obs_arr, mask, active)
+    loaded = load_or_create_adaptive_network(
+        jrandom.PRNGKey(1),
+        pad_size=6,
+        init_model_path=model_path,
+        channels=channels,
+        init_channels=channels,
+        pyramid_context=True,
+        init_pyramid_context=False,
+    )
+    actual_logits, actual_value = loaded.logits_value(obs_arr, mask, active)
+
+    assert jnp.allclose(actual_logits, expected_logits, atol=1e-5)
+    assert jnp.allclose(actual_value, expected_value, atol=1e-5)
+    assert loaded.pyramid_context
+    assert jnp.allclose(loaded.pyramid_up2.weight, 0.0)
+    assert jnp.allclose(loaded.pyramid_up2.bias, 0.0)
+
+
 def test_load_or_create_adaptive_network_warm_starts_global_context_from_legacy_input(tmp_path):
     import equinox as eqx
 
@@ -1067,6 +1102,47 @@ def test_context_strategy_aux_grad_mask_preserves_context_and_aux_only():
     assert jnp.allclose(masked.context_conv1.weight, grads.context_conv1.weight)
     assert jnp.allclose(masked.strategy_intent_linear2.weight, grads.strategy_intent_linear2.weight)
     assert jnp.allclose(masked.strategy_enemy_general_conv.weight, grads.strategy_enemy_general_conv.weight)
+
+
+def test_train_adaptive_context_only_grad_mask_supports_pyramid_without_residual():
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.train_adaptive import context_only_grad_tree
+
+    grads = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        pyramid_context=True,
+    )
+
+    masked = context_only_grad_tree(grads)
+
+    assert masked.context_conv1 is None
+    assert jnp.allclose(masked.conv4.weight, 0.0)
+    assert jnp.allclose(masked.policy_conv.weight, 0.0)
+    assert jnp.allclose(masked.pyramid_down1.weight, grads.pyramid_down1.weight)
+    assert jnp.allclose(masked.pyramid_up2.weight, grads.pyramid_up2.weight)
+
+
+def test_context_strategy_aux_grad_mask_preserves_pyramid_and_aux_only():
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import mask_context_strategy_aux_grads
+
+    grads = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        strategy_aux=True,
+        pyramid_context=True,
+    )
+
+    masked = mask_context_strategy_aux_grads(grads)
+
+    assert masked.context_conv1 is None
+    assert jnp.allclose(masked.conv4.weight, 0.0)
+    assert jnp.allclose(masked.policy_conv.weight, 0.0)
+    assert jnp.allclose(masked.pyramid_down1.weight, grads.pyramid_down1.weight)
+    assert jnp.allclose(masked.strategy_finish_linear2.weight, grads.strategy_finish_linear2.weight)
 
 
 def test_adaptive_soft_loss_can_add_extra_improvement_term():

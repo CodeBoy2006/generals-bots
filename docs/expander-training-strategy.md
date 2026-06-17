@@ -3445,3 +3445,113 @@ rollout: 128 envs x 256 steps x 20 iters
 | same-seed base | `60.94%` | 16p1 |
 
 Conclusion: supervised context pretraining works mechanically and improves auxiliary losses, but it still does not solve 16x draw/finish. It can patch some weak seeds, yet the promoted policy remains below the current adaptive platform. The next high-value architecture step should be a real U-Net/Transformer torso or an explicit belief-map input/memory stack, not further 5x5 context-branch PPO.
+
+## 2026-06-17 Pyramid Context Torso Probe
+
+Implemented a stronger U-Net-style optional torso branch:
+
+```text
+train_adaptive.py --pyramid-context
+train_adaptive.py --init-pyramid-context
+evaluate_adaptive_policy.py --pyramid-context
+adaptive_search_distill.py --pyramid-context
+adaptive_search_distill.py --init-pyramid-context
+```
+
+The branch operates after the existing four-layer adaptive CNN trunk:
+
+```text
+16x16 trunk features
+  -> avg pool 8x8 -> 3x3 conv
+  -> avg pool 4x4 -> 3x3 conv
+  -> nearest upsample + skip
+  -> nearest upsample 16x16
+  -> zero-output 3x3 conv
+  -> residual add to trunk features
+```
+
+Like the 5x5 context branch, its final conv is zero-initialized so legacy checkpoint behavior is preserved at load time. `--context-only-update` now also supports this pyramid branch.
+
+### Pyramid-only PPO v1
+
+Run:
+
+```text
+runs/adaptive-pyramid-context-only-v1/
+base: composite-balanced history checkpoint
+rollout: 128 envs x 256 steps x 20 iters
+update scope: pyramid branch only
+lr=1e-4
+```
+
+64 games/row on seed `78080` initially looked strong:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| pyramid-only final | `73.44%` | 8p1/16p1 |
+| same-seed base | `67.19%` | 16p1 |
+
+But 256 games/row confirmation on seed `78100` rejected promotion:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| pyramid-only final | `64.84%` | 16p1 |
+| same-seed base | `67.97%` | 16p1 |
+
+### Low-LR joint pyramid v2
+
+Run:
+
+```text
+runs/adaptive-pyramid-context-joint-v2/
+same base and rollout
+all trainable weights updated
+lr=1e-5
+```
+
+64 games/row on seed `78280`:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| joint pyramid final | `67.19%` | 16p1 |
+| same-seed base | `62.50%` | 16p1 |
+
+Retained-checkpoint sweep on seed `78300`:
+
+| checkpoint | min win rate |
+| --- | ---: |
+| iter5 | `62.50%` |
+| iter10 | `62.50%` |
+| iter15 | `62.50%` |
+| iter20/final | `67.19%` |
+| same-seed base | `60.94%` |
+
+This repairs weak seeds but remains far below the existing adaptive platform.
+
+### Pyramid auxiliary v1
+
+Run:
+
+```text
+runs/adaptive-pyramid-aux-v1/
+student: pyramid_context + strategy_aux
+freeze: pyramid + strategy heads only
+loss: KL + intent 0.05 + finish 0.05 + belief 0.02
+```
+
+Auxiliary optimization worked with very small KL:
+
+```text
+iter 1:  KL 0.00000, Intent 5.67, Belief 0.058
+iter 10: KL 0.00157, Intent 4.95, Belief 0.057
+iter 20: KL 0.00206, Intent 3.63, Belief 0.056
+```
+
+64 games/row on seed `78480`:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| pyramid aux direct | `64.06%` | 8p0 |
+| same-seed base | `64.06%` | 8p0 |
+
+Conclusion: the pyramid/U-Net-style branch is implemented and trainable, but current PPO and weak-label aux objectives still mostly shift bottlenecks. It can repair some weak seeds but does not produce a promotion candidate. This is stronger evidence that the next architecture step should not be another zero-init add-on branch; it should either replace the trunk with a real U-Net/Transformer policy backbone, or add explicit memory/belief input channels so the policy head receives strategic state rather than relying on weak auxiliary losses to bend a small CNN.
