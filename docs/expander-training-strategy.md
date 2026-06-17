@@ -3069,4 +3069,24 @@ A follow-up diagnostic increased candidate search to `rollout_steps=16` with pur
 
 The r16 training log showed outcome rank signal only intermittently (`StratRank 0.6351` at iter5, `0.0000` again by iter10/final), so longer short-rollout search did not reliably solve the sparse terminal-outcome label problem.
 
-Conclusion: replacement-outcome Q targets are now available, but these aux-only calibrations are not promotion-worthy. The important engineering result is that pure outcome labels are too sparse under short candidate rollouts, and using them directly as inference bias damages 16x rows. A future attempt must either use online validation, full policy-action replacement episodes, or a dedicated rerank head trained on accepted policy replacements rather than raw candidate rollout labels. Do not use the current outcome-Q checkpoints as inference bias.
+Candidate `rollout_steps=64` finally created stable terminal-outcome rank signal:
+
+| run | iterations | final StratQ | final StratRank | note |
+| --- | ---: | ---: | ---: | --- |
+| outcome-r64 v1 | 8 | `82.4372` | `6.6519` | confirms outcome diversity appears at 64 search steps |
+| outcome-r64 v2 | 64 | `64.4716` | `4.2998` | Q MSE improves, rank remains high |
+| outcome-r64 v3 | 128 | `36.3317` | `2.9618` | Q MSE improves further, rank still noisy |
+
+Rerank triage:
+
+| run | games/row | seed | scale | min win rate | note |
+| --- | ---: | ---: | ---: | ---: | --- |
+| outcome-r64 v2 | 64 | 76580 | `0.000` | `56.25%` | weak policy-preservation seed |
+| outcome-r64 v2 | 64 | 76580 | `0.002` | `65.62%` | same-seed improvement, still below gate |
+| outcome-r64 v2 | 64 | 76580 | `0.005` | `62.50%` | over-bias |
+| outcome-r64 v3 | 64 | 76680 | `0.000` | `65.62%` | policy-preservation check |
+| outcome-r64 v3 | 64 | 76680 | `0.001` | `70.31%` | promising 64-row triage only |
+| outcome-r64 v3 | 64 | 76680 | `0.002` | `67.19%` | over-bias begins |
+| outcome-r64 v3 | 256 | 76720 | `0.001` | `66.80%` | failed promotion check; 16p1 bottleneck |
+
+Conclusion: replacement-outcome Q targets are now available, and `rollout_steps=64` is the first setting that produces real candidate outcome diversity. However, direct Q-as-logit-bias still fails 256-row validation and remains below the current `71.29%` platform. Do not promote the current outcome-Q checkpoints. If this route continues, it should stop treating the auxiliary Q head as a raw inference bias and instead train a dedicated accepted-replacement rerank head or online policy-improvement gate.

@@ -645,3 +645,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop outcome-Q rerank calibration from short candidate rollouts; prefer online validation, full policy-action replacement episodes, or a dedicated accepted-replacement rerank dataset.
 - **Context:** Outcome rank signal appeared only intermittently (`StratRank 0.6351` at iter5 but `0.0000` at iter10/final). 64 games/row max750 eval scored `62.50%` min at rerank scale `0.00` and `59.38%` at `0.005`, so longer candidate rollout did not produce a usable inference bias.
+
+## [2026-06-17 12:46] Strategy-Q Outcome R64 Diagnostic
+- **Changes:** Ran and documented `rollout_steps=64` outcome-Q calibration under `runs/adaptive-strategy-q-outcome-r64-v1/`, `v2/`, and `v3/`, including 64-row scale sweeps and a 256-row confirmation.
+- **Status:** Completed
+- **Next Steps:** Do not promote raw outcome-Q rerank. Use the r64 result only as evidence that long candidate rollouts can create outcome diversity; the next version should train a dedicated accepted-replacement rerank head or online gate.
+- **Context:** r64 produced stable outcome rank signal and reduced StratQ from roughly `82` to `36`, but inference did not validate. Best 64-row scale was `0.001` at `70.31%` min; 256-row confirmation fell to `66.80%` with 16p1 bottlenecked.
