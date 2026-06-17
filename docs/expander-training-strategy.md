@@ -3742,3 +3742,93 @@ This also resolves the prior uncertainty: trunk replacement should not start fro
 2. add belief/finish/intent/search-value heads
 3. sparse PPO or search-to-strategy fine-tune from the imitated U-Net
 ```
+
+## 2026-06-17 Adaptive U-Net 2048 Confirmation and PPO v4
+
+### Imitation v3 2048-row confirmation
+
+After v3 cleared the 512 games/row gate, it received a same-seed 2048 games/row confirmation against the legacy adaptive CNN.
+
+2048 games/row on seed `78860`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| base CNN | `74.66%` | `72.85%` | `79.69%` | `81.69%` | `70.65%` | `71.34%` | `70.65%` |
+| U-Net imitation v3 | `75.29%` | `73.68%` | `81.45%` | `82.71%` | `76.51%` | `76.76%` | `73.68%` |
+
+Large-map draw rates:
+
+```text
+base 16p0/16p1 draw: 18.36% / 19.04%
+v3   16p0/16p1 draw: 14.45% / 14.36%
+```
+
+Conclusion: v3 is a real replacement candidate, not a short-eval false positive. It improves the 2048-row min by `+3.03 pp` and materially reduces 16x draw rate.
+
+### Sparse PPO v4 from v3
+
+Run:
+
+```text
+runs/adaptive-unet-ppo-v4/
+init: runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx
+rollout: 128 envs x 256 steps x 20 iters
+update: 1 epoch, minibatch 1024
+reward: terminal only, terminal_reward_scale=1.0
+optimizer: lr=1e-5
+top_advantage_fraction=0.25
+sizes: 8:1,12:1,16:2
+```
+
+Training stayed stable:
+
+```text
+iter 1:  Loss 2.2066, Episodes 48, Wins 37, Draws 0
+iter 10: Loss 2.1813, Episodes 93, Wins 70, Draws 8
+iter 20: Loss 2.1520, Episodes 94, Wins 78, Draws 4
+```
+
+256 games/row on seed `78900`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net v3 | `66.02%` | `75.39%` | `80.86%` | `84.38%` | `76.95%` | `77.73%` | `66.02%` |
+| U-Net PPO v4 | `71.48%` | `76.95%` | `89.06%` | `82.81%` | `78.12%` | `75.78%` | `71.48%` |
+
+512 games/row on seed `78920`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net v3 | `69.14%` | `74.22%` | `82.23%` | `79.88%` | `75.00%` | `76.56%` | `69.14%` |
+| U-Net PPO v4 | `72.27%` | `74.02%` | `80.66%` | `80.47%` | `76.17%` | `79.30%` | `72.27%` |
+
+2048 games/row on seed `78940`:
+
+| model | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| U-Net v3 | `72.66%` | `74.80%` | `81.40%` | `80.86%` | `77.88%` | `77.25%` | `72.66%` |
+| U-Net PPO v4 | `73.05%` | `74.51%` | `82.18%` | `82.32%` | `79.64%` | `78.66%` | `73.05%` |
+
+Large-map draw rates at 2048 games/row:
+
+```text
+v3 16p0/16p1 draw: 14.06% / 14.60%
+v4 16p0/16p1 draw: 12.16% / 12.89%
+```
+
+Conclusion: v4 is a modest but verified improvement over v3 at the 2048-row gate. It raises min win rate by `+0.39 pp` and improves 12x/16x, especially draw reduction, without creating a new severe weak row. The 8p1 row regresses slightly (`74.80% -> 74.51%`), so the gain is not large enough to stop exploring, but v4 is now the stronger U-Net base.
+
+Recommended next branch:
+
+```text
+init: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+goal: recover/boost 8p1 while preserving 16x draw reduction
+options:
+  1. short mixed PPO with weights 8:2,12:1,16:2 and lr <= 5e-6
+  2. search-to-strategy auxiliary on v4, no raw Q rerank
+  3. add belief/finish heads trained from full state, then PPO
+gate:
+  256-row smoke
+  512-row promotion candidate
+  2048-row final evidence
+```

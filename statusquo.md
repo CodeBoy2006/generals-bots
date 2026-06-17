@@ -705,3 +705,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat `runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx` as the current U-Net promotion candidate. Next run should fine-tune this checkpoint with sparse PPO/search-to-strategy auxiliary and then require 2048 games/row before replacing the legacy CNN base.
 - **Context:** Sampled-action imitation v2 stayed weak (`59.38%` 64-row min). Greedy-action imitation v3 passed promotion-candidate gates: 256-row min `72.66%` vs same-seed base `69.92%`, and 512-row min `75.00%` vs base `70.12%`. Large-map draw rates improved versus base: `16p0/16p1` draw `15.04%/16.21%` vs `18.36%/18.55%`.
+
+## [2026-06-17 15:01] Adaptive U-Net PPO v4
+- **Changes:** Ran 2048-row final evidence for imitation v3 against the legacy adaptive CNN, then ran a low-LR sparse terminal PPO fine-tune from v3 under `runs/adaptive-unet-ppo-v4/`. Documented 256/512/2048 games-per-row results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Treat `runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx` as the current stronger U-Net base. Next iteration should target the slight 8p1 regression while preserving the 16x draw reduction.
+- **Context:** v3 2048-row min was `73.68%` vs legacy base `70.65%`, confirming U-Net replacement quality. PPO v4 then beat v3 at 2048-row min `73.05%` vs `72.66%`, with 16x draw reduced from v3 `14.06%/14.60%` to v4 `12.16%/12.89%`.
