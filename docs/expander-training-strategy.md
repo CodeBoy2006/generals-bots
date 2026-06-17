@@ -3060,4 +3060,13 @@ Training signal:
 | outcome-score v1 | `0.005` | `67.19%` | small bias still hurts min row |
 | outcome-score v1 | `0.01` | `65.62%` | 16x p1 becomes bottleneck |
 
-Conclusion: replacement-outcome Q targets are now available, but this short aux-only calibration is not promotion-worthy. The important engineering result is that pure outcome labels are too sparse under `rollout_steps=4`; a future attempt must either use longer search rollouts to create real terminal outcome diversity, train an online-validated rerank head, or generate labels from full policy-action replacement episodes instead of short candidate rollouts. Do not use the current outcome-Q checkpoints as inference bias.
+A follow-up diagnostic increased candidate search to `rollout_steps=16` with pure outcome targets:
+
+| run | rollout steps | rerank scale | min win rate | key note |
+| --- | ---: | ---: | ---: | --- |
+| outcome-r16 v1 | 16 | `0.00` | `62.50%` | policy seed had weak 16x draw rows |
+| outcome-r16 v1 | 16 | `0.005` | `59.38%` | small Q bias still hurts min row |
+
+The r16 training log showed outcome rank signal only intermittently (`StratRank 0.6351` at iter5, `0.0000` again by iter10/final), so longer short-rollout search did not reliably solve the sparse terminal-outcome label problem.
+
+Conclusion: replacement-outcome Q targets are now available, but these aux-only calibrations are not promotion-worthy. The important engineering result is that pure outcome labels are too sparse under short candidate rollouts, and using them directly as inference bias damages 16x rows. A future attempt must either use online validation, full policy-action replacement episodes, or a dedicated rerank head trained on accepted policy replacements rather than raw candidate rollout labels. Do not use the current outcome-Q checkpoints as inference bias.

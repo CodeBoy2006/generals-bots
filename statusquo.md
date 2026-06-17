@@ -639,3 +639,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the outcome-Q checkpoints. If Q rerank is revisited, use longer rollouts or policy-action replacement episodes so terminal outcome labels are less sparse.
 - **Context:** Pure outcome target produced `StratRank 0.0000` because short candidate rollouts usually tied as draw/unfinished. `outcome-score` created rank signal but rerank still hurt: 64 games/row max750 min fell from `68.75%` at scale `0.00` to `67.19%` at `0.005` and `65.62%` at `0.01`.
+
+## [2026-06-17 12:38] Strategy-Q Outcome R16 Diagnostic
+- **Changes:** Ran and documented a longer candidate-search diagnostic with `--rollout-steps 16` and pure outcome Q/rank targets under `runs/adaptive-strategy-q-outcome-r16-v1/`.
+- **Status:** Completed
+- **Next Steps:** Stop outcome-Q rerank calibration from short candidate rollouts; prefer online validation, full policy-action replacement episodes, or a dedicated accepted-replacement rerank dataset.
+- **Context:** Outcome rank signal appeared only intermittently (`StratRank 0.6351` at iter5 but `0.0000` at iter10/final). 64 games/row max750 eval scored `62.50%` min at rerank scale `0.00` and `59.38%` at `0.005`, so longer candidate rollout did not produce a usable inference bias.
