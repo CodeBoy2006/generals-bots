@@ -7166,3 +7166,40 @@ val:   pair@1 18.0%, pair@2 23.8%, pair@4 33.5%, source 30.7%, target 38.3%, cor
 This is not strong enough for direct evaluator integration, but it is better
 than a pure argmax read suggests. A future Commander probe should treat the
 scorer as a top-k shortlist, not as a single-plan selector.
+
+### Search teacher strategy shards
+
+`adaptive_strategy_dataset.py` now supports `--teacher-kind search` for adaptive
+checkpoints. The collector keeps the adaptive policy logits as the KL teacher,
+but executes the best top-k action under short rollout search as the saved
+teacher action. This is intended for midgame decisive trajectory imitation:
+instead of training a separate Plan-Q scorer/gate stack, generate contact-heavy
+winning windows from a stronger search-controlled policy and train the U-Net
+main policy with KL plus finish/outcome/belief/intent losses.
+
+The search path is compatible with current 35-channel U-Net checkpoints
+(`scoreboard-history + fog-memory`). A GPU smoke shard succeeded with:
+
+```text
+teacher: adaptive-unet-ppo-v4
+input: 35 channels, scoreboard history, fog memory
+search: top_k=2, rollout_steps=2, rollouts_per_action=1
+output: runs/adaptive-strategy-search-smoke/search-smoke-00000.npz
+samples: 4/4
+device: cuda:0
+```
+
+Next data run should collect terminal-window decisive rows, not full raw
+episodes:
+
+```text
+filters:
+  min_save_turn >= 80
+  require_contact
+  min_visible_enemy_cells >= 1
+  require_win_or_finish_within_250
+  terminal_window <= 120
+```
+
+Start with U-Net v4 + rollout-search against Expander and fixed v5 on 8x8; keep
+draw-heavy contact shards separate for anti-draw supervision.

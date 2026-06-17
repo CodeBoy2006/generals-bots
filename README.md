@@ -613,6 +613,8 @@ uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 16 \
 
 For midgame decisive trajectory imitation, use save-time filters so the shard keeps contact-heavy, terminal-window, or gather/attack states instead of every opening move. `--min-save-turn`, `--max-save-turn`, `--require-contact`, `--min-visible-enemy-cells`, `--terminal-window`, `--require-win`, `--require-finish-within-250`, `--require-win-or-finish-within-250`, and `--draw-only` filter rows after rollout labels are computed and before the shard is written. Separate shards are preferred for separate windows, for example terminal-120 wins and draw-heavy contact states, then mix those shards in `adaptive_strategy_supervised.py`.
 
+`adaptive_strategy_dataset.py --teacher-kind search` uses an adaptive checkpoint as the policy prior, scores its top-k actions with short rollouts, and saves the best search action as the imitation action while still storing the prior logits for KL anchoring. It supports scoreboard-history and fog-memory U-Net checkpoints, so current 35-channel models can generate midgame decisive trajectory shards. Keep the search budget small for smoke runs, then raise `--search-top-k`, `--search-rollout-steps`, and `--search-rollouts-per-action` for production shards.
+
 `adaptive_strategy_supervised.py` consumes those shards and trains only the frozen-base strategy heads. The first stage intentionally leaves the policy/trunk logits unchanged while learning intent, finish-within-250, and enemy-general belief:
 
 ```bash

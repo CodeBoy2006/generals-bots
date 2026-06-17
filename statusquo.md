@@ -957,3 +957,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v4/v5. Next data should be rollout-search winning trajectories or accepted Plan-Q oracle executions, because vanilla sampled winning windows are not enough.
 - **Context:** Old 2-logit U-Net checkpoints can warm-start into a 3-logit finish head. v4 multi-horizon mixed data learned finish labels (`69.9%`) but fixed-v5 max250 256-row fell to `8.98%`; v5 true-v5-win-only learned finish labels (`79.6%`) but fixed-v5 64-row min was `7.81%`.
+
+## [2026-06-17 22:28] Search Teacher Strategy Shards
+- **Changes:** Added `adaptive_strategy_dataset.py --teacher-kind search`, search budget CLI flags, and fog-memory support in adaptive rollout-search helpers so 35-channel U-Net checkpoints can emit rollout-search teacher actions while preserving prior logits for KL.
+- **Status:** Completed
+- **Next Steps:** Collect midgame decisive shards with `min_save_turn>=80`, contact, win/finish, and terminal-window filters; start with U-Net v4 search trajectories against Expander and fixed v5.
+- **Context:** CUDA smoke wrote `runs/adaptive-strategy-search-smoke/search-smoke-00000.npz` with `adaptive-unet-ppo-v4`, scoreboard history, fog memory, `top_k=2`, `rollout_steps=2`, and `rollouts_per_action=1`.

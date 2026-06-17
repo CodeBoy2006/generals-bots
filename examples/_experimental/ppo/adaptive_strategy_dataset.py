@@ -41,6 +41,7 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
+from adaptive_search_distill import adaptive_rollout_search_candidates
 from adaptive_strategy_aux import weak_intent_label
 from adaptive_teacher_imitation import (
     fixed_policy_teacher_logits,
@@ -60,7 +61,7 @@ from train_adaptive import (
     teacher_obs_from_student_obs,
 )
 
-TEACHER_KINDS = ("adaptive", "fixed", "expander")
+TEACHER_KINDS = ("adaptive", "fixed", "expander", "search")
 TEACHER_KIND_TO_ID = {name: index for index, name in enumerate(TEACHER_KINDS)}
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
 
@@ -135,7 +136,7 @@ def teacher_logits_for_batch(
     pad_size: int,
 ):
     """Return adaptive-space logits for one teacher kind."""
-    if teacher_kind_id == TEACHER_KIND_TO_ID["adaptive"]:
+    if teacher_kind_id in (TEACHER_KIND_TO_ID["adaptive"], TEACHER_KIND_TO_ID["search"]):
         teacher_obs_arr = jax.vmap(lambda obs: teacher_obs_from_student_obs(obs, teacher_input_channels))(obs_arr)
         return jax.vmap(lambda obs, mask, active_mask: teacher_network.logits_value(obs, mask, active_mask)[0])(
             teacher_obs_arr,
@@ -180,6 +181,13 @@ def collect_strategy_step(
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
+    search_top_k: int = 4,
+    search_rollout_steps: int = 16,
+    search_rollouts_per_action: int = 2,
+    search_army_weight: float = 12.0,
+    search_land_weight: float = 8.0,
+    search_prior_weight: float = 0.01,
+    search_terminal_score: float = 1000.0,
 ):
     """Collect one vectorized strategy-dataset step with privileged labels."""
     num_envs = states.armies.shape[0]
@@ -263,16 +271,85 @@ def collect_strategy_step(
         fixed_teacher_grid_size,
         pad_size,
     )
-    key, teacher_key, opponent_key = jrandom.split(key, 3)
+    key, teacher_key, search_key, opponent_key = jrandom.split(key, 4)
     teacher_keys = jrandom.split(teacher_key, num_envs)
-    learner_actions = jax.vmap(
+    prior_actions = jax.vmap(
         lambda logits, sample_key: policy_action_from_logits(logits, sample_key, teacher_policy_mode_id, pad_size)
     )(
         teacher_logits,
         teacher_keys,
     )
+    if teacher_kind_id == TEACHER_KIND_TO_ID["search"]:
+        search_keys = jrandom.split(search_key, num_envs)
+        empty_previous = empty_scoreboard_history(num_envs)
+        search_previous_p0 = jax.lax.cond(
+            learner_player == 0,
+            lambda _: scoreboard_history,
+            lambda _: empty_previous,
+            None,
+        )
+        search_previous_p1 = jax.lax.cond(
+            learner_player == 1,
+            lambda _: scoreboard_history,
+            lambda _: empty_previous,
+            None,
+        )
+        empty_fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
+        search_previous_fog_p0 = jax.lax.cond(
+            learner_player == 0,
+            lambda _: fog_memory,
+            lambda _: empty_fog_memory,
+            None,
+        )
+        search_previous_fog_p1 = jax.lax.cond(
+            learner_player == 1,
+            lambda _: fog_memory,
+            lambda _: empty_fog_memory,
+            None,
+        )
+        search_actions, _, _, search_scores, _ = jax.vmap(
+            lambda state, size, action_key, previous_p0, previous_p1, previous_fog_p0, previous_fog_p1: adaptive_rollout_search_candidates(
+                teacher_network,
+                state,
+                size,
+                action_key,
+                learner_player,
+                search_top_k,
+                search_rollout_steps,
+                search_rollouts_per_action,
+                teacher_policy_mode_id,
+                search_army_weight,
+                search_land_weight,
+                search_prior_weight,
+                search_terminal_score,
+                pad_size,
+                global_context=global_context,
+                scoreboard_history_enabled=scoreboard_history_enabled,
+                previous_scoreboard_p0=previous_p0,
+                previous_scoreboard_p1=previous_p1,
+                fog_memory_enabled=fog_memory_enabled,
+                previous_fog_memory_p0=previous_fog_p0,
+                previous_fog_memory_p1=previous_fog_p1,
+            )
+        )(
+            states,
+            effective_sizes,
+            search_keys,
+            search_previous_p0,
+            search_previous_p1,
+            search_previous_fog_p0,
+            search_previous_fog_p1,
+        )
+        best_search_positions = jnp.argmax(search_scores, axis=-1)
+        learner_actions = jnp.take_along_axis(search_actions, best_search_positions[:, None, None], axis=1)[:, 0]
+    else:
+        learner_actions = prior_actions
     teacher_indices = jax.vmap(lambda action: adaptive_action_to_index(action, pad_size))(learner_actions)
-    teacher_greedy_indices = jnp.argmax(teacher_logits, axis=-1).astype(jnp.int32)
+    prior_greedy_indices = jnp.argmax(teacher_logits, axis=-1).astype(jnp.int32)
+    if teacher_kind_id == TEACHER_KIND_TO_ID["search"]:
+        teacher_greedy_indices = teacher_indices
+    else:
+        teacher_greedy_indices = prior_greedy_indices
 
     labels = jax.vmap(lambda state, obs, size: full_state_strategy_labels(state, obs, learner_player, size, pad_size))(
         states,
@@ -363,6 +440,13 @@ def collect_strategy_rollout(
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
+    search_top_k: int = 4,
+    search_rollout_steps: int = 16,
+    search_rollouts_per_action: int = 2,
+    search_army_weight: float = 12.0,
+    search_land_weight: float = 8.0,
+    search_prior_weight: float = 0.01,
+    search_terminal_score: float = 1000.0,
 ):
     """Collect a rollout for one learner seat."""
     step_data = []
@@ -390,6 +474,13 @@ def collect_strategy_rollout(
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
+            search_top_k,
+            search_rollout_steps,
+            search_rollouts_per_action,
+            search_army_weight,
+            search_land_weight,
+            search_prior_weight,
+            search_terminal_score,
         )
         step_data.append(data)
     return states, effective_sizes, scoreboard_history, fog_memory, jax.tree.map(lambda *xs: jnp.stack(xs), *step_data), key
@@ -422,6 +513,13 @@ def collect_mixed_strategy_rollout(
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
+    search_top_k: int = 4,
+    search_rollout_steps: int = 16,
+    search_rollouts_per_action: int = 2,
+    search_army_weight: float = 12.0,
+    search_land_weight: float = 8.0,
+    search_prior_weight: float = 0.01,
+    search_terminal_score: float = 1000.0,
 ):
     """Collect and concatenate p0 and p1 strategy data."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -449,6 +547,13 @@ def collect_mixed_strategy_rollout(
         opponent_policy_network,
         opponent_policy_mode,
         opponent_policy_grid_size,
+        search_top_k,
+        search_rollout_steps,
+        search_rollouts_per_action,
+        search_army_weight,
+        search_land_weight,
+        search_prior_weight,
+        search_terminal_score,
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_strategy_rollout(
         states_p1,
@@ -474,6 +579,13 @@ def collect_mixed_strategy_rollout(
         opponent_policy_network,
         opponent_policy_mode,
         opponent_policy_grid_size,
+        search_top_k,
+        search_rollout_steps,
+        search_rollouts_per_action,
+        search_army_weight,
+        search_land_weight,
+        search_prior_weight,
+        search_terminal_score,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
@@ -724,6 +836,13 @@ def parse_args():
     parser.add_argument("--fixed-teacher-channels", default=None)
     parser.add_argument("--fixed-teacher-input-channels", type=int, default=9)
     parser.add_argument("--teacher-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--search-top-k", type=int, default=4)
+    parser.add_argument("--search-rollout-steps", type=int, default=16)
+    parser.add_argument("--search-rollouts-per-action", type=int, default=2)
+    parser.add_argument("--search-army-weight", type=float, default=12.0)
+    parser.add_argument("--search-land-weight", type=float, default=8.0)
+    parser.add_argument("--search-prior-weight", type=float, default=0.01)
+    parser.add_argument("--search-terminal-score", type=float, default=1000.0)
     parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--fog-memory", action="store_true")
@@ -780,8 +899,8 @@ def parse_args():
         parser.error("--num-steps and --num-shards must be positive")
     if args.truncation <= 0:
         parser.error("--truncation must be positive")
-    if args.teacher_kind == "adaptive" and args.teacher_model_path is None:
-        parser.error("--teacher-kind adaptive requires --teacher-model-path")
+    if args.teacher_kind in ("adaptive", "search") and args.teacher_model_path is None:
+        parser.error("--teacher-kind adaptive/search requires --teacher-model-path")
     if args.teacher_kind == "fixed" and args.fixed_teacher_model_path is None:
         parser.error("--teacher-kind fixed requires --fixed-teacher-model-path")
     if args.teacher_kind == "fixed" and len(args.grid_sizes) != 1:
@@ -790,6 +909,14 @@ def parse_args():
         parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.teacher_input_channels is not None and args.teacher_input_channels <= 0:
         parser.error("--teacher-input-channels must be positive")
+    if args.search_top_k <= 0:
+        parser.error("--search-top-k must be positive")
+    if args.search_rollout_steps <= 0 or args.search_rollouts_per_action <= 0:
+        parser.error("--search-rollout-steps and --search-rollouts-per-action must be positive")
+    if args.search_army_weight < 0.0 or args.search_land_weight < 0.0:
+        parser.error("--search-army-weight and --search-land-weight must be non-negative")
+    if args.search_terminal_score <= 0.0:
+        parser.error("--search-terminal-score must be positive")
     if args.teacher_value_loss == "hl-gauss" and args.teacher_value_bins <= 1:
         parser.error("--teacher-value-bins must be greater than 1 for --teacher-value-loss hl-gauss")
     if args.fixed_teacher_input_channels <= 0 or args.opponent_input_channels <= 0:
@@ -833,6 +960,12 @@ def main():
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Teacher:       {args.teacher_kind}")
     print(f"Teacher mode:  {args.teacher_policy_mode}")
+    if args.teacher_kind == "search":
+        print(
+            "Search:       "
+            f"top_k={args.search_top_k}, rollout_steps={args.search_rollout_steps}, "
+            f"rollouts/action={args.search_rollouts_per_action}"
+        )
     print(f"Rollouts:      {args.num_shards} shards x {args.num_steps} steps")
     print(f"Output:        {args.output_dir}")
     if args.scoreboard_history:
@@ -849,7 +982,7 @@ def main():
     teacher_network = None
     fixed_teacher_network = None
     teacher_input_channels = ADAPTIVE_INPUT_CHANNELS
-    if args.teacher_kind == "adaptive":
+    if args.teacher_kind in ("adaptive", "search"):
         teacher_input_channels = (
             args.teacher_input_channels
             if args.teacher_input_channels is not None
@@ -935,6 +1068,13 @@ def main():
         "opponent": args.opponent,
         "opponent_policy_path": args.opponent_policy_path,
         "opponent_policy_mode": args.opponent_policy_mode,
+        "search_top_k": args.search_top_k,
+        "search_rollout_steps": args.search_rollout_steps,
+        "search_rollouts_per_action": args.search_rollouts_per_action,
+        "search_army_weight": args.search_army_weight,
+        "search_land_weight": args.search_land_weight,
+        "search_prior_weight": args.search_prior_weight,
+        "search_terminal_score": args.search_terminal_score,
         "num_envs": args.num_envs,
         "num_steps": args.num_steps,
         "truncation": args.truncation,
@@ -986,6 +1126,13 @@ def main():
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
+            args.search_top_k,
+            args.search_rollout_steps,
+            args.search_rollouts_per_action,
+            args.search_army_weight,
+            args.search_land_weight,
+            args.search_prior_weight,
+            args.search_terminal_score,
         )
         jax.block_until_ready(states_p0)
         arrays = flatten_rollout_data(rollout_data, learner_players, args.logit_dtype)

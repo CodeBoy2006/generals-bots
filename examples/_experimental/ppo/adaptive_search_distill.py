@@ -31,16 +31,20 @@ from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS,
+    AdaptiveFogMemory,
     adaptive_index_to_action,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    empty_adaptive_fog_memory,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
     parse_grid_sizes,
+    reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
 from adaptive_strategy_aux import strategy_aux_targets
@@ -696,6 +700,7 @@ def adaptive_policy_action(
     pad_size: int,
     global_context: bool = False,
     scoreboard_history: jnp.ndarray | None = None,
+    fog_memory: AdaptiveFogMemory | None = None,
 ):
     """Dispatch an adaptive checkpoint action using greedy or sampled execution."""
     obs_arr, active = adaptive_obs_to_array(
@@ -704,6 +709,7 @@ def adaptive_policy_action(
         pad_size,
         include_global_context=global_context,
         scoreboard_history=scoreboard_history,
+        fog_memory=fog_memory,
     )
     mask = compute_adaptive_valid_move_mask(
         obs.armies,
@@ -729,6 +735,7 @@ def adaptive_obs_to_array_with_context(
     global_context: bool,
     scoreboard_history_enabled: bool,
     previous_scoreboard: jnp.ndarray,
+    fog_memory: AdaptiveFogMemory | None = None,
 ):
     """Convert an observation with optional global or scoreboard-history context."""
     history_context = None
@@ -741,6 +748,7 @@ def adaptive_obs_to_array_with_context(
         pad_size,
         include_global_context=global_context,
         scoreboard_history=history_context,
+        fog_memory=fog_memory,
     )
 
 
@@ -754,6 +762,7 @@ def adaptive_policy_action_with_context(
     global_context: bool,
     scoreboard_history_enabled: bool,
     previous_scoreboard: jnp.ndarray,
+    fog_memory: AdaptiveFogMemory | None = None,
 ):
     """Dispatch an adaptive action while constructing optional scoreboard-history context."""
     history_context = None
@@ -769,6 +778,7 @@ def adaptive_policy_action_with_context(
         pad_size,
         global_context=global_context,
         scoreboard_history=history_context,
+        fog_memory=fog_memory,
     )
 
 
@@ -792,18 +802,34 @@ def adaptive_rollout_search_candidates(
     scoreboard_history_enabled=False,
     previous_scoreboard_p0=None,
     previous_scoreboard_p1=None,
+    fog_memory_enabled=False,
+    previous_fog_memory_p0=None,
+    previous_fog_memory_p1=None,
 ):
     """Return adaptive top-k prior candidates and short rollout-search scores."""
     if previous_scoreboard_p0 is None:
         previous_scoreboard_p0 = jnp.zeros((ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,), dtype=jnp.float32)
     if previous_scoreboard_p1 is None:
         previous_scoreboard_p1 = jnp.zeros((ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,), dtype=jnp.float32)
+    if previous_fog_memory_p0 is None:
+        previous_fog_memory_p0 = jax.tree.map(lambda value: value[0], empty_adaptive_fog_memory(1, pad_size))
+    if previous_fog_memory_p1 is None:
+        previous_fog_memory_p1 = jax.tree.map(lambda value: value[0], empty_adaptive_fog_memory(1, pad_size))
     obs = game.get_observation(state, player)
     player_previous_scoreboard = jax.lax.cond(
         player == 0,
         lambda _: previous_scoreboard_p0,
         lambda _: previous_scoreboard_p1,
         None,
+    )
+    player_previous_fog_memory = jax.lax.cond(
+        player == 0,
+        lambda _: previous_fog_memory_p0,
+        lambda _: previous_fog_memory_p1,
+        None,
+    )
+    player_fog_memory = (
+        update_adaptive_fog_memory(player_previous_fog_memory, obs) if fog_memory_enabled else None
     )
     player_history_context = None
     if scoreboard_history_enabled:
@@ -815,6 +841,7 @@ def adaptive_rollout_search_candidates(
         pad_size,
         include_global_context=global_context,
         scoreboard_history=player_history_context,
+        fog_memory=player_fog_memory,
     )
     mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
     logits, _ = network.logits_value(obs_arr, mask, active)
@@ -825,6 +852,20 @@ def adaptive_rollout_search_candidates(
     opponent_obs = game.get_observation(state, opponent_player)
     current_scoreboard_p0 = adaptive_scoreboard_features(game.get_observation(state, 0), effective_size)
     current_scoreboard_p1 = adaptive_scoreboard_features(game.get_observation(state, 1), effective_size)
+    root_obs_p0 = game.get_observation(state, 0)
+    root_obs_p1 = game.get_observation(state, 1)
+    current_fog_memory_p0 = (
+        update_adaptive_fog_memory(previous_fog_memory_p0, root_obs_p0) if fog_memory_enabled else previous_fog_memory_p0
+    )
+    current_fog_memory_p1 = (
+        update_adaptive_fog_memory(previous_fog_memory_p1, root_obs_p1) if fog_memory_enabled else previous_fog_memory_p1
+    )
+    opponent_fog_memory = jax.lax.cond(
+        opponent_player == 0,
+        lambda _: current_fog_memory_p0,
+        lambda _: current_fog_memory_p1,
+        None,
+    )
     key, opponent_key = jrandom.split(key)
     opponent_first_action = adaptive_policy_action_with_context(
         network,
@@ -841,16 +882,26 @@ def adaptive_rollout_search_candidates(
             lambda _: previous_scoreboard_p1,
             None,
         ),
+        fog_memory=opponent_fog_memory if fog_memory_enabled else None,
     )
 
-    def rollout_result(initial_state, rollout_key, initial_previous_p0, initial_previous_p1):
+    def rollout_result(
+        initial_state,
+        rollout_key,
+        initial_previous_p0,
+        initial_previous_p1,
+        initial_fog_memory_p0,
+        initial_fog_memory_p1,
+    ):
         def body(carry, _):
-            rollout_state, previous_p0, previous_p1, step_key = carry
+            rollout_state, previous_p0, previous_p1, fog_memory_p0, fog_memory_p1, step_key = carry
             step_key, k0, k1 = jrandom.split(step_key, 3)
             obs_p0 = game.get_observation(rollout_state, 0)
             obs_p1 = game.get_observation(rollout_state, 1)
             current_p0 = adaptive_scoreboard_features(obs_p0, effective_size)
             current_p1 = adaptive_scoreboard_features(obs_p1, effective_size)
+            current_fog_p0 = update_adaptive_fog_memory(fog_memory_p0, obs_p0) if fog_memory_enabled else fog_memory_p0
+            current_fog_p1 = update_adaptive_fog_memory(fog_memory_p1, obs_p1) if fog_memory_enabled else fog_memory_p1
             action_p0 = adaptive_policy_action_with_context(
                 network,
                 obs_p0,
@@ -861,6 +912,7 @@ def adaptive_rollout_search_candidates(
                 global_context,
                 scoreboard_history_enabled,
                 previous_p0,
+                fog_memory=current_fog_p0 if fog_memory_enabled else None,
             )
             action_p1 = adaptive_policy_action_with_context(
                 network,
@@ -872,6 +924,7 @@ def adaptive_rollout_search_candidates(
                 global_context,
                 scoreboard_history_enabled,
                 previous_p1,
+                fog_memory=current_fog_p1 if fog_memory_enabled else None,
             )
             next_state, _ = game.step(rollout_state, jnp.stack([action_p0, action_p1]))
             already_done = game.get_info(rollout_state).is_done
@@ -879,11 +932,28 @@ def adaptive_rollout_search_candidates(
             final_info = game.get_info(final_state)
             next_p0 = reset_adaptive_scoreboard_history(current_p0, final_info.is_done)
             next_p1 = reset_adaptive_scoreboard_history(current_p1, final_info.is_done)
-            return (final_state, next_p0, next_p1, step_key), None
+            next_fog_p0 = reset_adaptive_fog_memory(
+                jax.tree.map(lambda value: value[None, ...], current_fog_p0),
+                final_info.is_done[None],
+            )
+            next_fog_p1 = reset_adaptive_fog_memory(
+                jax.tree.map(lambda value: value[None, ...], current_fog_p1),
+                final_info.is_done[None],
+            )
+            next_fog_p0 = jax.tree.map(lambda value: value[0], next_fog_p0)
+            next_fog_p1 = jax.tree.map(lambda value: value[0], next_fog_p1)
+            return (final_state, next_p0, next_p1, next_fog_p0, next_fog_p1, step_key), None
 
-        (final_state, _, _, _), _ = jax.lax.scan(
+        (final_state, _, _, _, _, _), _ = jax.lax.scan(
             body,
-            (initial_state, initial_previous_p0, initial_previous_p1, rollout_key),
+            (
+                initial_state,
+                initial_previous_p0,
+                initial_previous_p1,
+                initial_fog_memory_p0,
+                initial_fog_memory_p1,
+                rollout_key,
+            ),
             None,
             length=rollout_steps,
         )
@@ -911,6 +981,8 @@ def adaptive_rollout_search_candidates(
                 rollout_key,
                 current_scoreboard_p0,
                 current_scoreboard_p1,
+                current_fog_memory_p0,
+                current_fog_memory_p1,
             )
         )(rollout_keys)
         best_rollout = jnp.argmax(scores)
