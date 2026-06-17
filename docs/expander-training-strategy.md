@@ -6340,3 +6340,39 @@ proposal itself, likely with outcome-supervised target/source maps or a
 low-rate Commander head that proposes several target/source commands before
 the Worker/gate sees them.
 ```
+
+### Multi-command gate probe
+
+Extended `evaluate_adaptive_policy.py` so the command gate can score more than
+one proposal:
+
+```text
+--strategy-command-gate-source-count
+--strategy-command-gate-target-count
+```
+
+The evaluator takes top-k source cells from the source head and top-k target
+cells from the target head, builds every source-target worker action, scores
+each action with the command gate, and accepts the highest-probability command
+when it clears the threshold. Defaults remain `1x1`, preserving the previous
+single-command behavior.
+
+Fixed-v5 max250, 128 games/row on seed `84420`, using
+`adaptive-command-gate-model-candidates-v0`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `7.03%` | `12.50%` | `7.03%` | `57.81%` | `57.03%` |
+| gate `0.7`, candidates `2x2` | `5.47%` | `4.69%` | `4.69%` | `62.50%` | `40.62%` |
+| gate `0.8`, candidates `2x2` | `6.25%` | `6.25%` | `6.25%` | `61.72%` | `50.78%` |
+| gate `0.8`, candidates `4x4` | `6.25%` | `7.81%` | `6.25%` | `59.38%` | `42.19%` |
+
+Conclusion:
+
+```text
+Top-k proposals did not fix the gate failure. More source-target candidates
+reduce the single-worker source mismatch, but the current spatial heads still
+rank too many harmful target/source pairs highly enough for the gate to accept
+them. The next step should train the proposal maps themselves from outcome
+targets, not add more post-hoc gate variants.
+```

@@ -873,3 +873,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote command-gate checkpoints or continue threshold sweeps. Next work should improve source/target proposal quality directly, for example with outcome-supervised source/target maps or a low-rate Commander proposal head before Worker/gate execution.
 - **Context:** Model-candidate gate fit offline (`53.4% -> 73.5%` balanced acc) but 128-row fixed-v5 regressed at thresholds `0.5/0.6/0.7`. Model-worker source candidates were more inference-aligned but weaker (`best_win=9.8%`, `best_q=-0.0432`); their gate fit offline (`41.2% -> 78.8%`) and had a 128-row threshold `0.7` signal (`3.91% -> 7.03%` min), but failed 256-row confirmation (`6.64% -> 5.47%` min).
+
+## [2026-06-17 20:38] Multi Command Gate Probe
+- **Changes:** Extended `evaluate_adaptive_policy.py` with `--strategy-command-gate-source-count` and `--strategy-command-gate-target-count`, allowing the command gate to score top-k source by top-k target proposals instead of only the single evaluator worker command. Documented fixed-v5 max250 results.
+- **Status:** Completed
+- **Next Steps:** Do not continue multi-command gate sweeps. Train the source/target proposal maps from outcome targets or add a low-rate Commander proposal head; post-hoc gate selection is not enough with the current spatial ranking.
+- **Context:** On fixed-v5 max250 128-row seed `84420`, baseline min was `7.03%`. Model-candidate gate top-k settings all regressed: `0.7` with `2x2` fell to `4.69%`, `0.8` with `2x2` to `6.25%`, and `0.8` with `4x4` to `6.25%`. Draw reduction again mostly created losses, especially for p1.

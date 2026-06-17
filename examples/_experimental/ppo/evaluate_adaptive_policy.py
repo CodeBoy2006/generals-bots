@@ -100,6 +100,8 @@ def _policy_action(
     strategy_plan_worker_rerank_scale: float,
     strategy_plan_worker_min_margin: float,
     strategy_command_gate_threshold: float,
+    strategy_command_gate_source_count: int,
+    strategy_command_gate_target_count: int,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     needs_aux = (
@@ -157,31 +159,23 @@ def _policy_action(
         None,
     )
     if strategy_command_gate_threshold >= 0.0:
-        command_action, command_source, command_target = strategy_worker_command(
-            obs_arr,
-            mask,
-            active,
-            aux.source_logits,
-            aux.target_logits,
-            network.pad_size,
-        )
-        command_index = adaptive_action_to_index(command_action, network.pad_size)
-        command_legal = logits[command_index] > -1.0e8
-        gate_features = command_gate_features(
+        command_index, gate_probability = strategy_command_gate_index(
+            command_gate_network,
             obs_arr,
             logits,
             aux.action_q_values,
             aux.finish_logits,
+            mask,
+            active,
             aux.source_logits,
             aux.target_logits,
-            command_source,
-            command_target,
-            command_index,
             index,
             policy_player,
             network.pad_size,
+            strategy_command_gate_source_count,
+            strategy_command_gate_target_count,
         )
-        gate_probability = jax.nn.sigmoid(command_gate_network(gate_features))
+        command_legal = logits[command_index] > -1.0e8
         use_command = (gate_probability >= strategy_command_gate_threshold) & command_legal & (command_index != index)
         index = jnp.where(use_command, command_index, index)
     if strategy_q_replace_threshold >= 0.0:
@@ -301,6 +295,90 @@ def strategy_worker_command(
         ],
         dtype=jnp.int32,
     ), source_index.astype(jnp.int32), target_index.astype(jnp.int32)
+
+
+def strategy_command_action_from_indices(
+    legal_mask: jnp.ndarray,
+    source_index: jnp.ndarray,
+    target_index: jnp.ndarray,
+    pad_size: int,
+) -> jnp.ndarray:
+    """Return one legal move from a source cell toward a target cell."""
+    source_row = source_index // pad_size
+    source_col = source_index % pad_size
+    target_row = target_index // pad_size
+    target_col = target_index % pad_size
+    dest_rows = source_row + DIRECTIONS[:, 0]
+    dest_cols = source_col + DIRECTIONS[:, 1]
+    current_distance = jnp.abs(source_row - target_row) + jnp.abs(source_col - target_col)
+    next_distance = jnp.abs(dest_rows - target_row) + jnp.abs(dest_cols - target_col)
+    progress = current_distance - next_distance
+    legal_dirs = legal_mask[source_row, source_col]
+    direction_scores = jnp.where(legal_dirs, progress.astype(jnp.float32), -1.0e9)
+    direction = jnp.argmax(direction_scores).astype(jnp.int32)
+    has_move = jnp.max(direction_scores) > -1.0e8
+    return jnp.array(
+        [
+            (~has_move).astype(jnp.int32),
+            source_row.astype(jnp.int32),
+            source_col.astype(jnp.int32),
+            direction,
+            jnp.int32(0),
+        ],
+        dtype=jnp.int32,
+    )
+
+
+def strategy_command_gate_index(
+    command_gate_network,
+    obs_arr: jnp.ndarray,
+    policy_logits: jnp.ndarray,
+    action_q_values: jnp.ndarray,
+    finish_logits: jnp.ndarray,
+    legal_mask: jnp.ndarray,
+    active: jnp.ndarray,
+    source_logits: jnp.ndarray,
+    target_logits: jnp.ndarray,
+    current_index: jnp.ndarray,
+    policy_player: int,
+    pad_size: int,
+    source_count: int,
+    target_count: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Score top-k source/target commands and return the highest gate-probability action."""
+    movable = jnp.any(legal_mask, axis=-1)
+    source_scores = jnp.where(movable, source_logits, -1.0e9)
+    target_scores = jnp.where(active, target_logits, -1.0e9)
+    _, source_indices = jax.lax.top_k(source_scores.reshape(-1), source_count)
+    _, target_indices = jax.lax.top_k(target_scores.reshape(-1), target_count)
+    pair_sources = jnp.repeat(source_indices.astype(jnp.int32), target_count)
+    pair_targets = jnp.tile(target_indices.astype(jnp.int32), source_count)
+
+    def score_pair(source_index, target_index):
+        action = strategy_command_action_from_indices(legal_mask, source_index, target_index, pad_size)
+        action_index = adaptive_action_to_index(action, pad_size)
+        features = command_gate_features(
+            obs_arr,
+            policy_logits,
+            action_q_values,
+            finish_logits,
+            source_logits,
+            target_logits,
+            source_index,
+            target_index,
+            action_index,
+            current_index,
+            policy_player,
+            pad_size,
+        )
+        probability = jax.nn.sigmoid(command_gate_network(features))
+        legal = policy_logits[action_index] > -1.0e8
+        usable = legal & (action_index != current_index)
+        return action_index, jnp.where(usable, probability, -1.0)
+
+    action_indices, probabilities = jax.vmap(score_pair)(pair_sources, pair_targets)
+    best_pos = jnp.argmax(probabilities)
+    return action_indices[best_pos], probabilities[best_pos]
 
 
 def command_gate_features(
@@ -530,6 +608,8 @@ def evaluate_batch(
     strategy_plan_worker_rerank_scale=0.0,
     strategy_plan_worker_min_margin=-1.0,
     strategy_command_gate_threshold=-1.0,
+    strategy_command_gate_source_count=1,
+    strategy_command_gate_target_count=1,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -643,6 +723,8 @@ def evaluate_batch(
                 strategy_plan_worker_rerank_scale,
                 strategy_plan_worker_min_margin,
                 strategy_command_gate_threshold,
+                strategy_command_gate_source_count,
+                strategy_command_gate_target_count,
             )
         )(
             obs_arr,
@@ -700,6 +782,8 @@ def evaluate_policy_opponent_batch(
     strategy_plan_worker_rerank_scale=0.0,
     strategy_plan_worker_min_margin=-1.0,
     strategy_command_gate_threshold=-1.0,
+    strategy_command_gate_source_count=1,
+    strategy_command_gate_target_count=1,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -814,6 +898,8 @@ def evaluate_policy_opponent_batch(
                 strategy_plan_worker_rerank_scale,
                 strategy_plan_worker_min_margin,
                 strategy_command_gate_threshold,
+                strategy_command_gate_source_count,
+                strategy_command_gate_target_count,
             )
         )(
             obs_arr,
@@ -895,6 +981,8 @@ def parse_args():
     parser.add_argument("--strategy-command-gate-path", default=None)
     parser.add_argument("--strategy-command-gate-threshold", type=float, default=-1.0)
     parser.add_argument("--strategy-command-gate-hidden-dim", type=int, default=32)
+    parser.add_argument("--strategy-command-gate-source-count", type=int, default=1)
+    parser.add_argument("--strategy-command-gate-target-count", type=int, default=1)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -991,6 +1079,13 @@ def parse_args():
         parser.error("--strategy-command-gate-threshold requires --strategy-aux --strategy-spatial-aux")
     if args.strategy_command_gate_hidden_dim <= 0:
         parser.error("--strategy-command-gate-hidden-dim must be positive")
+    if args.strategy_command_gate_source_count <= 0 or args.strategy_command_gate_target_count <= 0:
+        parser.error("--strategy-command-gate-source-count and --strategy-command-gate-target-count must be positive")
+    if (
+        (args.strategy_command_gate_source_count > 1 or args.strategy_command_gate_target_count > 1)
+        and args.strategy_command_gate_threshold < 0.0
+    ):
+        parser.error("multi-command gate counts require --strategy-command-gate-threshold")
     try:
         args.strategy_plan_worker_channels = parse_policy_channels(args.strategy_plan_worker_channels)
     except ValueError as exc:
@@ -1133,6 +1228,10 @@ def main():
             "Command gate: "
             f"threshold={args.strategy_command_gate_threshold:g}, hidden={args.strategy_command_gate_hidden_dim}"
         )
+        print(
+            "Command gate: "
+            f"candidates={args.strategy_command_gate_source_count}x{args.strategy_command_gate_target_count}"
+        )
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -1190,6 +1289,8 @@ def main():
                     args.strategy_plan_worker_rerank_scale,
                     args.strategy_plan_worker_min_margin,
                     args.strategy_command_gate_threshold,
+                    args.strategy_command_gate_source_count,
+                    args.strategy_command_gate_target_count,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -1221,6 +1322,8 @@ def main():
                     args.strategy_plan_worker_rerank_scale,
                     args.strategy_plan_worker_min_margin,
                     args.strategy_command_gate_threshold,
+                    args.strategy_command_gate_source_count,
+                    args.strategy_command_gate_target_count,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -1276,6 +1379,8 @@ def main():
         "strategy_command_gate_path": args.strategy_command_gate_path,
         "strategy_command_gate_threshold": args.strategy_command_gate_threshold,
         "strategy_command_gate_hidden_dim": args.strategy_command_gate_hidden_dim,
+        "strategy_command_gate_source_count": args.strategy_command_gate_source_count,
+        "strategy_command_gate_target_count": args.strategy_command_gate_target_count,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }
