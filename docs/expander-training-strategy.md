@@ -6074,3 +6074,122 @@ The next Plan-Q route should either learn an explicit command/gate scorer on
 model-generated source-target candidates, or collect stronger decisive
 counterfactuals before letting Worker logits affect primitive inference.
 ```
+
+## 2026-06-17 Model-Generated Plan-Q Candidates
+
+Added model-generated candidate modes to `adaptive_plan_q_dataset.py`:
+
+```text
+--candidate-source model
+--candidate-target model
+```
+
+Default behavior remains `heuristic`, which picks sources/targets from
+privileged state. Model mode instead runs the checkpoint's strategy spatial
+source/target heads on the current fogged observation and masks them to:
+
+```text
+source: movable owned active cells
+target: active passable cells
+```
+
+This tests the previous diagnosis that privileged Plan-Q candidates were
+misaligned with inference-time source/target generation.
+
+Smoke:
+
+```text
+output: runs/adaptive-plan-q-model-candidates-smoke-v0/
+envs: 4
+steps: 2
+plans/state: 2x2
+plan_rollout_steps: 4
+plan_worker_steps: 2
+device: cuda:0
+result: samples=8, mean_gap=0.0286, best_q=-0.0604, best_win=0.0%, best_draw=100.0%
+```
+
+Fixed-v5 warm190 model-candidate shard:
+
+```text
+output: runs/adaptive-plan-q-model-candidates-v0/
+model:  runs/adaptive-plan-q-replacement-gate-v1/generals-adaptive-plan-q-replacement-gate-v1.eqx
+envs: 32
+steps: 16
+samples: 512
+plans/state: 4x4
+truncation: 250
+warmup_steps: 190
+plan_rollout_steps: 64
+plan_worker_steps: 16
+rollouts/plan: 1
+candidate_source: model
+candidate_target: model
+device: cuda:0
+```
+
+Shard result:
+
+```text
+mean_gap=0.3931
+best_q=0.1190
+best_win=19.3%
+best_draw=77.9%
+```
+
+This is stronger than the earlier heuristic-candidate v3 shard0
+(`mean_gap=0.4211`, `best_q=-0.0027`, `best_win=14.5%`,
+`best_draw=78.7%`). The important signal is not the exact small-shard win
+rate; it is that model-generated candidates are not weaker than privileged
+heuristic candidates and have positive average best Q on this seed.
+
+Trained `adaptive-plan-q-model-candidate-gate-v0` on this shard:
+
+```text
+dataset: runs/adaptive-plan-q-model-candidates-v0/plan-q-00000.npz
+init:    runs/adaptive-plan-q-replacement-gate-v1/generals-adaptive-plan-q-replacement-gate-v1.eqx
+output:  runs/adaptive-plan-q-model-candidate-gate-v0/generals-adaptive-plan-q-model-candidate-gate-v0.eqx
+losses:  action_q=0.25, action_q_mse=0.10, replacement_gate=1.0
+scope:   strategy-heads only
+epochs:  80
+```
+
+Offline:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| total loss | `4.2487` | `3.2029` |
+| action-Q rank loss | `7.8267` | `5.4970` |
+| action-Q MSE | `4.7735` | `2.4241` |
+| action-Q candidate acc | `16.3%` | `15.9%` |
+| replacement acc | `39.4%` | `44.3%` |
+| accepted fraction | `16.2%` | `16.2%` |
+| pair fraction | `44.5%` | `44.5%` |
+| replacement q margin | `-1.416` | `-1.078` |
+
+Fixed-v5 max250, 128 games/row on seed `84280`:
+
+| setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `11.72%` | `10.94%` | `10.94%` | `57.81%` | `57.03%` |
+| candidate gate threshold `1`, policy margin `4` | `13.28%` | `8.59%` | `8.59%` | `60.16%` | `57.81%` |
+| candidate gate threshold `0` | `5.47%` | `8.59%` | `5.47%` | `49.22%` | `52.34%` |
+
+Conclusion:
+
+```text
+Model-generated source/target candidates are a useful data improvement: they
+match inference-time command generation and produced a stronger fixed-v5 shard
+than the privileged heuristic candidates.
+
+The current scalar action-Q replacement gate is still the wrong execution
+mechanism. Training it on aligned model candidates did not fix the seat
+tradeoff: threshold 1 improved p0 but hurt p1, and threshold 0 converted draws
+into losses. Do not promote model-candidate-gate-v0.
+
+Next step should keep model-generated candidates, but replace scalar action-Q
+replacement with either:
+1. a direct binary command-acceptance head over source/target/action features,
+2. a per-seat calibrated gate threshold, or
+3. a larger model-candidate dataset before fitting any gate.
+```

@@ -56,6 +56,7 @@ from train import random_action, stack_learner_actions
 from train_adaptive import crop_observation, split_mixed_env_counts
 
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
+CANDIDATE_MODE_TO_ID = {"heuristic": 0, "model": 1}
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -101,6 +102,34 @@ def candidate_target_indices(state, learner_player: int, effective_size: int, pa
     target_scores = target_scores + enemy.astype(jnp.float32) * (20.0 + jnp.log1p(state.armies.astype(jnp.float32)))
     target_scores = target_scores + neutral_or_enemy_city.astype(jnp.float32) * 40.0
     target_scores = target_scores + enemy_general.astype(jnp.float32) * 1000.0
+    return topk_indices(target_scores, count)
+
+
+def model_candidate_source_indices(
+    state,
+    learner_player: int,
+    effective_size: int,
+    pad_size: int,
+    count: int,
+    source_logits: jnp.ndarray,
+) -> jnp.ndarray:
+    """Pick source candidates from the model's source head, masked to movable owned cells."""
+    active = active_cells_for_size(effective_size, pad_size)
+    movable = state.ownership[learner_player] & active & (state.armies > 1)
+    source_scores = jnp.where(movable, source_logits, -1.0e9)
+    return topk_indices(source_scores, count)
+
+
+def model_candidate_target_indices(
+    state,
+    effective_size: int,
+    pad_size: int,
+    count: int,
+    target_logits: jnp.ndarray,
+) -> jnp.ndarray:
+    """Pick target candidates from the model's target head, masked to active passable cells."""
+    active = active_cells_for_size(effective_size, pad_size)
+    target_scores = jnp.where(active & state.passable, target_logits, -1.0e9)
     return topk_indices(target_scores, count)
 
 
@@ -252,10 +281,33 @@ def score_plan_candidates(
     previous_scoreboard: jnp.ndarray,
     fog_memory_enabled: bool,
     fog_memory: AdaptiveFogMemory,
+    candidate_source_mode: int,
+    candidate_target_mode: int,
+    model_source_logits: jnp.ndarray,
+    model_target_logits: jnp.ndarray,
 ):
     """Score source-target plans by forcing the first move and rolling out the base policy."""
-    source_indices = candidate_source_indices(state, learner_player, effective_size, pad_size, source_count)
-    target_indices = candidate_target_indices(state, learner_player, effective_size, pad_size, target_count)
+    if candidate_source_mode == CANDIDATE_MODE_TO_ID["model"]:
+        source_indices = model_candidate_source_indices(
+            state,
+            learner_player,
+            effective_size,
+            pad_size,
+            source_count,
+            model_source_logits,
+        )
+    else:
+        source_indices = candidate_source_indices(state, learner_player, effective_size, pad_size, source_count)
+    if candidate_target_mode == CANDIDATE_MODE_TO_ID["model"]:
+        target_indices = model_candidate_target_indices(
+            state,
+            effective_size,
+            pad_size,
+            target_count,
+            model_target_logits,
+        )
+    else:
+        target_indices = candidate_target_indices(state, learner_player, effective_size, pad_size, target_count)
     opponent_player = 1 - learner_player
     opponent_obs = game.get_observation(state, opponent_player)
     key, opponent_key = jrandom.split(key)
@@ -600,6 +652,8 @@ def collect_plan_q_step(
     scoreboard_history_enabled=False,
     fog_memory=None,
     fog_memory_enabled=False,
+    candidate_source_mode=0,
+    candidate_target_mode=0,
 ):
     """Collect one vectorized batch of plan-Q labels and advance behavior states."""
     num_envs = states.armies.shape[0]
@@ -655,11 +709,25 @@ def collect_plan_q_step(
         masks,
         active,
     )
+    if (
+        candidate_source_mode == CANDIDATE_MODE_TO_ID["model"]
+        or candidate_target_mode == CANDIDATE_MODE_TO_ID["model"]
+    ):
+        aux_outputs = jax.vmap(lambda obs, mask, active_mask: network.strategy_auxiliary(obs, mask, active_mask))(
+            obs_arr,
+            masks,
+            active,
+        )
+        model_source_logits = aux_outputs.source_logits
+        model_target_logits = aux_outputs.target_logits
+    else:
+        model_source_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
+        model_target_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
 
     key, plan_key, policy_key, opponent_key = jrandom.split(key, 4)
     plan_keys = jrandom.split(plan_key, num_envs)
     plan_outputs = jax.vmap(
-        lambda state, size, sample_key, prev_scoreboard, memory: score_plan_candidates(
+        lambda state, size, sample_key, prev_scoreboard, memory, source_logits, target_logits: score_plan_candidates(
             network,
             fixed_opponent_network,
             state,
@@ -688,8 +756,20 @@ def collect_plan_q_step(
             prev_scoreboard,
             fog_memory_enabled,
             memory,
+            candidate_source_mode,
+            candidate_target_mode,
+            source_logits,
+            target_logits,
         )
-    )(states, effective_sizes, plan_keys, current_scoreboard, current_fog_memory)
+    )(
+        states,
+        effective_sizes,
+        plan_keys,
+        current_scoreboard,
+        current_fog_memory,
+        model_source_logits,
+        model_target_logits,
+    )
 
     policy_keys = jrandom.split(policy_key, num_envs)
     learner_actions = jax.vmap(
@@ -773,6 +853,8 @@ def collect_plan_q_rollout(
     scoreboard_history_enabled=False,
     fog_memory=None,
     fog_memory_enabled=False,
+    candidate_source_mode=0,
+    candidate_target_mode=0,
 ):
     """Collect multiple plan-Q steps for one learner seat."""
     step_data = []
@@ -807,6 +889,8 @@ def collect_plan_q_rollout(
             scoreboard_history_enabled,
             fog_memory,
             fog_memory_enabled,
+            candidate_source_mode,
+            candidate_target_mode,
         )
         step_data.append(data)
     return states, effective_sizes, scoreboard_history, fog_memory, jax.tree.map(lambda *xs: jnp.stack(xs), *step_data), key
@@ -846,6 +930,8 @@ def collect_mixed_plan_q_rollout(
     fog_memory_p0=None,
     fog_memory_p1=None,
     fog_memory_enabled=False,
+    candidate_source_mode=0,
+    candidate_target_mode=0,
 ):
     """Collect plan-Q data for both seats and concatenate env dimension."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -880,6 +966,8 @@ def collect_mixed_plan_q_rollout(
         scoreboard_history_enabled,
         fog_memory_p0,
         fog_memory_enabled,
+        candidate_source_mode,
+        candidate_target_mode,
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_plan_q_rollout(
         states_p1,
@@ -912,6 +1000,8 @@ def collect_mixed_plan_q_rollout(
         scoreboard_history_enabled,
         fog_memory_p1,
         fog_memory_enabled,
+        candidate_source_mode,
+        candidate_target_mode,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
@@ -1029,6 +1119,8 @@ def parse_args():
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--source-count", type=int, default=4)
     parser.add_argument("--target-count", type=int, default=4)
+    parser.add_argument("--candidate-source", choices=tuple(CANDIDATE_MODE_TO_ID), default="heuristic")
+    parser.add_argument("--candidate-target", choices=tuple(CANDIDATE_MODE_TO_ID), default="heuristic")
     parser.add_argument("--plan-rollout-steps", type=int, default=16)
     parser.add_argument("--plan-worker-steps", type=int, default=0)
     parser.add_argument("--rollouts-per-plan", type=int, default=2)
@@ -1085,6 +1177,10 @@ def parse_args():
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
     if args.source_count <= 0 or args.target_count <= 0:
         parser.error("--source-count and --target-count must be positive")
+    if (args.candidate_source == "model" or args.candidate_target == "model") and not (
+        args.strategy_aux and args.strategy_spatial_aux
+    ):
+        parser.error("--candidate-source/--candidate-target model requires --strategy-aux --strategy-spatial-aux")
     if args.plan_rollout_steps <= 0 or args.rollouts_per_plan <= 0:
         parser.error("--plan-rollout-steps and --rollouts-per-plan must be positive")
     if args.plan_worker_steps < 0:
@@ -1119,6 +1215,8 @@ def main():
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
     policy_mode = POLICY_MODE_NAME_TO_ID[args.policy_mode]
     opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
+    candidate_source_mode = CANDIDATE_MODE_TO_ID[args.candidate_source]
+    candidate_target_mode = CANDIDATE_MODE_TO_ID[args.candidate_target]
     opponent_policy_grid_size = args.grid_sizes[0]
 
     print("Adaptive Plan-Q dataset collection")
@@ -1127,6 +1225,7 @@ def main():
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Model:         {args.model_path}")
     print(f"Plans/state:   {args.source_count}x{args.target_count}")
+    print(f"Candidates:    source={args.candidate_source} target={args.candidate_target}")
     print(f"Plan rollout:  {args.plan_rollout_steps} steps x {args.rollouts_per_plan}")
     if args.plan_worker_steps > 0:
         print(f"Plan worker:   {args.plan_worker_steps} extra target-conditioned steps")
@@ -1270,6 +1369,8 @@ def main():
         "policy_mode": args.policy_mode,
         "source_count": args.source_count,
         "target_count": args.target_count,
+        "candidate_source": args.candidate_source,
+        "candidate_target": args.candidate_target,
         "plan_rollout_steps": args.plan_rollout_steps,
         "plan_worker_steps": args.plan_worker_steps,
         "rollouts_per_plan": args.rollouts_per_plan,
@@ -1336,6 +1437,8 @@ def main():
             fog_memory_p0,
             fog_memory_p1,
             args.fog_memory,
+            candidate_source_mode,
+            candidate_target_mode,
         )
         jax.block_until_ready(states_p0.armies)
         arrays = flatten_plan_q_data(rollout_data, learner_players, args.logit_dtype)
