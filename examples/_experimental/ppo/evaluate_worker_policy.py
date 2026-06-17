@@ -21,17 +21,18 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from adaptive_common import (
-    ADAPTIVE_GLOBAL_INPUT_CHANNELS,
-    ADAPTIVE_HISTORY_INPUT_CHANNELS,
-    ADAPTIVE_INPUT_CHANNELS,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_index_to_action,
+    adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    empty_adaptive_fog_memory,
     make_adaptive_state_pool,
     parse_grid_sizes,
+    reset_adaptive_fog_memory,
+    update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
 from adaptive_worker_pretrain import (
@@ -246,18 +247,24 @@ def evaluate_hybrid_worker_batch(
     worker_logit_scale,
     fallback_global_context=False,
     fallback_scoreboard_history=False,
+    fallback_fog_memory=False,
 ):
     """Evaluate fallback policy with conditional Worker execution or reranking."""
     num_envs = states.armies.shape[0]
     effective_sizes = jnp.full((num_envs,), effective_size, dtype=jnp.int32)
     initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
+    initial_fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
 
     def body(carry, _):
-        states, key, history = carry
+        states, key, history, memory = carry
         obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
         policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
         opponent_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
+        if fallback_fog_memory:
+            current_memory = jax.vmap(update_adaptive_fog_memory)(memory, policy_obs)
+        else:
+            current_memory = memory
 
         worker_obs_arr, worker_active = jax.vmap(
             lambda obs, size: worker_command_obs_to_array(obs, size, pad_size, command_mode, min_army)
@@ -278,30 +285,34 @@ def evaluate_hybrid_worker_batch(
             )
             history_context = adaptive_scoreboard_history_context(history, current_scoreboard)
             fallback_obs_arr, fallback_active = jax.vmap(
-                lambda obs, size, row_history: adaptive_obs_to_array(
+                lambda obs, size, row_history, row_memory: adaptive_obs_to_array(
                     obs,
                     size,
                     pad_size,
                     include_global_context=True,
                     scoreboard_history=row_history,
+                    fog_memory=row_memory if fallback_fog_memory else None,
                 )
             )(
                 policy_obs,
                 effective_sizes,
                 history_context,
+                current_memory,
             )
         else:
             current_scoreboard = history
             fallback_obs_arr, fallback_active = jax.vmap(
-                lambda obs, size: adaptive_obs_to_array(
+                lambda obs, size, row_memory: adaptive_obs_to_array(
                     obs,
                     size,
                     pad_size,
                     include_global_context=fallback_global_context,
+                    fog_memory=row_memory if fallback_fog_memory else None,
                 )
             )(
                 policy_obs,
                 effective_sizes,
+                current_memory,
             )
 
         key, worker_key, fallback_key, opponent_key = jrandom.split(key, 4)
@@ -350,9 +361,16 @@ def evaluate_hybrid_worker_batch(
             states,
             new_states,
         )
-        return (final_states, key, current_scoreboard), None
+        final_info = jax.vmap(game.get_info)(final_states)
+        final_memory = reset_adaptive_fog_memory(current_memory, final_info.is_done)
+        return (final_states, key, current_scoreboard, final_memory), None
 
-    (states, _, _), _ = jax.lax.scan(body, (states, key, initial_history), None, length=max_steps)
+    (states, _, _, _), _ = jax.lax.scan(
+        body,
+        (states, key, initial_history, initial_fog_memory),
+        None,
+        length=max_steps,
+    )
     return jax.vmap(game.get_info)(states)
 
 
@@ -369,8 +387,17 @@ def parse_args():
     parser.add_argument("--fallback-model-path", default=None)
     parser.add_argument("--fallback-channels", default=None)
     parser.add_argument("--fallback-policy-mode", choices=("greedy", "sample"), default=None)
+    parser.add_argument("--fallback-network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--fallback-global-context", action="store_true")
     parser.add_argument("--fallback-scoreboard-history", action="store_true")
+    parser.add_argument("--fallback-fog-memory", action="store_true")
+    parser.add_argument("--fallback-value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--fallback-value-head-sizes", default=None)
+    parser.add_argument("--fallback-value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--fallback-value-bins", type=int, default=128)
+    parser.add_argument("--fallback-value-min", type=float, default=-1.0)
+    parser.add_argument("--fallback-value-max", type=float, default=1.0)
+    parser.add_argument("--fallback-value-sigma", type=float, default=0.04)
     parser.add_argument("--hybrid-mode", choices=WORKER_HYBRID_MODE_NAMES, default="switch")
     parser.add_argument("--worker-logit-scale", type=float, default=0.25)
     parser.add_argument("--worker-trigger", choices=WORKER_TRIGGER_NAMES, default="always")
@@ -393,6 +420,14 @@ def parse_args():
         args.grid_sizes = parse_grid_sizes(args.grid_sizes)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        args.fallback_value_head_sizes = (
+            parse_grid_sizes(args.fallback_value_head_sizes)
+            if args.fallback_value_head_sizes is not None
+            else args.grid_sizes
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.pad_to < max(args.grid_sizes):
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_games <= 0:
@@ -411,6 +446,13 @@ def parse_args():
         parser.error("--worker-trigger-min-turn must be non-negative")
     if args.worker_logit_scale < 0.0:
         parser.error("--worker-logit-scale must be non-negative")
+    if args.fallback_value_loss == "hl-gauss":
+        if args.fallback_value_bins <= 1:
+            parser.error("--fallback-value-bins must be greater than 1 for --fallback-value-loss hl-gauss")
+        if args.fallback_value_min >= args.fallback_value_max:
+            parser.error("--fallback-value-min must be less than --fallback-value-max")
+        if args.fallback_value_sigma <= 0.0:
+            parser.error("--fallback-value-sigma must be positive")
     args.command_mode_id = WORKER_COMMAND_NAME_TO_ID[args.command_mode]
     args.worker_trigger_id = WORKER_TRIGGER_NAME_TO_ID[args.worker_trigger]
     args.hybrid_mode_id = WORKER_HYBRID_MODE_NAME_TO_ID[args.hybrid_mode]
@@ -443,12 +485,11 @@ def main():
     fallback_network = None
     fallback_global_context = args.fallback_global_context or args.fallback_scoreboard_history
     if args.fallback_model_path is not None:
-        if args.fallback_scoreboard_history:
-            fallback_input_channels = ADAPTIVE_HISTORY_INPUT_CHANNELS
-        elif fallback_global_context:
-            fallback_input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
-        else:
-            fallback_input_channels = ADAPTIVE_INPUT_CHANNELS
+        fallback_input_channels = adaptive_input_channel_count(
+            fallback_global_context,
+            args.fallback_scoreboard_history,
+            args.fallback_fog_memory,
+        )
         fallback_network = load_or_create_adaptive_network(
             net_key,
             pad_size=args.pad_to,
@@ -456,8 +497,15 @@ def main():
             channels=args.fallback_channels,
             input_channels=fallback_input_channels,
             init_input_channels=fallback_input_channels,
+            value_head_sizes=args.fallback_value_head_sizes if args.fallback_value_heads == "per-size" else (),
+            value_bins=args.fallback_value_bins if args.fallback_value_loss == "hl-gauss" else 0,
+            value_min=args.fallback_value_min,
+            value_max=args.fallback_value_max,
+            value_sigma=args.fallback_value_sigma,
             global_context=fallback_global_context,
             init_global_context=fallback_global_context,
+            network_arch=args.fallback_network_arch,
+            init_network_arch=args.fallback_network_arch,
         )
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
@@ -473,6 +521,7 @@ def main():
     print(f"Command:     {args.command_mode}")
     if args.fallback_model_path is not None:
         print(f"Fallback:    {args.fallback_model_path}")
+        print(f"Fallback arch/input: {args.fallback_network_arch}/{fallback_input_channels}")
         print(f"Hybrid mode: {args.hybrid_mode}")
         if args.hybrid_mode == "rerank":
             print(f"Logit scale: {args.worker_logit_scale:g}")
@@ -531,6 +580,7 @@ def main():
                     args.worker_logit_scale,
                     fallback_global_context,
                     args.fallback_scoreboard_history,
+                    args.fallback_fog_memory,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_worker_row(info, grid_size, policy_player, args.num_games)
@@ -556,6 +606,12 @@ def main():
         "policy_mode": args.policy_mode,
         "command_mode": args.command_mode,
         "fallback_model_path": args.fallback_model_path,
+        "fallback_network_arch": args.fallback_network_arch,
+        "fallback_global_context": args.fallback_global_context,
+        "fallback_scoreboard_history": args.fallback_scoreboard_history,
+        "fallback_fog_memory": args.fallback_fog_memory,
+        "fallback_value_heads": args.fallback_value_heads,
+        "fallback_value_loss": args.fallback_value_loss,
         "hybrid_mode": args.hybrid_mode,
         "worker_logit_scale": args.worker_logit_scale,
         "worker_trigger": args.worker_trigger,

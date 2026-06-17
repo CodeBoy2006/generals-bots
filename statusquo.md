@@ -819,3 +819,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not use worker mixture for promotion with current spatial heads. Next Worker work should train a target-conditioned action head from successful worker/Plan-Q trajectories instead of hand-coded source-to-target movement.
 - **Context:** Fixed-v5 max250 128-row baseline for `adaptive-strategy-spatial-v1` was `11.72%` min. Worker mix regressed across all tested settings: mix `0.02` min `8.59%`, mix `0.05` min `9.38%`, mix `0.10` min `3.91%`, mix `0.20` min `3.12%`; finish-gating and policy-margin gates also stayed below baseline. The worker reduced draws mostly by increasing losses.
+
+## [2026-06-17 19:19] Learned Worker Hybrid Probe
+- **Changes:** Extended `evaluate_worker_policy.py` so hybrid fallback evaluation can load U-Net checkpoints with fog-memory and scoreboard-history inputs, fallback architecture selection, and fallback value-head template flags. Documented learned Worker rerank and mixed-target Worker results.
+- **Status:** Completed
+- **Next Steps:** Do not promote learned Worker rerank or keep sweeping `worker-logit-scale`. Next useful branch should train a dedicated accepted-replacement/policy-improvement gate, or collect stronger decisive Plan-Q/Worker trajectories before letting Worker logits affect the production policy.
+- **Context:** General-target Worker rerank scale `0.10` looked positive at 128 games/row (`72.66%` min vs `71.09%` baseline), but failed 256-row confirmation (`70.31%` min vs `75.00%` baseline), mostly hurting 8p1. A mixed-target Worker continuation reached supervised `Src 71.1%`, `Dir 48.7%`, `Useful 70.6%`, but Expander 128-row hybrid still regressed to `69.53%` min while only improving 16p0.

@@ -5509,3 +5509,88 @@ This confirms the current source/target spatial heads are not reliable enough to
 Keep the evaluator worker path as a diagnostic, but do not use it for promotion.
 Next useful Worker work needs supervised target-conditioned action data and a learned worker policy, not hand-coded source->target movement from weak spatial heads.
 ```
+
+## 2026-06-17 Learned Worker Hybrid Probe
+
+`evaluate_worker_policy.py` now supports current U-Net fallback checkpoints with:
+
+```text
+--fallback-network-arch unet
+--fallback-scoreboard-history
+--fallback-fog-memory
+```
+
+This matters because the active U-Net v4 Expander base uses 35 input planes
+(`15` adaptive base + `5` fog memory + `5` current scoreboard + `10`
+previous/delta history). The worker evaluator previously only constructed
+15/20/30-channel fallback observations, so it could not load
+`runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx`.
+
+### General-target split Worker as rerank bias
+
+Setup:
+
+```text
+worker:   runs/adaptive-worker-split-general-v1/generals-adaptive-worker-split-general-v1.eqx
+fallback: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+opponent: Expander
+mode:     fallback sample policy, worker rerank on contact
+```
+
+128 games/row on seed `83600`:
+
+| worker scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0.00` | `71.09%` | `75.78%` | `75.00%` | `85.94%` | `75.00%` | `82.81%` | `71.09%` |
+| `0.02` | `70.31%` | `76.56%` | `78.12%` | `86.72%` | `74.22%` | `82.81%` | `70.31%` |
+| `0.05` | `70.31%` | `79.69%` | `76.56%` | `84.38%` | `73.44%` | `79.69%` | `70.31%` |
+| `0.10` | `72.66%` | `82.03%` | `77.34%` | `89.84%` | `75.78%` | `85.94%` | `72.66%` |
+
+The `0.10` row looked promising at 128 games/row, but failed confirmation.
+
+256 games/row on seed `83620`:
+
+| worker scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0.00` | `76.95%` | `76.95%` | `87.50%` | `80.08%` | `75.00%` | `83.59%` | `75.00%` |
+| `0.10` | `73.83%` | `70.31%` | `85.16%` | `81.64%` | `78.91%` | `81.25%` | `70.31%` |
+
+Conclusion: the general-target learned Worker can move behavior and sometimes
+improve large-row finish pressure, but it does not confirm as a stable rerank
+bias. The 256-row failure is a seat tradeoff: 16p0 improves, while 8p0/8p1
+drop sharply. Do not promote or extend this to fixed-v5 evaluation.
+
+### Mixed-target Worker continuation
+
+To test whether the issue was over-specialization to enemy-general targets, a
+mixed-target Worker was trained from `adaptive-worker-split-general-v1`:
+
+```text
+artifact: runs/adaptive-worker-split-random-v1/generals-adaptive-worker-split-random-v1.eqx
+target_family=random
+rollout: 64 envs x 32 steps x 200 iterations
+loss: action=0.1, source=1.0, direction=1.0
+```
+
+Final supervised metrics:
+
+```text
+Acc 23.5%, Src 71.1%, Dir 48.7%, Useful 70.6%, Mass 0.210, Valid 98.8%
+```
+
+Expander hybrid, 128 games/row on seed `83600`, rerank scale `0.10`:
+
+| worker | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline scale `0.00` | `71.09%` | `75.78%` | `75.00%` | `85.94%` | `75.00%` | `82.81%` | `71.09%` |
+| random-target worker scale `0.10` | `69.53%` | `73.44%` | `75.00%` | `88.28%` | `80.47%` | `82.03%` | `69.53%` |
+
+Conclusion:
+
+```text
+The learned Worker rerank path is not promotion-ready.
+General-target Worker gives a 128-row false positive, then fails 256-row confirmation.
+Mixed-target Worker improves 16p0 but sacrifices the 8x rows.
+Do not keep sweeping worker-logit scale.
+The next Worker route needs a dedicated policy-improvement gate or accepted-replacement dataset, not raw Worker logits as a centered fallback-policy bias.
+```
