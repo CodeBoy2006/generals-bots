@@ -142,6 +142,31 @@ def plan_action_from_source_target(
     )
 
 
+def plan_worker_action(
+    state,
+    learner_player: int,
+    root_source_index: jnp.ndarray,
+    target_index: jnp.ndarray,
+    effective_size: int,
+    pad_size: int,
+) -> jnp.ndarray:
+    """Choose a live source near the plan route and move it toward the target."""
+    active = active_cells_for_size(effective_size, pad_size)
+    rows = jnp.arange(pad_size)[:, None]
+    cols = jnp.arange(pad_size)[None, :]
+    target_row = target_index // pad_size
+    target_col = target_index % pad_size
+    root_row = root_source_index // pad_size
+    root_col = root_source_index % pad_size
+    own_movable = state.ownership[learner_player] & active & (state.armies > 1)
+    target_distance = jnp.abs(rows - target_row) + jnp.abs(cols - target_col)
+    root_distance = jnp.abs(rows - root_row) + jnp.abs(cols - root_col)
+    army_score = 2.0 * jnp.log1p(jnp.maximum(state.armies.astype(jnp.float32), 0.0))
+    route_score = army_score - target_distance.astype(jnp.float32) - 0.15 * root_distance.astype(jnp.float32)
+    source_index = jnp.argmax(jnp.where(own_movable, route_score, -1.0e9).reshape(-1))
+    return plan_action_from_source_target(state, learner_player, source_index, target_index, pad_size)
+
+
 def adaptive_policy_action_with_memory(
     network,
     obs,
@@ -209,6 +234,7 @@ def score_plan_candidates(
     target_count: int,
     rollout_steps: int,
     rollouts_per_plan: int,
+    plan_worker_steps: int,
     policy_mode: int,
     opponent_id: int,
     opponent_policy_mode: int,
@@ -241,12 +267,12 @@ def score_plan_candidates(
         opponent_policy_grid_size,
     )
 
-    def rollout_result(initial_state, rollout_key, initial_scoreboard, initial_memory):
-        def body(carry, _):
+    def rollout_result(initial_state, rollout_key, initial_scoreboard, initial_memory, source_index, target_index):
+        def body(carry, step_index):
             rollout_state, previous_scoreboard, memory, step_key = carry
             step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
             learner_obs = game.get_observation(rollout_state, learner_player)
-            learner_action, current_scoreboard, current_memory = adaptive_policy_action_with_memory(
+            base_action, current_scoreboard, current_memory = adaptive_policy_action_with_memory(
                 network,
                 learner_obs,
                 effective_size,
@@ -258,6 +284,20 @@ def score_plan_candidates(
                 previous_scoreboard,
                 fog_memory_enabled,
                 memory,
+            )
+            worker_action = plan_worker_action(
+                rollout_state,
+                learner_player,
+                source_index,
+                target_index,
+                effective_size,
+                pad_size,
+            )
+            learner_action = jax.lax.cond(
+                step_index < plan_worker_steps,
+                lambda _: worker_action,
+                lambda _: base_action,
+                None,
             )
             opponent_obs = game.get_observation(rollout_state, opponent_player)
             opponent_action_value = opponent_policy_action(
@@ -286,7 +326,7 @@ def score_plan_candidates(
         (final_state, _, _, _), _ = jax.lax.scan(
             body,
             (initial_state, initial_scoreboard, initial_memory, rollout_key),
-            None,
+            jnp.arange(rollout_steps),
             length=rollout_steps,
         )
         final_info = game.get_info(final_state)
@@ -310,7 +350,14 @@ def score_plan_candidates(
         next_state, first_info = game.step(state, first_actions)
         rollout_keys = jrandom.split(plan_key, rollouts_per_plan)
         scores, outcomes = jax.vmap(
-            lambda rollout_key: rollout_result(next_state, rollout_key, previous_scoreboard, fog_memory)
+            lambda rollout_key: rollout_result(
+                next_state,
+                rollout_key,
+                previous_scoreboard,
+                fog_memory,
+                source_index,
+                target_index,
+            )
         )(rollout_keys)
         first_outcome = outcome_class_from_winner(first_info.winner, learner_player)
         first_terminal = jnp.where(
@@ -538,6 +585,7 @@ def collect_plan_q_step(
     target_count: int,
     rollout_steps: int,
     rollouts_per_plan: int,
+    plan_worker_steps: int,
     policy_mode: int,
     opponent_policy_mode: int,
     opponent_policy_grid_size: int,
@@ -624,6 +672,7 @@ def collect_plan_q_step(
             target_count,
             rollout_steps,
             rollouts_per_plan,
+            plan_worker_steps,
             policy_mode,
             opponent_id,
             opponent_policy_mode,
@@ -709,6 +758,7 @@ def collect_plan_q_rollout(
     target_count,
     rollout_steps,
     rollouts_per_plan,
+    plan_worker_steps,
     policy_mode,
     opponent_policy_mode,
     opponent_policy_grid_size,
@@ -742,6 +792,7 @@ def collect_plan_q_rollout(
             target_count,
             rollout_steps,
             rollouts_per_plan,
+            plan_worker_steps,
             policy_mode,
             opponent_policy_mode,
             opponent_policy_grid_size,
@@ -778,6 +829,7 @@ def collect_mixed_plan_q_rollout(
     target_count,
     rollout_steps,
     rollouts_per_plan,
+    plan_worker_steps,
     policy_mode,
     opponent_policy_mode,
     opponent_policy_grid_size,
@@ -813,6 +865,7 @@ def collect_mixed_plan_q_rollout(
         target_count,
         rollout_steps,
         rollouts_per_plan,
+        plan_worker_steps,
         policy_mode,
         opponent_policy_mode,
         opponent_policy_grid_size,
@@ -844,6 +897,7 @@ def collect_mixed_plan_q_rollout(
         target_count,
         rollout_steps,
         rollouts_per_plan,
+        plan_worker_steps,
         policy_mode,
         opponent_policy_mode,
         opponent_policy_grid_size,
@@ -977,6 +1031,7 @@ def parse_args():
     parser.add_argument("--source-count", type=int, default=4)
     parser.add_argument("--target-count", type=int, default=4)
     parser.add_argument("--plan-rollout-steps", type=int, default=16)
+    parser.add_argument("--plan-worker-steps", type=int, default=0)
     parser.add_argument("--rollouts-per-plan", type=int, default=2)
     parser.add_argument("--score-scale", type=float, default=10.0)
     parser.add_argument("--score-temperature", type=float, default=0.25)
@@ -1033,6 +1088,10 @@ def parse_args():
         parser.error("--source-count and --target-count must be positive")
     if args.plan_rollout_steps <= 0 or args.rollouts_per_plan <= 0:
         parser.error("--plan-rollout-steps and --rollouts-per-plan must be positive")
+    if args.plan_worker_steps < 0:
+        parser.error("--plan-worker-steps must be non-negative")
+    if args.plan_worker_steps > args.plan_rollout_steps:
+        parser.error("--plan-worker-steps must be less than or equal to --plan-rollout-steps")
     if args.score_scale <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--score-scale and --score-temperature must be positive")
     if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
@@ -1070,6 +1129,8 @@ def main():
     print(f"Model:         {args.model_path}")
     print(f"Plans/state:   {args.source_count}x{args.target_count}")
     print(f"Plan rollout:  {args.plan_rollout_steps} steps x {args.rollouts_per_plan}")
+    if args.plan_worker_steps > 0:
+        print(f"Plan worker:   {args.plan_worker_steps} extra target-conditioned steps")
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} behavior steps before scoring")
     print(f"Output:        {args.output_dir}")
@@ -1211,6 +1272,7 @@ def main():
         "source_count": args.source_count,
         "target_count": args.target_count,
         "plan_rollout_steps": args.plan_rollout_steps,
+        "plan_worker_steps": args.plan_worker_steps,
         "rollouts_per_plan": args.rollouts_per_plan,
         "opponent": args.opponent,
         "opponent_policy_path": args.opponent_policy_path,
@@ -1257,6 +1319,7 @@ def main():
             args.target_count,
             args.plan_rollout_steps,
             args.rollouts_per_plan,
+            args.plan_worker_steps,
             policy_mode,
             opponent_policy_mode,
             opponent_policy_grid_size,

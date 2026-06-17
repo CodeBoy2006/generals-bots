@@ -779,6 +779,8 @@ The first smoke shard is intentionally small. It validates the data path and pro
 
 For fixed-v5 max250 data, use `--truncation 250` and `--warmup-steps <n>` to advance behavior games before expensive plan scoring. Counterfactual plan rollouts are truncation-aware, so wins after the max-step gate are not counted as wins.
 
+Use `--plan-worker-steps <n>` when first-step plan forcing only separates draw from loss. This keeps the forced source-target first move, then executes `n` additional target-conditioned worker moves before handing control back to the base policy. In the fixed-v5 warm190 probe, `--plan-worker-steps 16` produced a small number of winning plan labels where the first-step-only shard had none. The default is `0` for backward-compatible first-step scoring.
+
 Train source/target heads from Plan-Q marginals with `adaptive_plan_q_supervised.py`:
 
 ```bash

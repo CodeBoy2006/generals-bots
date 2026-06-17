@@ -5230,3 +5230,83 @@ Next useful change is to make the plan executor stronger, not just longer:
   or score candidates with rollout-search / stronger policy after the first forced move,
   or sample states from successful fixed-v5 imitation trajectories where winning plans exist.
 ```
+
+## 2026-06-17 Plan-Q Worker Probe
+
+Updated `adaptive_plan_q_dataset.py` with:
+
+```text
+--plan-worker-steps
+```
+
+Mechanism:
+
+```text
+Each plan still starts with the forced source -> target primitive move.
+For the next N rollout steps, a deterministic worker reselects a live owned source near the original route and moves it toward the same target.
+After N worker steps, rollout returns to the base policy.
+Default N=0 preserves the old first-step-only Plan-Q collector.
+```
+
+Reason:
+
+```text
+The first-step-only fixed-v5 warm shard produced safety labels but no winning plans.
+That means source/target heads could learn which plans avoid loss, but not which plans create a finish.
+Multi-step plan execution is the smallest bridge toward a target-conditioned Worker without changing the policy network yet.
+```
+
+Fixed-v5 worker shard:
+
+```text
+output: runs/adaptive-plan-q-fixed-v5-worker-v0/plan-q-00000.npz
+model: runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+opponent: generals-ppo-8x8-expander-gpu-v5.eqx sample
+grid: 8x8
+truncation: 250
+warmup_steps: 190
+samples: 64
+plans/state: 4x4
+plan_rollout_steps: 64
+plan_worker_steps: 16
+rollouts/plan: 1
+device: cuda:0
+```
+
+Statistics:
+
+| metric | value |
+| --- | ---: |
+| behavior state time min / mean / max | `5 / 122.9 / 198` |
+| all plan outcomes | `339 loss / 683 draw / 2 win` |
+| best-plan outcomes | `4 loss / 58 draw / 2 win` |
+| mean plan_q_gap | `0.3770` |
+| mean best_plan_q | `-0.0748` |
+| source entropy mean | `1.283` |
+| target entropy mean | `1.160` |
+
+Gap-weighted worker Plan-Q supervision:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-worker-v0/plan-q-00000.npz
+init: runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+output: runs/adaptive-plan-q-fixed-v5-worker-supervised-v0/generals-adaptive-plan-q-fixed-v5-worker-supervised-v0.eqx
+epochs: 80
+gap_weighting: true
+```
+
+Training curve:
+
+| epoch | source loss / candidate acc / grid acc | target loss / candidate acc / grid acc |
+| ---: | ---: | ---: |
+| 1 | `4.3097 / 25.0% / 4.7%` | `4.6764 / 50.0% / 0.0%` |
+| 40 | `3.9851 / 25.0% / 4.7%` | `4.3033 / 39.1% / 0.0%` |
+| 80 | `3.7872 / 25.0% / 4.7%` | `3.9762 / 29.7% / 3.1%` |
+
+Interpretation:
+
+```text
+Worker-conditioned counterfactuals produced the first winning plan labels in this Plan-Q pipeline.
+The effect is real but still sparse: only 2/1024 plans won, so the supervised checkpoint is not a promotion model.
+Next step is larger worker-conditioned collection, likely mixing fixed-v5 max250/max500 and keeping enough near-terminal successful rows for finish labels.
+```
