@@ -879,3 +879,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue multi-command gate sweeps. Train the source/target proposal maps from outcome targets or add a low-rate Commander proposal head; post-hoc gate selection is not enough with the current spatial ranking.
 - **Context:** On fixed-v5 max250 128-row seed `84420`, baseline min was `7.03%`. Model-candidate gate top-k settings all regressed: `0.7` with `2x2` fell to `4.69%`, `0.8` with `2x2` to `6.25%`, and `0.8` with `4x4` to `6.25%`. Draw reduction again mostly created losses, especially for p1.
+
+## [2026-06-17 20:47] Source Target Outcome-Q Maps
+- **Changes:** Added source/target Q-MSE and candidate-local Q-rank losses to `adaptive_plan_q_supervised.py`, with optional outcome blending from Plan-Q loss/draw/win labels. Documented the new CLI and GPU smoke results.
+- **Status:** Completed
+- **Next Steps:** Do not promote the Q-map checkpoints directly. Use outcome-Q target ranking for target proposals, but redesign source labels around executor-aware source selection, accepted-plan positives, or Worker-conditioned route/army features.
+- **Context:** CUDA smoke on `runs/adaptive-plan-q-model-candidates-v0/plan-q-00000.npz` showed Q-MSE falls without ranking (`target best 26.7%`, corr `-0.107`). Sharp rank-only supervision improved target ranking from `25.7%` to `42.6%` and corr to `+0.276`, but source ranking stayed near random (`23.7%`). Fixed-v5 gameplay smoke was skipped because `/tmp/generals-ppo-8x8-expander-gpu-v5.eqx` is absent.

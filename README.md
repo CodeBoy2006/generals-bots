@@ -811,6 +811,14 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
 
 This trainer defaults to frozen trunk/policy updates and only moves the source/target strategy heads. It is a data-quality and representation probe until the Plan-Q shards include longer-horizon fixed-v5 outcome labels.
 
+For outcome/Q proposal-map supervision, the trainer also accepts
+`--source-q-mse-weight`, `--target-q-mse-weight`, `--source-q-rank-weight`,
+`--target-q-rank-weight`, `--q-rank-temperature`, and
+`--q-target-outcome-weight`. These losses recompute source/target targets from
+the saved `plan_q` matrix, optionally blending decisive plan outcomes into
+loss/draw/win values, then train candidate-local source/target value rankings
+instead of only the precomputed source/target CE marginals.
+
 The same trainer can train the strategy action-Q head directly from plan outcomes:
 
 ```bash

@@ -6376,3 +6376,107 @@ rank too many harmful target/source pairs highly enough for the gate to accept
 them. The next step should train the proposal maps themselves from outcome
 targets, not add more post-hoc gate variants.
 ```
+
+### Source/target outcome-Q map supervision
+
+Extended `adaptive_plan_q_supervised.py` with direct source/target proposal-map
+Q losses:
+
+```text
+--source-q-mse-weight
+--target-q-mse-weight
+--source-q-rank-weight
+--target-q-rank-weight
+--q-rank-temperature
+--q-target-outcome-weight
+```
+
+The target is recomputed from the saved `plan_q` matrix rather than using only
+the precomputed CE marginals:
+
+```text
+plan_value = (1 - outcome_weight) * plan_q
+           + outcome_weight * outcome_value(loss=-1, draw=0, win=1)
+
+source_q_target = max_target plan_value[source, target]
+target_q_target = max_source plan_value[source, target]
+```
+
+`*_q_mse` regresses candidate source/target logits to these values. `*_q_rank`
+uses a candidate-local softmax CE over the same values, so the loss directly
+asks the proposal maps to rank the source/target candidates by outcome-Q.
+Existing Plan-Q CE/action-Q behavior is unchanged when the new weights are 0.
+
+GPU smoke 1, Q-MSE plus old CE, using
+`runs/adaptive-plan-q-model-candidates-v0/plan-q-00000.npz` and warm-starting
+from `adaptive-plan-q-replacement-gate-v1`:
+
+```text
+output: runs/adaptive-plan-q-source-target-q-v0/generals-adaptive-plan-q-source-target-q-v0.eqx
+weights: source=0.25, target=0.25, source_q_mse=0.5, target_q_mse=0.5
+outcome_weight: 0.35
+epochs: 16
+device: cuda:0
+```
+
+Result:
+
+| metric | epoch 1 | epoch 16 |
+| --- | ---: | ---: |
+| total loss | `8.0815` | `2.6701` |
+| source Q MSE / best / corr | `3.3262 / 31.6% / -0.048` | `1.0046 / 30.6% / -0.035` |
+| target Q MSE / best / corr | `9.2763 / 25.8% / -0.073` | `0.6687 / 26.7% / -0.107` |
+
+Conclusion: Q-MSE is easy to reduce, but it mostly fits scale/mean and does
+not learn useful candidate ordering.
+
+GPU smoke 2, rank+MSE:
+
+```text
+output: runs/adaptive-plan-q-source-target-rank-v0/generals-adaptive-plan-q-source-target-rank-v0.eqx
+weights: source_q_mse=0.1, target_q_mse=0.1, source_q_rank=1.0, target_q_rank=1.0
+outcome_weight: 0.35
+rank_temperature: 0.20
+epochs: 32
+device: cuda:0
+```
+
+Result:
+
+| metric | epoch 1 | epoch 32 |
+| --- | ---: | ---: |
+| source rank loss / best / corr | `1.7796 / 31.8% / -0.047` | `1.4211 / 24.8% / +0.002` |
+| target rank loss / best / corr | `1.4453 / 25.2% / -0.079` | `1.4136 / 26.9% / -0.020` |
+
+Conclusion: mild rank supervision still fails to separate the useful candidate
+from the source/target set.
+
+GPU smoke 3, sharp rank-only:
+
+```text
+output: runs/adaptive-plan-q-source-target-rank-sharp-v0/generals-adaptive-plan-q-source-target-rank-sharp-v0.eqx
+weights: source_q_rank=1.0, target_q_rank=1.0
+outcome_weight: 0.65
+rank_temperature: 0.05
+epochs: 64
+device: cuda:0
+```
+
+Result:
+
+| metric | epoch 1 | epoch 64 |
+| --- | ---: | ---: |
+| source rank loss / best / corr | `1.7562 / 32.3% / -0.047` | `1.3834 / 23.7% / +0.072` |
+| target rank loss / best / corr | `1.4404 / 25.7% / -0.093` | `1.2835 / 42.6% / +0.276` |
+
+Conclusion:
+
+```text
+Outcome-Q can train the target proposal map on the model-candidate shard.
+It does not train a reliable source proposal map from the same source label.
+The next source route should not reuse raw max-over-target plan values; it
+should use executor-aware source labels such as model-worker/source-army/route
+features, accepted-plan source positives, or a separate Worker-conditioned
+source selector. Fixed-v5 gameplay smoke was skipped because the frozen v5
+policy file was not present at /tmp/generals-ppo-8x8-expander-gpu-v5.eqx.
+```

@@ -127,6 +127,80 @@ def indexed_spatial_ce(
     return jnp.mean(losses), global_accuracy, candidate_accuracy, entropy
 
 
+def plan_value_targets(
+    plan_q: jnp.ndarray,
+    plan_outcomes: jnp.ndarray,
+    outcome_weight: float,
+) -> jnp.ndarray:
+    """Blend rollout Q with decisive outcome labels for source/target value maps."""
+    if outcome_weight <= 0.0:
+        return plan_q
+    outcome_values = jnp.where(
+        plan_outcomes == 2,
+        1.0,
+        jnp.where(plan_outcomes == 0, -1.0, 0.0),
+    ).astype(plan_q.dtype)
+    return (1.0 - outcome_weight) * plan_q + outcome_weight * outcome_values
+
+
+def indexed_spatial_q_mse(
+    logits: jnp.ndarray,
+    candidate_indices: jnp.ndarray,
+    candidate_targets: jnp.ndarray,
+    sample_weight: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Regress candidate cell scores to plan-value targets and report ranking diagnostics."""
+    flat_logits = logits.reshape(logits.shape[0], -1)
+    candidate_pred = jnp.take_along_axis(flat_logits, candidate_indices, axis=1)
+    losses = jnp.mean((candidate_pred - jax.lax.stop_gradient(candidate_targets)) ** 2, axis=1)
+    normalizer = jnp.maximum(jnp.sum(sample_weight), 1.0)
+    loss = jnp.sum(losses * sample_weight) / normalizer
+
+    pred_best = jnp.argmax(candidate_pred, axis=1)
+    target_best = jnp.argmax(candidate_targets, axis=1)
+    best_accuracy = jnp.sum((pred_best == target_best).astype(jnp.float32) * sample_weight) / normalizer
+
+    pred_centered = candidate_pred - jnp.mean(candidate_pred, axis=1, keepdims=True)
+    target_centered = candidate_targets - jnp.mean(candidate_targets, axis=1, keepdims=True)
+    covariance = jnp.mean(pred_centered * target_centered, axis=1)
+    pred_std = jnp.sqrt(jnp.mean(pred_centered**2, axis=1) + 1.0e-6)
+    target_std = jnp.sqrt(jnp.mean(target_centered**2, axis=1) + 1.0e-6)
+    correlation = jnp.sum((covariance / (pred_std * target_std)) * sample_weight) / normalizer
+
+    pred_gap = jnp.sum((jnp.max(candidate_pred, axis=1) - jnp.mean(candidate_pred, axis=1)) * sample_weight)
+    pred_gap = pred_gap / normalizer
+    target_gap = jnp.sum((jnp.max(candidate_targets, axis=1) - jnp.mean(candidate_targets, axis=1)) * sample_weight)
+    target_gap = target_gap / normalizer
+    return loss, best_accuracy, correlation, pred_gap, target_gap
+
+
+def indexed_spatial_q_rank_ce(
+    logits: jnp.ndarray,
+    candidate_indices: jnp.ndarray,
+    candidate_targets: jnp.ndarray,
+    sample_weight: jnp.ndarray,
+    temperature: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Rank candidate source/target cells by plan-value targets without global-grid pressure."""
+    flat_logits = logits.reshape(logits.shape[0], -1)
+    candidate_logits = jnp.take_along_axis(flat_logits, candidate_indices, axis=1)
+    target_probs = jax.nn.softmax(jax.lax.stop_gradient(candidate_targets) / temperature, axis=1)
+    log_probs = jax.nn.log_softmax(candidate_logits, axis=1)
+    losses = -jnp.sum(target_probs * log_probs, axis=1)
+    normalizer = jnp.maximum(jnp.sum(sample_weight), 1.0)
+    loss = jnp.sum(losses * sample_weight) / normalizer
+    accuracy = jnp.sum(
+        (jnp.argmax(candidate_logits, axis=1) == jnp.argmax(candidate_targets, axis=1)).astype(jnp.float32)
+        * sample_weight
+    )
+    accuracy = accuracy / normalizer
+    entropy = jnp.sum(
+        -jnp.sum(target_probs * jnp.log(jnp.clip(target_probs, 1.0e-8, 1.0)), axis=1) * sample_weight
+    )
+    entropy = entropy / normalizer
+    return loss, accuracy, entropy
+
+
 @eqx.filter_jit
 def train_step(
     network,
@@ -141,6 +215,12 @@ def train_step(
     action_q_weight: float,
     action_q_mse_weight: float,
     action_q_temperature: float,
+    source_q_mse_weight: float,
+    target_q_mse_weight: float,
+    source_q_rank_weight: float,
+    target_q_rank_weight: float,
+    q_rank_temperature: float,
+    q_target_outcome_weight: float,
     replacement_gate_weight: float,
     replacement_score_margin: float,
     replacement_target_margin: float,
@@ -180,36 +260,90 @@ def train_step(
         target_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         target_candidate_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         target_entropy = jnp.asarray(0.0, dtype=jnp.float32)
-        if source_weight > 0.0 or target_weight > 0.0:
+        source_q_mse = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_best_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_correlation = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_pred_gap = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_target_gap = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_mse = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_best_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_correlation = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_pred_gap = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_target_gap = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_rank_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_rank_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        source_q_rank_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_rank_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_rank_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        target_q_rank_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        needs_spatial_heads = (
+            source_weight > 0.0
+            or target_weight > 0.0
+            or source_q_mse_weight > 0.0
+            or target_q_mse_weight > 0.0
+            or source_q_rank_weight > 0.0
+            or target_q_rank_weight > 0.0
+        )
+        if needs_spatial_heads:
             if outputs.source_logits is None or outputs.target_logits is None:
                 raise ValueError("source/target Plan-Q supervision requires strategy_spatial_aux")
-            source_loss, source_accuracy, source_candidate_accuracy, source_entropy = indexed_spatial_ce(
-                outputs.source_logits,
-                active,
-                source_indices,
-                source_probs,
-            )
-            target_loss, target_accuracy, target_candidate_accuracy, target_entropy = indexed_spatial_ce(
-                outputs.target_logits,
-                active,
-                target_indices,
-                target_probs,
-            )
-            if gap_weighting:
-                # Recompute weighted losses directly when gap weighting is enabled.
-                source_loss = weighted_indexed_spatial_ce(
+            if source_weight > 0.0 or target_weight > 0.0:
+                source_loss, source_accuracy, source_candidate_accuracy, source_entropy = indexed_spatial_ce(
                     outputs.source_logits,
                     active,
                     source_indices,
                     source_probs,
-                    sample_weight,
                 )
-                target_loss = weighted_indexed_spatial_ce(
+                target_loss, target_accuracy, target_candidate_accuracy, target_entropy = indexed_spatial_ce(
                     outputs.target_logits,
                     active,
                     target_indices,
                     target_probs,
+                )
+                if gap_weighting:
+                    # Recompute weighted losses directly when gap weighting is enabled.
+                    source_loss = weighted_indexed_spatial_ce(
+                        outputs.source_logits,
+                        active,
+                        source_indices,
+                        source_probs,
+                        sample_weight,
+                    )
+                    target_loss = weighted_indexed_spatial_ce(
+                        outputs.target_logits,
+                        active,
+                        target_indices,
+                        target_probs,
+                        sample_weight,
+                    )
+            if (
+                source_q_mse_weight > 0.0
+                or target_q_mse_weight > 0.0
+                or source_q_rank_weight > 0.0
+                or target_q_rank_weight > 0.0
+            ):
+                plan_values = plan_value_targets(plan_q, plan_outcomes, q_target_outcome_weight)
+                source_q_targets = jnp.max(plan_values, axis=2)
+                target_q_targets = jnp.max(plan_values, axis=1)
+                source_q_mse, source_q_best_accuracy, source_q_correlation, source_q_pred_gap, source_q_target_gap = (
+                    indexed_spatial_q_mse(outputs.source_logits, source_indices, source_q_targets, sample_weight)
+                )
+                target_q_mse, target_q_best_accuracy, target_q_correlation, target_q_pred_gap, target_q_target_gap = (
+                    indexed_spatial_q_mse(outputs.target_logits, target_indices, target_q_targets, sample_weight)
+                )
+                source_q_rank_loss, source_q_rank_accuracy, source_q_rank_entropy = indexed_spatial_q_rank_ce(
+                    outputs.source_logits,
+                    source_indices,
+                    source_q_targets,
                     sample_weight,
+                    q_rank_temperature,
+                )
+                target_q_rank_loss, target_q_rank_accuracy, target_q_rank_entropy = indexed_spatial_q_rank_ce(
+                    outputs.target_logits,
+                    target_indices,
+                    target_q_targets,
+                    sample_weight,
+                    q_rank_temperature,
                 )
 
         policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
@@ -293,6 +427,10 @@ def train_step(
             + plan_policy_weight * plan_policy_loss
             + action_q_weight * action_q_rank_loss
             + action_q_mse_weight * action_q_mse_loss
+            + source_q_mse_weight * source_q_mse
+            + target_q_mse_weight * target_q_mse
+            + source_q_rank_weight * source_q_rank_loss
+            + target_q_rank_weight * target_q_rank_loss
             + replacement_gate_weight * replacement_gate_loss
         )
         metrics = {
@@ -304,6 +442,22 @@ def train_step(
             "target_candidate_accuracy": target_candidate_accuracy,
             "source_entropy": source_entropy,
             "target_entropy": target_entropy,
+            "source_q_mse": source_q_mse,
+            "target_q_mse": target_q_mse,
+            "source_q_best_accuracy": source_q_best_accuracy,
+            "target_q_best_accuracy": target_q_best_accuracy,
+            "source_q_correlation": source_q_correlation,
+            "target_q_correlation": target_q_correlation,
+            "source_q_pred_gap": source_q_pred_gap,
+            "target_q_pred_gap": target_q_pred_gap,
+            "source_q_target_gap": source_q_target_gap,
+            "target_q_target_gap": target_q_target_gap,
+            "source_q_rank_loss": source_q_rank_loss,
+            "target_q_rank_loss": target_q_rank_loss,
+            "source_q_rank_accuracy": source_q_rank_accuracy,
+            "target_q_rank_accuracy": target_q_rank_accuracy,
+            "source_q_rank_entropy": source_q_rank_entropy,
+            "target_q_rank_entropy": target_q_rank_entropy,
             "policy_kl": policy_kl,
             "action_ce": action_ce,
             "teacher_action_accuracy": teacher_action_accuracy,
@@ -509,6 +663,12 @@ def train_epoch(
     action_q_weight: float,
     action_q_mse_weight: float,
     action_q_temperature: float,
+    source_q_mse_weight: float,
+    target_q_mse_weight: float,
+    source_q_rank_weight: float,
+    target_q_rank_weight: float,
+    q_rank_temperature: float,
+    q_target_outcome_weight: float,
     replacement_gate_weight: float,
     replacement_score_margin: float,
     replacement_target_margin: float,
@@ -554,6 +714,12 @@ def train_epoch(
             action_q_weight,
             action_q_mse_weight,
             action_q_temperature,
+            source_q_mse_weight,
+            target_q_mse_weight,
+            source_q_rank_weight,
+            target_q_rank_weight,
+            q_rank_temperature,
+            q_target_outcome_weight,
             replacement_gate_weight,
             replacement_score_margin,
             replacement_target_margin,
@@ -606,6 +772,17 @@ def parse_args():
     parser.add_argument("--action-q-weight", type=float, default=0.0)
     parser.add_argument("--action-q-mse-weight", type=float, default=0.0)
     parser.add_argument("--action-q-temperature", type=float, default=0.25)
+    parser.add_argument("--source-q-mse-weight", type=float, default=0.0)
+    parser.add_argument("--target-q-mse-weight", type=float, default=0.0)
+    parser.add_argument("--source-q-rank-weight", type=float, default=0.0)
+    parser.add_argument("--target-q-rank-weight", type=float, default=0.0)
+    parser.add_argument("--q-rank-temperature", type=float, default=0.25)
+    parser.add_argument(
+        "--q-target-outcome-weight",
+        type=float,
+        default=0.0,
+        help="Blend decisive outcome values into plan_q targets for source/target Q-map regression.",
+    )
     parser.add_argument("--replacement-gate-weight", type=float, default=0.0)
     parser.add_argument("--replacement-score-margin", type=float, default=25.0)
     parser.add_argument("--replacement-target-margin", type=float, default=1.0)
@@ -652,12 +829,20 @@ def parse_args():
             args.plan_policy_weight,
             args.action_q_weight,
             args.action_q_mse_weight,
+            args.source_q_mse_weight,
+            args.target_q_mse_weight,
+            args.source_q_rank_weight,
+            args.target_q_rank_weight,
             args.replacement_gate_weight,
         )
     ):
         parser.error("loss weights must be non-negative")
+    if not 0.0 <= args.q_target_outcome_weight <= 1.0:
+        parser.error("--q-target-outcome-weight must be in [0, 1]")
     if args.action_q_temperature <= 0.0:
         parser.error("--action-q-temperature must be positive")
+    if args.q_rank_temperature <= 0.0:
+        parser.error("--q-rank-temperature must be positive")
     if args.replacement_score_margin < 0.0:
         parser.error("--replacement-score-margin must be non-negative")
     if args.replacement_target_margin < 0.0:
@@ -670,7 +855,14 @@ def parse_args():
         parser.error("--plan-policy-weight requires a positive --policy-kl-weight")
     if not args.strategy_aux:
         parser.error("Plan-Q supervision requires --strategy-aux")
-    if (args.source_weight > 0.0 or args.target_weight > 0.0) and not args.strategy_spatial_aux:
+    if (
+        args.source_weight > 0.0
+        or args.target_weight > 0.0
+        or args.source_q_mse_weight > 0.0
+        or args.target_q_mse_weight > 0.0
+        or args.source_q_rank_weight > 0.0
+        or args.target_q_rank_weight > 0.0
+    ) and not args.strategy_spatial_aux:
         parser.error("source/target Plan-Q supervision requires --strategy-spatial-aux")
     return args
 
@@ -699,9 +891,21 @@ def main():
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
         f"plan_policy={args.plan_policy_weight:g}, "
         f"action_q={args.action_q_weight:g}, action_q_mse={args.action_q_mse_weight:g}, "
+        f"source_q_mse={args.source_q_mse_weight:g}, target_q_mse={args.target_q_mse_weight:g}, "
+        f"source_q_rank={args.source_q_rank_weight:g}, target_q_rank={args.target_q_rank_weight:g}, "
         f"replacement_gate={args.replacement_gate_weight:g}"
     )
     print(f"Action-Q temp: {args.action_q_temperature:g}")
+    if (
+        args.source_q_mse_weight > 0.0
+        or args.target_q_mse_weight > 0.0
+        or args.source_q_rank_weight > 0.0
+        or args.target_q_rank_weight > 0.0
+    ):
+        print(
+            "Q-target:     "
+            f"outcome_weight={args.q_target_outcome_weight:g}, rank_temp={args.q_rank_temperature:g}"
+        )
     if args.replacement_gate_weight > 0.0:
         print(
             "Replacement:  "
@@ -755,6 +959,12 @@ def main():
             args.action_q_weight,
             args.action_q_mse_weight,
             args.action_q_temperature,
+            args.source_q_mse_weight,
+            args.target_q_mse_weight,
+            args.source_q_rank_weight,
+            args.target_q_rank_weight,
+            args.q_rank_temperature,
+            args.q_target_outcome_weight,
             args.replacement_gate_weight,
             args.replacement_score_margin,
             args.replacement_target_margin,
@@ -772,6 +982,20 @@ def main():
             f"{float(metrics['target_accuracy']) * 100:5.1f}%grid | "
             f"SrcH {float(metrics['source_entropy']):.3f} | "
             f"TgtH {float(metrics['target_entropy']):.3f} | "
+            f"SrcQ {float(metrics['source_q_mse']):.4f}/"
+            f"{float(metrics['source_q_best_accuracy']) * 100:5.1f}%/"
+            f"{float(metrics['source_q_correlation']):+.3f}/"
+            f"{float(metrics['source_q_pred_gap']):.3f}->{float(metrics['source_q_target_gap']):.3f} | "
+            f"TgtQ {float(metrics['target_q_mse']):.4f}/"
+            f"{float(metrics['target_q_best_accuracy']) * 100:5.1f}%/"
+            f"{float(metrics['target_q_correlation']):+.3f}/"
+            f"{float(metrics['target_q_pred_gap']):.3f}->{float(metrics['target_q_target_gap']):.3f} | "
+            f"SrcRank {float(metrics['source_q_rank_loss']):.4f}/"
+            f"{float(metrics['source_q_rank_accuracy']) * 100:5.1f}%/"
+            f"H{float(metrics['source_q_rank_entropy']):.3f} | "
+            f"TgtRank {float(metrics['target_q_rank_loss']):.4f}/"
+            f"{float(metrics['target_q_rank_accuracy']) * 100:5.1f}%/"
+            f"H{float(metrics['target_q_rank_entropy']):.3f} | "
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"PlanPol {float(metrics['plan_policy_loss']):.4f}/"
