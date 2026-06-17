@@ -6836,3 +6836,96 @@ warmup_steps: 190
 
 Use `--require-best-plan-win` only for a smaller decisive-plan dataset or a
 positive-class Commander scorer; it will discard many rows.
+
+### High-gap model-worker Plan-Q v0
+
+Collected a filtered high-gap model-worker shard set:
+
+```text
+output: runs/adaptive-plan-q-model-worker-highgap-v0/
+seed: 84800
+filter: min_plan_gap 0.25
+states scored: 2048
+states kept: 818
+plans/state: 16
+warmup_steps: 190
+plan_worker_steps: 16
+plan_rollout_steps: 64
+device: cuda:0
+```
+
+Shard results:
+
+```text
+0000: kept 289/512, mean_gap 0.7051, best_q +0.3176, best_win 29.1%, best_draw 70.9%
+0001: kept 215/512, mean_gap 0.6548, best_q +0.3352, best_win 33.0%, best_draw 67.0%
+0002: kept 154/512, mean_gap 0.6641, best_q +0.3843, best_win 34.4%, best_draw 65.6%
+0003: kept 160/512, mean_gap 0.6821, best_q +0.3799, best_win 35.0%, best_draw 65.0%
+```
+
+Aggregate:
+
+```text
+rows: 818
+best-plan wins/draws/losses: 264 / 554 / 0
+best_win: 32.3%
+best_draw: 67.7%
+mean_best_q: +0.3470
+mean_gap: 0.6797
+gap quantiles: [0.2507, 0.3271, 0.5027, 0.9924, 1.3004, 1.5794, 1.8750]
+```
+
+Trained explicit pair scorer:
+
+```text
+output: runs/adaptive-plan-pair-scorer-highgap-v0/
+rows: 818
+train/val: 654 / 164
+hidden_dim: 128
+gap_weighting: true
+min_plan_gap in trainer: 0.0
+```
+
+Same split additive baseline:
+
+```text
+train: pair 10.7%, source 35.6%, target 24.5%, corr -0.019
+val:   pair 15.2%, source 37.3%, target 28.0%, corr -0.016
+```
+
+Best validation:
+
+```text
+epoch: 92
+loss: 2.7456
+pair top1: 18.0%
+source top1: 30.7%
+target top1: 38.3%
+corr: +0.127
+```
+
+Also trained a harder `min_plan_gap=0.5` scorer on the same saved rows:
+
+```text
+output: runs/adaptive-plan-pair-scorer-highgap-gap05-v0/
+rows: 410
+train/val: 328 / 82
+best validation epoch: 62
+pair top1: 15.3%
+source top1: 30.7%
+target top1: 36.2%
+corr: +0.110
+same-split additive val pair top1: 15.2%
+```
+
+Conclusion:
+
+```text
+Save-time high-gap filtering works: it raises best-plan win density to 32.3%
+and gives the explicit pair scorer a real but modest edge over additive
+source+target on the same validation split: 18.0% vs 15.2%.
+
+The 0.5 filter is too small at this scale and collapses to additive-baseline
+pair top1. The next useful route is more min_gap=0.25 data, not harder
+filtering or evaluator integration.
+```

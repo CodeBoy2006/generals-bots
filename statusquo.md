@@ -909,3 +909,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect a high-gap model-worker dataset under `runs/adaptive-plan-q-model-worker-highgap-v0/`, then retrain the explicit pair scorer on filtered rows instead of unfiltered draw-heavy shards.
 - **Context:** Filtering happens after scoring and before shard write, so it does not alter counterfactual plan labels. Empty filtered shards are skipped to avoid downstream validation split failures.
+
+## [2026-06-17 21:23] High-Gap Model-Worker Plan-Q Probe
+- **Changes:** Collected `runs/adaptive-plan-q-model-worker-highgap-v0/` with save-time `min_plan_gap=0.25`, trained highgap pair scorers, and documented aggregate/baseline results.
+- **Status:** Completed
+- **Next Steps:** Scale `min_gap=0.25` model-worker collection before evaluator integration; do not tighten to `0.5` until there are enough rows.
+- **Context:** Highgap v0 kept 818/2048 rows with best-plan win `32.3%`, draw `67.7%`, mean gap `0.680`. Pair scorer highgap-v0 beat same-split additive val pair top1 `18.0%` vs `15.2%`; highgap-gap05-v0 used 410 rows and fell to `15.3%`, effectively additive baseline.
