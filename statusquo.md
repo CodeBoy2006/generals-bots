@@ -663,3 +663,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop accepted-only online fine-tuning; build replay/oversampling before returning to accepted replacements.
 - **Context:** Accepted rows remained sparse (`5-26` per 512). 64 games/row max750 min was `68.75%` with no Q bias, then dropped to `62.50%` at scale `0.001` and `67.19%` at scale `0.002`.
+
+## [2026-06-17 12:55] Long-Rollout Mixed PPO Recheck
+- **Changes:** Ran and documented two mixed-seat long-rollout PPO probes from the shared-MSE history base: `runs/adaptive-ppo-terminal-hlgauss-mixed-v1/` and `runs/adaptive-ppo-long-mixed-v2/`.
+- **Status:** Completed
+- **Next Steps:** Do not continue these exact PPO recipes. Next useful branch should add replay-balanced accepted replacements or change the network/data representation instead of more small-CNN PPO continuation.
+- **Context:** Terminal+HL-Gauss v1 collapsed rollout wins after iter1 and only reached `67.19%` min at iter10 EMA on a 64-row eval. Conservative composite v2 was stable but only moved same-seed min from base `64.06%` to `65.62%` at iter10, then final EMA returned to `64.06%`.

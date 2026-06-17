@@ -3144,3 +3144,81 @@ It still saw sparse accepted rows (`5-26` per `512`) and did not improve inferen
 | `0.002` | `67.19%` | 16p1 |
 
 Conclusion: accepted-replacement weighting is implemented and confirms the data problem. True accepted replacements are present but sparse under one-step top-k candidate collection, so aux-only online batches are too noisy even when starting from the better r64-calibrated Q head. Keep the option for future replay/oversampling, but do not continue accepted-only r64 training without a buffer that accumulates and balances accepted rows.
+
+## 2026-06-17 Long-Rollout Mixed PPO Recheck
+
+After the Q/rerank branches failed promotion, ran two direct PPO rechecks from the best available `legacymodels` shared-MSE history checkpoint:
+
+```text
+base: /home/codeboy/research/generals-bots/legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx
+sizes: 8,12,16 with weights 8:1,12:1,16:2
+learner: mixed player 0 + player 1 in the same update
+rollout: 128 envs x 256 steps
+ppo: 1 epoch, minibatch 1024, top_advantage_fraction=0.25
+checkpoint output: runs/
+```
+
+### Terminal + HL-Gauss v1
+
+This run tested the latest-paper style knobs with more architecture/value-head changes:
+
+```text
+run: runs/adaptive-ppo-terminal-hlgauss-mixed-v1/
+reward_mode=terminal
+terminal_reward_scale=1.0
+value_heads=per-size
+value_loss=hl-gauss, bins=128, sigma=0.04
+outcome_aux_weight=0.02
+lr=3e-5
+ema_decay=0.999, eval_ema
+```
+
+Training rollout wins collapsed after the first iteration:
+
+```text
+iter 1:  Episodes 49, Wins 41, Draws 0
+iter 10: Episodes 73, Wins 7,  Draws 19
+iter 40: Episodes 73, Wins 8,  Draws 21
+```
+
+64 games/row max750 evaluation on seed `77060`:
+
+| checkpoint | min win rate | bottleneck |
+| --- | ---: | --- |
+| same-seed base | `65.62%` | 8p1 |
+| iter010 EMA | `67.19%` | 8p1 |
+| final EMA | `65.62%` | 8p1 |
+
+Conclusion: this combination is too disruptive from the current checkpoint. It slightly improves one early EMA sample but quickly loses rollout quality, so do not continue this exact terminal+HL-Gauss recipe.
+
+### Conservative composite v2
+
+This run kept the original shared-MSE/composite reward surface and only tested long rollout + mixed seats + top-advantage + EMA:
+
+```text
+run: runs/adaptive-ppo-long-mixed-v2/
+reward_mode=composite
+value_heads=shared
+value_loss=mse
+lr=1e-5
+gamma=0.999
+gae_lambda=0.90
+ema_decay=0.999, eval_ema
+```
+
+Training rollout wins stayed healthy:
+
+```text
+iter 10: Episodes 104, Wins 76, Draws 8
+iter 40: Episodes 94,  Wins 70, Draws 6
+```
+
+64 games/row max750 evaluation on seed `77160`:
+
+| checkpoint | min win rate | bottleneck |
+| --- | ---: | --- |
+| same-seed base | `64.06%` | 16p0 |
+| iter010 EMA | `65.62%` | 16p0 |
+| final EMA | `64.06%` | 8p0 |
+
+Conclusion: conservative long-rollout mixed PPO is stable but still not strong enough. It slightly improves the same-seed bottleneck at iter10, then shifts weakness back to 8p0/16p0. This supports the current diagnosis: continuing small CNN PPO continuation moves the weak row rather than solving the size/seat conflict. A stronger next step should either add replay-balanced accepted replacements or change the architecture/data representation, not just extend these PPO runs.
