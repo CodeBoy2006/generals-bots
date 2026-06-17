@@ -6991,3 +6991,16 @@ next dataset can target mid/late high-gap states directly. Next probe should use
 min_gap=0.25 plus min_save_turn around 100 or 120; do not keep scaling raw
 0.25 high-gap rows.
 ```
+
+Added top-k reporting to `adaptive_plan_pair_supervised.py`:
+
+```text
+pair@1
+pair@2
+pair@4
+```
+
+The best checkpoint is still selected by validation pair@1. The new metrics are
+diagnostic only, but they are important because the mid100 run improved
+correlation more than argmax top1; a Commander can still use a top-k scorer if
+later rollout or a Worker head resolves the final choice.

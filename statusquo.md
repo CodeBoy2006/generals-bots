@@ -921,3 +921,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect mid/late high-gap model-worker data with `min_gap=0.25` and `min_save_turn` around 100 or 120 before training another pair scorer.
 - **Context:** Highgap-v1 scaled to 3415 rows but shifted earlier than v0: median turn `96` vs `128`, and p1 best-plan win fell to `22.0%` vs v0 `36.5%`. Scorer still beat additive (`8.2%` vs `5.0%`; gap05 `11.3%` vs `7.1%`) but absolute pair top1 was too weak.
+
+## [2026-06-17 21:42] Plan Pair Top-K Metrics
+- **Changes:** Added pair@2 and pair@4 reporting to `adaptive_plan_pair_supervised.py` while keeping best checkpoint selection on validation pair@1. Updated README, zh manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Re-run scorer probes with top-k metrics before deciding whether Commander candidate selection is unusable or only needs a top-k rerank/Worker stage.
+- **Context:** Mid100 high-gap data improved scorer correlation more than argmax pair@1, so top-k visibility is needed to judge whether the scorer can shortlist useful plans even when top1 remains weak.

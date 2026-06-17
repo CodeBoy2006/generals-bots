@@ -280,6 +280,14 @@ def pair_rank_metrics(
     pred_source = pred_best // target_count
     pred_target = pred_best % target_count
     pair_accuracy = jnp.sum((pred_best == target_best).astype(jnp.float32) * weights) / normalizer
+    top2_indices = jax.lax.top_k(logits, min(2, logits.shape[1]))[1]
+    top4_indices = jax.lax.top_k(logits, min(4, logits.shape[1]))[1]
+    pair_top2_accuracy = (
+        jnp.sum(jnp.any(top2_indices == target_best[:, None], axis=1).astype(jnp.float32) * weights) / normalizer
+    )
+    pair_top4_accuracy = (
+        jnp.sum(jnp.any(top4_indices == target_best[:, None], axis=1).astype(jnp.float32) * weights) / normalizer
+    )
     source_accuracy = jnp.sum((pred_source == source_pos).astype(jnp.float32) * weights) / normalizer
     target_accuracy = jnp.sum((pred_target == target_pos).astype(jnp.float32) * weights) / normalizer
     pred_centered = logits - jnp.mean(logits, axis=1, keepdims=True)
@@ -291,6 +299,8 @@ def pair_rank_metrics(
     margin = jnp.mean(jax.lax.top_k(logits, 2)[0][:, 0] - jax.lax.top_k(logits, 2)[0][:, 1])
     return loss, {
         "pair_accuracy": pair_accuracy,
+        "pair_top2_accuracy": pair_top2_accuracy,
+        "pair_top4_accuracy": pair_top4_accuracy,
         "source_accuracy": source_accuracy,
         "target_accuracy": target_accuracy,
         "correlation": correlation,
@@ -409,7 +419,9 @@ def parse_args():
 def _metric_text(prefix: str, loss, metrics: dict[str, jnp.ndarray]) -> str:
     return (
         f"{prefix} {float(loss):.4f}/"
-        f"{float(metrics['pair_accuracy']) * 100:5.1f}%/"
+        f"P{float(metrics['pair_accuracy']) * 100:5.1f}%/"
+        f"P2{float(metrics['pair_top2_accuracy']) * 100:5.1f}%/"
+        f"P4{float(metrics['pair_top4_accuracy']) * 100:5.1f}%/"
         f"S{float(metrics['source_accuracy']) * 100:5.1f}%/"
         f"T{float(metrics['target_accuracy']) * 100:5.1f}%/"
         f"{float(metrics['correlation']):+.3f}/"
@@ -486,6 +498,8 @@ def main():
     best_val_loss = float("inf")
     best_val_metrics: dict[str, float] = {
         "pair_accuracy": -1.0,
+        "pair_top2_accuracy": 0.0,
+        "pair_top4_accuracy": 0.0,
         "source_accuracy": 0.0,
         "target_accuracy": 0.0,
         "correlation": 0.0,
@@ -565,6 +579,8 @@ def main():
         "Best validation: "
         f"epoch {best_epoch}, loss {best_val_loss:.4f}, "
         f"pair {best_val_metrics['pair_accuracy'] * 100:.1f}%, "
+        f"pair@2 {best_val_metrics['pair_top2_accuracy'] * 100:.1f}%, "
+        f"pair@4 {best_val_metrics['pair_top4_accuracy'] * 100:.1f}%, "
         f"source {best_val_metrics['source_accuracy'] * 100:.1f}%, "
         f"target {best_val_metrics['target_accuracy'] * 100:.1f}%, "
         f"corr {best_val_metrics['correlation']:+.3f}"
