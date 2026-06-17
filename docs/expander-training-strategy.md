@@ -6703,3 +6703,94 @@ Next step should be a larger same-family model-worker Plan-Q shard or a
 target-conditioned source selector. Do not connect this scorer to inference
 until validation remains stable across larger shards/seeds.
 ```
+
+### Larger model-worker Plan-Q and gap-filtered pair scoring
+
+Collected four same-family model-worker Plan-Q shards with the replacement-gate
+checkpoint as the candidate generator and base policy:
+
+```text
+output: runs/adaptive-plan-q-model-worker-candidates-v1/
+states: 2048
+plans/state: 16
+warmup_steps: 190
+plan_worker_steps: 16
+plan_rollout_steps: 64
+opponent: fixed 8x8 v5 sample
+device: cuda:0
+```
+
+Shard summary:
+
+```text
+shard 0000: mean_gap 0.3906, best_q +0.0299, best_win 17.0%, best_draw 76.4%
+shard 0001: mean_gap 0.2903, best_q -0.0481, best_win  9.6%, best_draw 85.4%
+shard 0002: mean_gap 0.2607, best_q -0.0477, best_win  7.0%, best_draw 92.0%
+shard 0003: mean_gap 0.2312, best_q -0.0349, best_win  6.8%, best_draw 92.0%
+```
+
+Aggregate:
+
+```text
+all rows:      rows 2048, best_win 10.1%, best_draw 86.4%, mean_gap 0.293, mean_q -0.025
+gap >= 0.25:  rows  779, best_win 26.4%, best_draw 73.6%, mean_gap 0.612, mean_q +0.205
+gap >= 0.50:  rows  374, best_win 46.3%, best_draw 53.7%, mean_gap 0.877, mean_q +0.456
+```
+
+Same-split additive baseline on the full v1 dataset:
+
+```text
+train: loss 3.0149, pair 7.91%, source 31.48%, target 28.63%, corr +0.003
+val:   loss 2.9254, pair 9.34%, source 29.44%, target 28.17%, corr +0.034
+```
+
+Added `adaptive_plan_pair_supervised.py --min-plan-gap` to filter low-margin
+rows before train/validation split. Full and filtered scorer runs:
+
+```text
+worker-v3 full:
+  rows 2048
+  best val epoch 70
+  loss 2.7538
+  pair top1 11.3%
+  source top1 25.6%
+  target top1 40.7%
+  corr +0.071
+
+worker-gap025-v0:
+  min_plan_gap 0.25
+  rows 779
+  best val epoch 32
+  loss 2.7241
+  pair top1 16.8%
+  source top1 31.7%
+  target top1 45.3%
+  corr +0.104
+
+worker-gap05-v0:
+  min_plan_gap 0.50
+  rows 374
+  best val epoch 24
+  loss 2.7568
+  pair top1 22.2%
+  source top1 37.1%
+  target top1 41.3%
+  corr +0.085
+```
+
+Conclusion:
+
+```text
+The larger model-worker dataset did not confirm the first 512-row pair-scorer
+result across all rows. Full worker-v3 only beats the additive baseline weakly
+on validation pair top1: 11.3% vs 9.34%.
+
+The useful signal is concentrated in high-gap states. Filtering at 0.25 raises
+pair top1 to 16.8%, and filtering at 0.50 reaches 22.2% on a smaller validation
+set. These rows also have much higher best-plan win rates.
+
+Next Commander-scorer data should either collect more high-gap model-worker
+rows, train a separate decisive-plan scorer, or downsample low-gap draw-heavy
+states. Do not train the evaluator-facing scorer directly on unfiltered
+draw-heavy mixed rows.
+```

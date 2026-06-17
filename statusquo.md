@@ -897,3 +897,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not connect the scorer to gameplay inference yet. Collect a larger same-family `model-worker` Plan-Q shard or train a target-conditioned source selector before promotion-oriented evaluator integration.
 - **Context:** Same-split additive baseline on the worker-source shard had validation pair top1 `4.19%`. Gap-weighted worker-source v1 reached best validation pair top1 `23.3%` (`S32.9%/T43.7%`, corr `+0.154`) at epoch 62. Mixed model+model-worker v2 fell to `12.9%`, and no-gap small worker-source fell to `13.7%`, so the signal is real but data-sensitive. All models/logs are under ignored `runs/`.
+
+## [2026-06-17 21:13] High-Gap Plan Pair Scorer
+- **Changes:** Added `--min-plan-gap` to `adaptive_plan_pair_supervised.py`, collected a 4-shard model-worker Plan-Q v1 dataset, and documented full/gap-filtered scorer probes.
+- **Status:** Completed
+- **Next Steps:** Use high-gap filtering or a decisive-plan curriculum for Commander scorer training; collect more high-gap model-worker rows before evaluator integration.
+- **Context:** v1 dataset had 2048 rows, overall best_win `10.1%`, draw `86.4%`; `gap>=0.25` kept 779 rows with win `26.4%`, `gap>=0.5` kept 374 with win `46.3%`. Full scorer v3 best val pair top1 `11.3%` vs additive `9.34%`; `min_gap=0.25` reached `16.8%`, `min_gap=0.5` reached `22.2%`.

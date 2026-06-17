@@ -82,6 +82,7 @@ def build_pair_dataset(
     feature_batch_size: int,
     q_target_outcome_weight: float,
     gap_weighting: bool,
+    min_plan_gap: float,
     validation_fraction: float,
     max_rows: int | None,
     seed: int,
@@ -91,6 +92,7 @@ def build_pair_dataset(
     feature_rows: list[np.ndarray] = []
     target_rows: list[np.ndarray] = []
     weight_rows: list[np.ndarray] = []
+    gap_rows: list[np.ndarray] = []
     source_pos_rows: list[np.ndarray] = []
     target_pos_rows: list[np.ndarray] = []
     for path in paths:
@@ -197,14 +199,25 @@ def build_pair_dataset(
         feature_rows.append(features.astype(np.float32))
         target_rows.append(flat_values.astype(np.float32))
         weight_rows.append(weights)
+        gap_rows.append(plan_gap)
         source_pos_rows.append((target_best // target_count).astype(np.int32))
         target_pos_rows.append((target_best % target_count).astype(np.int32))
 
     features = np.concatenate(feature_rows, axis=0)
     targets = np.concatenate(target_rows, axis=0)
     weights = np.concatenate(weight_rows, axis=0)
+    gaps = np.concatenate(gap_rows, axis=0)
     source_pos = np.concatenate(source_pos_rows, axis=0)
     target_pos = np.concatenate(target_pos_rows, axis=0)
+    if min_plan_gap > 0.0:
+        keep = gaps >= min_plan_gap
+        if not np.any(keep):
+            raise ValueError("--min-plan-gap removed every row")
+        features = features[keep]
+        targets = targets[keep]
+        weights = weights[keep]
+        source_pos = source_pos[keep]
+        target_pos = target_pos[keep]
     if max_rows is not None and features.shape[0] > max_rows:
         indices = np.sort(rng.choice(features.shape[0], size=max_rows, replace=False))
         features = features[indices]
@@ -359,6 +372,7 @@ def parse_args():
     parser.add_argument("--q-target-outcome-weight", type=float, default=0.65)
     parser.add_argument("--q-rank-temperature", type=float, default=0.05)
     parser.add_argument("--gap-weighting", action="store_true")
+    parser.add_argument("--min-plan-gap", type=float, default=0.0)
     parser.add_argument("--validation-fraction", type=float, default=0.2)
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -383,6 +397,8 @@ def parse_args():
         parser.error("--q-target-outcome-weight must be in [0, 1]")
     if args.q_rank_temperature <= 0.0:
         parser.error("--q-rank-temperature must be positive")
+    if args.min_plan_gap < 0.0:
+        parser.error("--min-plan-gap must be non-negative")
     if not (0.0 < args.validation_fraction < 1.0):
         parser.error("--validation-fraction must be between 0 and 1")
     if args.max_rows is not None and args.max_rows <= 1:
@@ -435,6 +451,7 @@ def main():
         args.feature_batch_size,
         args.q_target_outcome_weight,
         args.gap_weighting,
+        args.min_plan_gap,
         args.validation_fraction,
         args.max_rows,
         args.seed,
@@ -451,7 +468,7 @@ def main():
     print(
         "Q-target:     "
         f"outcome_weight={args.q_target_outcome_weight:g}, rank_temp={args.q_rank_temperature:g}, "
-        f"gap_weighting={args.gap_weighting}"
+        f"gap_weighting={args.gap_weighting}, min_gap={args.min_plan_gap:g}"
     )
     print()
 
@@ -530,6 +547,7 @@ def main():
         "q_target_outcome_weight": args.q_target_outcome_weight,
         "q_rank_temperature": args.q_rank_temperature,
         "gap_weighting": args.gap_weighting,
+        "min_plan_gap": args.min_plan_gap,
         "best_model_path": str(best_model_path),
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
