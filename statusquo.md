@@ -609,3 +609,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-worker-split-general-v1` as a policy. Use its logits only as a small rerank bias/candidate proposer under the adaptive fallback policy, or move to explicit separate source/direction heads before another hard-switch attempt.
 - **Context:** GPU split run in `runs/adaptive-worker-split-general-v1/` reached final `Acc 21.7%`, `Src 40.0%`, `Dir 51.8%`, `Useful 91.0%`, `Mass 0.172`, improving supervised Worker metrics over flat `general-v2`. However a 64 games/row hybrid visible-general takeover still scored only `14.06%` min win rate, so hard-switch Worker control remains rejected.
+
+## [2026-06-17 12:04] Worker Logit Rerank Probe
+- **Changes:** Added `evaluate_worker_policy.py --hybrid-mode rerank --worker-logit-scale`, which centers legal Worker logits and applies them as a bias on fallback adaptive logits instead of switching control. Added a focused rerank helper test and documented the GPU scale sweep.
+- **Status:** Completed
+- **Next Steps:** Do not reuse raw Worker action logits as production bias. Next Worker branch should train explicit source/direction heads or a dedicated candidate-rerank head against fallback-success/search-Q labels.
+- **Context:** On seed 74820 with 64 games/row, rerank scale `0.00` matched fallback at `68.75%` min, scale `0.05` stayed `68.75%` but hurt 16x p1 and draw rate, and scale `0.10` dropped to `67.19%` min. The result rejects raw Worker-logit bias for promotion.

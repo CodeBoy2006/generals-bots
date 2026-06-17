@@ -2882,3 +2882,30 @@ The split loss substantially improves supervised route-support metrics, but it i
 | 16x16 p1 | `9/10/45` | `14.06%` |
 
 Interpretation: source/direction supervision made the Worker much better at recognizing useful BFS-support moves, but hard-switching control still corrupts the policy. Next step should use Worker logits as a small rerank bias/candidate proposer under the adaptive fallback policy, not as a replacement action source.
+
+## 2026-06-17 Worker Rerank Probe
+
+Added `evaluate_worker_policy.py --hybrid-mode rerank --worker-logit-scale <x>`. In rerank mode, the evaluator computes both fallback and Worker logits, centers Worker logits over legal actions, and applies them only as a bias:
+
+```text
+combined_logits = fallback_logits + scale * centered_legal_worker_logits
+```
+
+This keeps fallback policy control and tests whether the split Worker can help finish when the enemy general is visible. GPU sweep used the same split Worker checkpoint and the shared-MSE history fallback:
+
+```text
+worker:   runs/adaptive-worker-split-general-v1/generals-adaptive-worker-split-general-v1.eqx
+fallback: /home/codeboy/research/generals-bots/legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx
+trigger:  visible-general
+mode:     sample
+games:    64 per size/seat
+seed:     74820
+```
+
+| scale | min win rate | bottleneck row | observation |
+| ---: | ---: | --- | --- |
+| `0.00` | `68.75%` | 16x16 p0 | rerank path equals fallback baseline |
+| `0.05` | `68.75%` | 16x16 p0 | 16x16 p1 fell from `76.56%` to `73.44%`; draw rose |
+| `0.10` | `67.19%` | 16x16 p0 | 12x16/16x16 draw damage increased |
+
+Conclusion: the split Worker is useful as a supervised representation probe but its raw action logits should not bias the production policy yet. The next Worker branch should either expose explicit source/direction heads and use them only to generate a small candidate set, or train a dedicated rerank head against fallback-success/search-Q labels instead of reusing the Worker action logits.

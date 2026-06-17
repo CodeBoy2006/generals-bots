@@ -46,6 +46,9 @@ from train import random_action, stack_learner_actions
 
 WORKER_TRIGGER_NAMES = ("always", "visible-general", "contact", "turn")
 WORKER_TRIGGER_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_TRIGGER_NAMES)}
+WORKER_HYBRID_MODE_NAMES = ("switch", "rerank")
+WORKER_HYBRID_MODE_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_HYBRID_MODE_NAMES)}
+WORKER_HYBRID_SWITCH = WORKER_HYBRID_MODE_NAME_TO_ID["switch"]
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,36 @@ def _fallback_action(network, obs_arr, mask, active, key, policy_mode):
         None,
     )
     return adaptive_index_to_action(index, network.pad_size)
+
+
+def _indices_from_logits(logits, keys, policy_mode):
+    return jax.vmap(
+        lambda row, key: jax.lax.cond(
+            policy_mode == 0,
+            lambda _: jnp.argmax(row),
+            lambda _: jrandom.categorical(key, row),
+            None,
+        )
+    )(logits, keys)
+
+
+def _actions_from_indices(indices, pad_size: int) -> jnp.ndarray:
+    return jax.vmap(lambda index: adaptive_index_to_action(index, pad_size))(indices)
+
+
+def worker_rerank_logits(
+    fallback_logits: jnp.ndarray,
+    worker_logits: jnp.ndarray,
+    trigger: jnp.ndarray,
+    scale: float,
+) -> jnp.ndarray:
+    """Use centered legal Worker logits as a small bias on fallback policy logits."""
+    legal = worker_logits > -1.0e8
+    legal_count = jnp.maximum(jnp.sum(legal, axis=-1, keepdims=True), 1)
+    legal_mean = jnp.sum(jnp.where(legal, worker_logits, 0.0), axis=-1, keepdims=True) / legal_count
+    worker_bias = jnp.where(legal, worker_logits - legal_mean, 0.0)
+    reranked = fallback_logits + scale * worker_bias
+    return jnp.where(trigger[:, None], reranked, fallback_logits)
 
 
 def summarize_worker_row(info, grid_size: int, policy_player: int, num_games: int) -> WorkerEvalRow:
@@ -209,10 +242,12 @@ def evaluate_hybrid_worker_batch(
     min_army,
     trigger_mode,
     trigger_min_turn,
+    hybrid_mode,
+    worker_logit_scale,
     fallback_global_context=False,
     fallback_scoreboard_history=False,
 ):
-    """Evaluate fallback policy with conditional Worker execution."""
+    """Evaluate fallback policy with conditional Worker execution or reranking."""
     num_envs = states.armies.shape[0]
     effective_sizes = jnp.full((num_envs,), effective_size, dtype=jnp.int32)
     initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
@@ -272,22 +307,36 @@ def evaluate_hybrid_worker_batch(
         key, worker_key, fallback_key, opponent_key = jrandom.split(key, 4)
         worker_keys = jrandom.split(worker_key, num_envs)
         fallback_keys = jrandom.split(fallback_key, num_envs)
-        worker_actions = jax.vmap(lambda o, m, a, k: _worker_action(worker_network, o, m, a, k, worker_policy_mode))(
+        worker_logits = jax.vmap(lambda o, m, a: worker_network.logits_value(o, m, a)[0])(
             worker_obs_arr,
             masks,
             worker_active,
-            worker_keys,
         )
-        fallback_actions = jax.vmap(
-            lambda o, m, a, k: _fallback_action(fallback_network, o, m, a, k, fallback_policy_mode)
-        )(
+        fallback_logits = jax.vmap(lambda o, m, a: fallback_network.logits_value(o, m, a)[0])(
             fallback_obs_arr,
             masks,
             fallback_active,
-            fallback_keys,
         )
         trigger = worker_trigger_mask(policy_obs, trigger_mode, trigger_min_turn)
-        policy_actions = jnp.where(trigger[:, None], worker_actions, fallback_actions)
+
+        def switch_actions(_):
+            worker_indices = _indices_from_logits(worker_logits, worker_keys, worker_policy_mode)
+            fallback_indices = _indices_from_logits(fallback_logits, fallback_keys, fallback_policy_mode)
+            worker_actions = _actions_from_indices(worker_indices, pad_size)
+            fallback_actions = _actions_from_indices(fallback_indices, pad_size)
+            return jnp.where(trigger[:, None], worker_actions, fallback_actions)
+
+        def rerank_actions(_):
+            combined_logits = worker_rerank_logits(fallback_logits, worker_logits, trigger, worker_logit_scale)
+            combined_indices = _indices_from_logits(combined_logits, fallback_keys, fallback_policy_mode)
+            return _actions_from_indices(combined_indices, pad_size)
+
+        policy_actions = jax.lax.cond(
+            hybrid_mode == WORKER_HYBRID_SWITCH,
+            switch_actions,
+            rerank_actions,
+            None,
+        )
         opponent_keys = jrandom.split(opponent_key, num_envs)
         opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent, k, obs, random_action))(
             opponent_keys,
@@ -322,6 +371,8 @@ def parse_args():
     parser.add_argument("--fallback-policy-mode", choices=("greedy", "sample"), default=None)
     parser.add_argument("--fallback-global-context", action="store_true")
     parser.add_argument("--fallback-scoreboard-history", action="store_true")
+    parser.add_argument("--hybrid-mode", choices=WORKER_HYBRID_MODE_NAMES, default="switch")
+    parser.add_argument("--worker-logit-scale", type=float, default=0.25)
     parser.add_argument("--worker-trigger", choices=WORKER_TRIGGER_NAMES, default="always")
     parser.add_argument("--worker-trigger-min-turn", type=int, default=80)
     parser.add_argument("--min-army", type=int, default=2)
@@ -358,8 +409,11 @@ def parse_args():
         parser.error("city army range must satisfy min < max")
     if args.worker_trigger_min_turn < 0:
         parser.error("--worker-trigger-min-turn must be non-negative")
+    if args.worker_logit_scale < 0.0:
+        parser.error("--worker-logit-scale must be non-negative")
     args.command_mode_id = WORKER_COMMAND_NAME_TO_ID[args.command_mode]
     args.worker_trigger_id = WORKER_TRIGGER_NAME_TO_ID[args.worker_trigger]
+    args.hybrid_mode_id = WORKER_HYBRID_MODE_NAME_TO_ID[args.hybrid_mode]
     return args
 
 
@@ -419,6 +473,9 @@ def main():
     print(f"Command:     {args.command_mode}")
     if args.fallback_model_path is not None:
         print(f"Fallback:    {args.fallback_model_path}")
+        print(f"Hybrid mode: {args.hybrid_mode}")
+        if args.hybrid_mode == "rerank":
+            print(f"Logit scale: {args.worker_logit_scale:g}")
         print(f"Trigger:     {args.worker_trigger}")
     print(f"Input chans: {WORKER_INPUT_CHANNELS}")
     print()
@@ -470,6 +527,8 @@ def main():
                     args.min_army,
                     args.worker_trigger_id,
                     args.worker_trigger_min_turn,
+                    args.hybrid_mode_id,
+                    args.worker_logit_scale,
                     fallback_global_context,
                     args.fallback_scoreboard_history,
                 )
@@ -497,6 +556,8 @@ def main():
         "policy_mode": args.policy_mode,
         "command_mode": args.command_mode,
         "fallback_model_path": args.fallback_model_path,
+        "hybrid_mode": args.hybrid_mode,
+        "worker_logit_scale": args.worker_logit_scale,
         "worker_trigger": args.worker_trigger,
         "num_games": args.num_games,
         "max_steps": args.max_steps,

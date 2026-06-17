@@ -1616,6 +1616,22 @@ def test_worker_source_direction_targets_marginalize_full_move_planes():
     assert jnp.sum(direction_targets) == 1.0
 
 
+def test_worker_rerank_logits_centers_legal_worker_bias_only_when_triggered():
+    from examples._experimental.ppo.evaluate_worker_policy import worker_rerank_logits
+
+    fallback_logits = jnp.array([[1.0, 2.0, -1.0e9]], dtype=jnp.float32)
+    worker_logits = jnp.array([[4.0, 8.0, -1.0e9]], dtype=jnp.float32)
+
+    no_trigger = worker_rerank_logits(fallback_logits, worker_logits, jnp.array([False]), scale=0.5)
+    zero_scale = worker_rerank_logits(fallback_logits, worker_logits, jnp.array([True]), scale=0.0)
+    reranked = worker_rerank_logits(fallback_logits, worker_logits, jnp.array([True]), scale=0.5)
+
+    assert jnp.allclose(no_trigger, fallback_logits)
+    assert jnp.allclose(zero_scale, fallback_logits)
+    assert jnp.allclose(reranked[0, :2], jnp.array([0.0, 3.0], dtype=jnp.float32))
+    assert reranked[0, 2] < -1.0e8
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess
