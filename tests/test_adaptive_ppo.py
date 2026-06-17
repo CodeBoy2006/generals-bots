@@ -1529,6 +1529,44 @@ def test_mask_strategy_aux_grads_keeps_only_strategy_heads():
     assert jnp.any(masked.strategy_enemy_general_conv.weight != 0)
 
 
+def test_worker_bfs_label_moves_toward_general_target():
+    from examples._experimental.ppo.adaptive_common import adaptive_index_to_action
+    from examples._experimental.ppo.adaptive_worker_pretrain import (
+        WORKER_INPUT_CHANNELS,
+        worker_bfs_action_index,
+        worker_obs_to_array,
+    )
+
+    pad_size = 6
+    state = make_padded_state(size=4, pad_to=pad_size)
+    state = state._replace(armies=state.armies.at[0, 0].set(8))
+    obs = game.get_observation(state, 0)
+
+    obs_arr, active = worker_obs_to_array(
+        state,
+        obs,
+        player=0,
+        effective_size=4,
+        pad_size=pad_size,
+        target_family=0,
+        min_army=2,
+    )
+    index, weight = worker_bfs_action_index(
+        state,
+        player=0,
+        effective_size=4,
+        pad_size=pad_size,
+        target_family=0,
+        min_army=2,
+    )
+    action = adaptive_index_to_action(index, pad_size)
+
+    assert obs_arr.shape == (WORKER_INPUT_CHANNELS, pad_size, pad_size)
+    assert active.shape == (pad_size, pad_size)
+    assert weight == 1.0
+    assert action.tolist() == [0, 0, 0, 1, 0]
+
+
 def test_behavior_clone_adaptive_cli_smoke(tmp_path):
     import os
     import subprocess

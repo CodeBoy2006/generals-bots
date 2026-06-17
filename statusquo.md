@@ -591,3 +591,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v3/v4/v5. Stop sweeping this strategy-aux action-distill variant; next concrete branch should either build an offline replay/representation trainer or start Worker pretraining with BFS/path-assignment target heatmaps to address 16x draw/finish execution.
 - **Context:** Best new checkpoint was `runs/adaptive-strategy-aux-v3/ckpts/generals-adaptive-strategy-aux-v3-iter-000008.eqx`; it reached `67.19%` min over 256 games/row on seed 74000 versus `66.80%` for the shared-MSE history base, with 16p0 still bottlenecked by draws. v4 close-spawn and v5 aux-head pretrain both topped out at `67.19%` over 64 games/row and were not worth promotion.
+
+## [2026-06-17 11:38] Adaptive Worker BFS Pretraining
+- **Changes:** Added `adaptive_worker_pretrain.py`, an 18-channel Worker pretraining script that appends target heatmap, eligible source heatmap, and BFS route potential to adaptive observations, then trains soft BFS-progress action targets from full-state labels. Added a focused Worker label test and documented GPU Worker runs.
+- **Status:** Completed
+- **Next Steps:** Do not treat Worker checkpoints as promotion policies yet. Next step is to split Worker outputs into source and direction heads or wire a thin Commander/route wrapper that supplies target/route channels, then test whether Worker execution reduces 16x draw rate.
+- **Context:** Hard one-hot Worker labels were too fragmented despite being legal; label top share was only about `2.1%`. After switching to soft BFS-progress targets, `runs/adaptive-worker-pretrain-general-v2/` improved Useful support accuracy from `7.1%` to `62.7%` over 100 GPU iterations on `cuda:0`. The checkpoint is stored under `runs/`, not a cache directory.
