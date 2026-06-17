@@ -976,6 +976,43 @@ def test_accepted_replacement_weights_prefer_outcome_then_score():
     assert jnp.allclose(weights, jnp.array([1.0, 0.5, 0.0], dtype=jnp.float32))
 
 
+def test_strategy_q_replay_keeps_q_weights_only():
+    from examples._experimental.ppo.adaptive_search_distill import (
+        SOFT_KL_WEIGHT_INDEX,
+        SOFT_SEARCH_WEIGHT_INDEX,
+        SOFT_STRATEGY_BELIEF_WEIGHT_INDEX,
+        SOFT_STRATEGY_Q_WEIGHT_INDEX,
+        augment_with_strategy_q_replay,
+        update_strategy_q_replay,
+    )
+
+    batch_size = 4
+    flat_batch = tuple(jnp.arange(batch_size, dtype=jnp.float32) + index for index in range(23))
+    flat_batch = list(flat_batch)
+    flat_batch[SOFT_STRATEGY_Q_WEIGHT_INDEX] = jnp.array([0.0, 1.0, 0.0, 2.0], dtype=jnp.float32)
+    flat_batch[SOFT_SEARCH_WEIGHT_INDEX] = jnp.ones((batch_size,), dtype=jnp.float32)
+    flat_batch[SOFT_KL_WEIGHT_INDEX] = jnp.ones((batch_size,), dtype=jnp.float32)
+    flat_batch[SOFT_STRATEGY_BELIEF_WEIGHT_INDEX] = jnp.ones((batch_size,), dtype=jnp.float32)
+    flat_batch = tuple(flat_batch)
+
+    replay, new_rows = update_strategy_q_replay(None, flat_batch, capacity=8)
+    augmented, sampled_rows = augment_with_strategy_q_replay(
+        flat_batch,
+        replay,
+        jrandom.PRNGKey(0),
+        replay_ratio=0.5,
+    )
+
+    assert new_rows == 2
+    assert sampled_rows == 2
+    assert replay[0].shape[0] == 2
+    assert augmented[0].shape[0] == 6
+    assert jnp.all(augmented[SOFT_STRATEGY_Q_WEIGHT_INDEX][-2:] > 0.0)
+    assert jnp.allclose(augmented[SOFT_SEARCH_WEIGHT_INDEX][-2:], 0.0)
+    assert jnp.allclose(augmented[SOFT_KL_WEIGHT_INDEX][-2:], 0.0)
+    assert jnp.allclose(augmented[SOFT_STRATEGY_BELIEF_WEIGHT_INDEX][-2:], 0.0)
+
+
 def test_adaptive_soft_loss_can_add_extra_improvement_term():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
@@ -1375,11 +1412,20 @@ def test_soft_search_weights_can_select_only_search_improvements():
         ],
         dtype=jnp.float32,
     )
+    candidate_outcomes = jnp.array(
+        [
+            [1, 1, 1],
+            [1, 2, 1],
+            [1, 2, 1],
+        ],
+        dtype=jnp.int32,
+    )
     active_weights = jnp.array([1.0, 1.0, 0.0], dtype=jnp.float32)
 
     active = soft_search_weights(
         candidate_indices,
         search_scores,
+        candidate_outcomes,
         active_weights,
         SOFT_WEIGHT_MODE_NAME_TO_ID["active"],
         min_margin=2.0,
@@ -1389,8 +1435,19 @@ def test_soft_search_weights_can_select_only_search_improvements():
     improvement = soft_search_weights(
         candidate_indices,
         search_scores,
+        candidate_outcomes,
         active_weights,
         SOFT_WEIGHT_MODE_NAME_TO_ID["improvement"],
+        min_margin=2.0,
+        margin_scale=4.0,
+        max_weight=1.0,
+    )
+    accepted = soft_search_weights(
+        candidate_indices,
+        search_scores,
+        candidate_outcomes,
+        active_weights,
+        SOFT_WEIGHT_MODE_NAME_TO_ID["accepted"],
         min_margin=2.0,
         margin_scale=4.0,
         max_weight=1.0,
@@ -1398,6 +1455,7 @@ def test_soft_search_weights_can_select_only_search_improvements():
 
     assert jnp.allclose(active, active_weights)
     assert jnp.allclose(improvement, jnp.array([0.375, 0.0, 0.0], dtype=jnp.float32))
+    assert jnp.allclose(accepted, jnp.array([0.375, 1.0, 0.0], dtype=jnp.float32))
 
 
 def test_adaptive_rollout_search_candidates_respects_effective_size():

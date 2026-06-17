@@ -3222,3 +3222,91 @@ iter 40: Episodes 94,  Wins 70, Draws 6
 | final EMA | `64.06%` | 8p0 |
 
 Conclusion: conservative long-rollout mixed PPO is stable but still not strong enough. It slightly improves the same-seed bottleneck at iter10, then shifts weakness back to 8p0/16p0. This supports the current diagnosis: continuing small CNN PPO continuation moves the weak row rather than solving the size/seat conflict. A stronger next step should either add replay-balanced accepted replacements or change the architecture/data representation, not just extend these PPO runs.
+
+## 2026-06-17 Accepted Replacement Replay and Policy Distill
+
+Implemented two accepted-replacement follow-ups in `adaptive_search_distill.py`:
+
+```text
+--strategy-q-replay-capacity
+--strategy-q-replay-ratio
+```
+
+These keep a bounded buffer of accepted Q rows. Replay samples are appended to future flat batches with only Q/rank weights preserved; KL/search/value/outcome/intent/finish/belief weights are cleared so replay does not amplify unrelated losses.
+
+Also added:
+
+```text
+--soft-weight-mode accepted
+```
+
+This lets policy distillation update only rows where long rollout search finds a credible replacement over the top-prior action.
+
+### Accepted Q replay
+
+Run:
+
+```text
+runs/adaptive-strategy-q-accepted-replay-r64-v1/
+init: outcome-r64-v3
+search: top_k=4, rollout_steps=64
+q replay: capacity=4096, ratio=2.0
+loss: Q/rank only, policy frozen
+```
+
+Replay solved the sample-count issue mechanically:
+
+```text
+accepted rows entering replay: usually 6-21 per 512 current samples
+training Q rows after replay: about 1030 per update
+replay size by iter64: 726 rows
+```
+
+But Q calibration did not clearly improve:
+
+```text
+StratQ stayed around 33-43 after warmup
+StratRank stayed around 2.6-3.4
+```
+
+64 games/row max750 on seed `77280` looked promising:
+
+| scale | min win rate |
+| ---: | ---: |
+| `0.000` | `70.31%` |
+| `0.001` | `71.88%` |
+| `0.002` | `70.31%` |
+
+The 256 games/row confirmation on seed `77320` rejected the Q-bias promotion:
+
+| model / scale | min win rate | note |
+| --- | ---: | --- |
+| replay scale `0.001` | `68.75%` | 16p0 bottleneck |
+| replay scale `0.002` | `70.31%` | below platform |
+| replay scale `0.000` | `73.05%` | identical to init policy, not replay improvement |
+| init `strategy-aux-v3 iter8`, scale `0.000` | `73.05%` | confirms scale-0 replay did not change policy |
+| shared-MSE base | `71.88%` | same-seed baseline is already high |
+
+Conclusion: Q replay is implemented and useful for diagnostics, but the current raw Q bias still fails promotion. The high no-bias score came from seed/base policy variance, not replay learning.
+
+### Accepted policy distill
+
+Run:
+
+```text
+runs/adaptive-accepted-policy-r64-v1/
+init/base: shared-MSE history base
+soft_weight_mode=accepted
+improve_weight=0.02
+kl_weight=1.0
+lr=1e-6
+```
+
+Accepted policy samples remained sparse (`0.4-4.1%` selected rows). Even with tiny LR and strong KL, direct policy update damaged the weak row:
+
+| model | 64 games/row min | bottleneck |
+| --- | ---: | --- |
+| same-seed base | `70.31%` | 8p0 |
+| accepted-policy v1 | `60.94%` | 16p0 |
+
+Conclusion: direct accepted action distillation is still unsafe in the current CNN policy. It helps 8x rows on some seeds but pushes failure into 16p0, matching the broader seat/size tradeoff pattern. Do not continue action-level accepted distill without either a safer replay-balanced objective or a different architecture.

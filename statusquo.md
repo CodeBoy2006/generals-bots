@@ -669,3 +669,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue these exact PPO recipes. Next useful branch should add replay-balanced accepted replacements or change the network/data representation instead of more small-CNN PPO continuation.
 - **Context:** Terminal+HL-Gauss v1 collapsed rollout wins after iter1 and only reached `67.19%` min at iter10 EMA on a 64-row eval. Conservative composite v2 was stable but only moved same-seed min from base `64.06%` to `65.62%` at iter10, then final EMA returned to `64.06%`.
+
+## [2026-06-17 13:06] Accepted Replay and Policy Distill
+- **Changes:** Added accepted-row strategy-Q replay (`--strategy-q-replay-capacity`, `--strategy-q-replay-ratio`) and accepted policy distill weighting (`--soft-weight-mode accepted`) to `adaptive_search_distill.py`, with focused tests and README/docs updates. Ran GPU probes under `runs/adaptive-strategy-q-accepted-replay-r64-v1/` and `runs/adaptive-accepted-policy-r64-v1/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote raw Q replay or accepted action distill. The next aligned branch should change representation/architecture or build a safer accepted-replacement objective, not directly bias policy logits from the current Q head.
+- **Context:** Q replay raised effective Q samples to about `1030` per update, but 256-row scale `0.001` still scored only `68.75%` min; the scale-0 `73.05%` matched the init policy exactly and was seed variance. Accepted policy distill hurt 16p0, scoring `60.94%` min versus same-seed base `70.31%`.

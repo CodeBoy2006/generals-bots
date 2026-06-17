@@ -17,6 +17,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jrandom
+import numpy as np
 import optax
 
 from generals.agents.ppo_policy_agent import parse_policy_channels
@@ -52,7 +53,7 @@ from conservative_search_distill import (
 from train import checkpoint_path_for_iteration, prune_old_checkpoints, stack_learner_actions
 
 TARGET_MODE_NAMES = ("hard", "soft")
-SOFT_WEIGHT_MODE_NAMES = ("active", "improvement")
+SOFT_WEIGHT_MODE_NAMES = ("active", "improvement", "accepted")
 SOFT_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(SOFT_WEIGHT_MODE_NAMES)}
 STRATEGY_Q_TARGET_NAMES = ("score", "outcome", "outcome-score")
 STRATEGY_Q_TARGET_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATEGY_Q_TARGET_NAMES)}
@@ -61,6 +62,25 @@ STRATEGY_Q_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATE
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
+SOFT_SEARCH_WEIGHT_INDEX = 8
+SOFT_IMPROVEMENT_EXTRA_WEIGHT_INDEX = 9
+SOFT_SEARCH_VALUE_WEIGHT_INDEX = 11
+SOFT_SEARCH_OUTCOME_WEIGHT_INDEX = 13
+SOFT_KL_WEIGHT_INDEX = 14
+SOFT_STRATEGY_Q_WEIGHT_INDEX = 16
+SOFT_STRATEGY_INTENT_WEIGHT_INDEX = 18
+SOFT_STRATEGY_FINISH_WEIGHT_INDEX = 20
+SOFT_STRATEGY_BELIEF_WEIGHT_INDEX = 22
+SOFT_REPLAY_ZERO_WEIGHT_INDICES = (
+    SOFT_SEARCH_WEIGHT_INDEX,
+    SOFT_IMPROVEMENT_EXTRA_WEIGHT_INDEX,
+    SOFT_SEARCH_VALUE_WEIGHT_INDEX,
+    SOFT_SEARCH_OUTCOME_WEIGHT_INDEX,
+    SOFT_KL_WEIGHT_INDEX,
+    SOFT_STRATEGY_INTENT_WEIGHT_INDEX,
+    SOFT_STRATEGY_FINISH_WEIGHT_INDEX,
+    SOFT_STRATEGY_BELIEF_WEIGHT_INDEX,
+)
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -79,6 +99,81 @@ def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
 def concatenate_flat_batches(*batches):
     """Concatenate already-flattened p0/p1 distillation batches."""
     return tuple(jnp.concatenate(items, axis=0) for items in zip(*batches, strict=True))
+
+
+def flat_batch_size(flat_batch) -> int:
+    """Return the number of flattened samples in a distillation batch."""
+    return int(flat_batch[0].shape[0])
+
+
+def select_flat_batch_rows(flat_batch, indices) -> tuple[jnp.ndarray, ...]:
+    """Select the same row indices from every array in a flat batch."""
+    return tuple(array[indices] for array in flat_batch)
+
+
+def concatenate_optional_flat_batches(*batches):
+    """Concatenate non-empty flat batches, preserving tuple layout."""
+    present = [batch for batch in batches if batch is not None and flat_batch_size(batch) > 0]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    return tuple(jnp.concatenate(items, axis=0) for items in zip(*present, strict=True))
+
+
+def zero_non_q_replay_weights(flat_batch) -> tuple[jnp.ndarray, ...]:
+    """Keep replay rows focused on strategy-Q/rank losses only."""
+    arrays = list(flat_batch)
+    for index in SOFT_REPLAY_ZERO_WEIGHT_INDICES:
+        arrays[index] = jnp.zeros_like(arrays[index])
+    return tuple(arrays)
+
+
+def extract_strategy_q_replay_rows(flat_batch):
+    """Return flat rows with nonzero strategy-Q weights."""
+    q_weights = np.asarray(jax.device_get(flat_batch[SOFT_STRATEGY_Q_WEIGHT_INDEX] > 0.0))
+    indices = np.nonzero(q_weights)[0]
+    if indices.size == 0:
+        return None
+    return select_flat_batch_rows(flat_batch, indices)
+
+
+def cap_flat_replay(flat_batch, capacity: int):
+    """Keep only the newest replay rows up to capacity."""
+    if flat_batch is None or capacity <= 0:
+        return None
+    size = flat_batch_size(flat_batch)
+    if size <= capacity:
+        return flat_batch
+    return tuple(array[-capacity:] for array in flat_batch)
+
+
+def update_strategy_q_replay(replay_batch, flat_batch, capacity: int):
+    """Append accepted strategy-Q rows to a bounded replay buffer."""
+    if capacity <= 0:
+        return None, 0
+    new_rows = extract_strategy_q_replay_rows(flat_batch)
+    new_count = 0 if new_rows is None else flat_batch_size(new_rows)
+    replay_batch = concatenate_optional_flat_batches(replay_batch, new_rows)
+    return cap_flat_replay(replay_batch, capacity), new_count
+
+
+def sample_strategy_q_replay_rows(replay_batch, key, num_samples: int):
+    """Sample replay rows with replacement and clear non-Q loss weights."""
+    if replay_batch is None or num_samples <= 0 or flat_batch_size(replay_batch) == 0:
+        return None
+    replay_size = flat_batch_size(replay_batch)
+    indices = jrandom.randint(key, (num_samples,), minval=0, maxval=replay_size)
+    return zero_non_q_replay_weights(select_flat_batch_rows(replay_batch, indices))
+
+
+def augment_with_strategy_q_replay(flat_batch, replay_batch, key, replay_ratio: float):
+    """Append sampled Q replay rows to the current flat batch."""
+    if replay_ratio <= 0.0 or replay_batch is None or flat_batch_size(replay_batch) == 0:
+        return flat_batch, 0
+    replay_count = max(1, int(flat_batch_size(flat_batch) * replay_ratio))
+    sampled_replay = sample_strategy_q_replay_rows(replay_batch, key, replay_count)
+    return concatenate_optional_flat_batches(flat_batch, sampled_replay), replay_count
 
 
 def search_value_targets(search_scores: jnp.ndarray, score_scale: float) -> jnp.ndarray:
@@ -517,6 +612,7 @@ def compute_strategy_aux_loss(
 def soft_search_weights(
     candidate_indices,
     search_scores,
+    candidate_outcomes,
     active_weights,
     soft_weight_mode,
     min_margin: float,
@@ -531,10 +627,22 @@ def soft_search_weights(
         margin_scale,
         max_weight,
     )
-    return jax.lax.cond(
-        soft_weight_mode == SOFT_WEIGHT_MODE_NAME_TO_ID["active"],
-        lambda _: active_weights,
-        lambda _: improve_weights * active_weights,
+    accepted_weights = accepted_replacement_weights(
+        candidate_indices,
+        search_scores,
+        candidate_outcomes,
+        active_weights,
+        min_margin,
+        margin_scale,
+        max_weight,
+    )
+    return jax.lax.switch(
+        soft_weight_mode,
+        (
+            lambda _: active_weights,
+            lambda _: improve_weights * active_weights,
+            lambda _: accepted_weights,
+        ),
         None,
     ).astype(jnp.float32)
 
@@ -1734,6 +1842,7 @@ def collect_adaptive_soft_batch(
         search_weights = soft_search_weights(
             candidate_indices,
             search_scores,
+            candidate_outcomes,
             active_weights,
             soft_weight_mode,
             min_margin,
@@ -1922,6 +2031,8 @@ def parse_args():
     parser.add_argument("--strategy-q-target", choices=STRATEGY_Q_TARGET_NAMES, default="score")
     parser.add_argument("--strategy-q-outcome-score-weight", type=float, default=0.05)
     parser.add_argument("--strategy-q-weight-mode", choices=STRATEGY_Q_WEIGHT_MODE_NAMES, default="active")
+    parser.add_argument("--strategy-q-replay-capacity", type=int, default=0)
+    parser.add_argument("--strategy-q-replay-ratio", type=float, default=0.0)
     parser.add_argument("--strategy-intent-weight", type=float, default=0.0)
     parser.add_argument("--strategy-finish-weight", type=float, default=0.0)
     parser.add_argument("--strategy-belief-weight", type=float, default=0.0)
@@ -1995,6 +2106,10 @@ def parse_args():
         parser.error("--strategy-q-rank-min-margin must be non-negative")
     if args.strategy_q_outcome_score_weight < 0.0:
         parser.error("--strategy-q-outcome-score-weight must be non-negative")
+    if args.strategy_q_replay_capacity < 0:
+        parser.error("--strategy-q-replay-capacity must be non-negative")
+    if args.strategy_q_replay_ratio < 0.0:
+        parser.error("--strategy-q-replay-ratio must be non-negative")
     if args.temperature <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--temperature and --score-temperature must be positive")
     if args.margin_scale <= 0.0 or args.max_improve_weight <= 0.0:
@@ -2128,6 +2243,8 @@ def main():
             f"intent={args.strategy_intent_weight:g}, "
             f"finish={args.strategy_finish_weight:g}, belief={args.strategy_belief_weight:g}"
         )
+    if args.strategy_q_replay_capacity > 0 and args.strategy_q_replay_ratio > 0.0:
+        print(f"Strategy replay: cap={args.strategy_q_replay_capacity}, ratio={args.strategy_q_replay_ratio:g}")
     if args.checkpoint_dir is not None and args.checkpoint_every > 0:
         print(f"Checkpoints:   every {args.checkpoint_every} iterations in {args.checkpoint_dir}")
     print()
@@ -2163,8 +2280,11 @@ def main():
 
     checkpoint_paths = []
     model_stem = Path(args.model_path).stem
+    strategy_q_replay = None
     for iteration in range(1, args.num_iterations + 1):
         t0 = time.time()
+        replay_new_rows = 0
+        replay_sampled_rows = 0
         key, rollout_key, update_key, pool_key = jrandom.split(key, 4)
         pool = make_adaptive_state_pool(
             pool_key,
@@ -2397,6 +2517,20 @@ def main():
                     args.base_scoreboard_history,
                 )
                 flat_batch = flatten_adaptive_soft_batch(*batch)
+            if args.strategy_q_replay_capacity > 0:
+                strategy_q_replay, replay_new_rows = update_strategy_q_replay(
+                    strategy_q_replay,
+                    flat_batch,
+                    args.strategy_q_replay_capacity,
+                )
+            if args.strategy_q_replay_ratio > 0.0 and strategy_q_replay is not None:
+                update_key, replay_key = jrandom.split(update_key)
+                flat_batch, replay_sampled_rows = augment_with_strategy_q_replay(
+                    flat_batch,
+                    strategy_q_replay,
+                    replay_key,
+                    args.strategy_q_replay_ratio,
+                )
             student_network, opt_state, loss, metrics, update_key = train_adaptive_soft_epoch(
                 student_network,
                 base_network,
@@ -2434,6 +2568,7 @@ def main():
         if iteration % 5 == 0 or iteration == 1 or iteration == args.num_iterations:
             elapsed = time.time() - t0
             samples = args.num_envs * args.num_steps
+            replay_size = 0 if strategy_q_replay is None else flat_batch_size(strategy_q_replay)
             print(
                 f"Iter {iteration:4d} | Loss: {float(loss):.5f} | "
                 f"KL: {float(metrics['kl_loss']):.5f} | "
@@ -2445,6 +2580,7 @@ def main():
                 f"Intent: {float(metrics.get('strategy_intent_loss', 0.0)):.4f} | "
                 f"Belief: {float(metrics.get('strategy_belief_loss', 0.0)):.4f} | "
                 f"StratS: {int(metrics.get('strategy_samples', 0)):5d} | "
+                f"Replay: {replay_new_rows:3d}/{replay_size:5d}+{replay_sampled_rows:4d} | "
                 f"Selected: {int(metrics['selected_samples']):5d}/{samples} "
                 f"({float(metrics['selected_fraction']) * 100:4.1f}%) | "
                 f"Margin: {float(metrics['mean_selected_margin']):6.1f} | "
