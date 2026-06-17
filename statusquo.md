@@ -813,3 +813,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-plan-q-plan-policy-v0`. The next aligned implementation should separate plan choice from execution with a target-conditioned Worker or mixture policy instead of forcing plan actions into the primitive policy distribution.
 - **Context:** Plan-policy v0 used `policy_kl_weight=1.0`, `plan_policy_weight=0.05`, `lr=2e-5`, 60 epochs on corrected worker v2. Training reduced plan-policy CE `8.8217 -> 4.9325` with KL around `0.035`, but fixed-v5 max250 128-row regressed to `6.25%` min (`p0 10.94%`, `p1 6.25%`). This mirrors earlier action-distill seat tradeoff failures.
+
+## [2026-06-17 19:05] Strategy Worker Mixture Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-worker-mix-prob`, `--strategy-worker-finish-gate`, and `--strategy-worker-policy-margin` for explicit one-step source/target worker execution from spatial strategy heads. Updated README and strategy docs with commands and results.
+- **Status:** Completed
+- **Next Steps:** Do not use worker mixture for promotion with current spatial heads. Next Worker work should train a target-conditioned action head from successful worker/Plan-Q trajectories instead of hand-coded source-to-target movement.
+- **Context:** Fixed-v5 max250 128-row baseline for `adaptive-strategy-spatial-v1` was `11.72%` min. Worker mix regressed across all tested settings: mix `0.02` min `8.59%`, mix `0.05` min `9.38%`, mix `0.10` min `3.91%`, mix `0.20` min `3.12%`; finish-gating and policy-margin gates also stayed below baseline. The worker reduced draws mostly by increasing losses.

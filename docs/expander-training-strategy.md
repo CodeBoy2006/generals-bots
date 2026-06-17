@@ -5464,3 +5464,48 @@ It reduced draw for p0 but damaged p1 badly, matching earlier action-distill/sea
 Do not promote adaptive-plan-q-plan-policy-v0.
 Next step should be an explicit target-conditioned Worker or mixture policy, where plan choice and execution are separated rather than forcing plan actions into the primitive policy distribution.
 ```
+
+## 2026-06-17 Strategy Worker Mixture Probe
+
+Added explicit worker execution support to `evaluate_adaptive_policy.py`:
+
+```text
+--strategy-worker-mix-prob
+--strategy-worker-finish-gate
+--strategy-worker-policy-margin
+```
+
+Mechanism:
+
+```text
+The evaluator samples the base policy as usual.
+If worker mix triggers, it selects source and target from the strategy spatial heads.
+The worker chooses a legal one-step move from the selected source toward the selected target.
+Policy-margin gating only permits the worker action when its base-policy logit is near the best policy action.
+Finish gating scales worker probability by P(finish) from the finish head.
+```
+
+Fixed-v5 max250 128-row, `adaptive-strategy-spatial-v1`:
+
+| worker setting | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline | `11.72%` | `12.50%` | `11.72%` | `50.78%` | `53.91%` |
+| mix `0.02` | `9.38%` | `8.59%` | `8.59%` | `50.00%` | `53.12%` |
+| mix `0.05` | `11.72%` | `9.38%` | `9.38%` | `47.66%` | `51.56%` |
+| mix `0.10` | `4.69%` | `3.91%` | `3.91%` | `39.06%` | `47.66%` |
+| mix `0.20` | `5.47%` | `3.12%` | `3.12%` | `28.12%` | `39.06%` |
+| mix `0.10` finish-gated | `8.59%` | `9.38%` | `8.59%` | `53.12%` | `43.75%` |
+| mix `0.20` finish-gated | `3.91%` | `7.81%` | `3.91%` | `46.09%` | `47.66%` |
+| mix `0.20`, margin `1` | `3.91%` | `3.12%` | `3.12%` | `57.81%` | `60.94%` |
+| mix `0.20`, margin `2` | `6.25%` | `5.47%` | `5.47%` | `52.34%` | `57.03%` |
+| mix `0.20`, margin `4` | `9.38%` | `8.59%` | `8.59%` | `57.03%` | `53.91%` |
+
+Conclusion:
+
+```text
+The explicit worker lowers draw only by increasing losses.
+Policy-margin and finish gates do not recover baseline strength.
+This confirms the current source/target spatial heads are not reliable enough to directly drive deterministic execution.
+Keep the evaluator worker path as a diagnostic, but do not use it for promotion.
+Next useful Worker work needs supervised target-conditioned action data and a learned worker policy, not hand-coded source->target movement from weak spatial heads.
+```

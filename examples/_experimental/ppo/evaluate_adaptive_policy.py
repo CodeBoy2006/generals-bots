@@ -25,6 +25,7 @@ from adaptive_common import (
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
+    adaptive_action_to_index,
     adaptive_input_channel_count,
     adaptive_index_to_action,
     adaptive_obs_to_array,
@@ -86,9 +87,18 @@ def _policy_action(
     strategy_target_rerank_scale: float,
     strategy_target_finish_gate: bool,
     strategy_spatial_rerank_scale: float,
+    strategy_worker_mix_prob: float,
+    strategy_worker_finish_gate: bool,
+    strategy_worker_policy_margin: float,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
-    if strategy_q_rerank_scale > 0.0 or strategy_target_rerank_scale > 0.0 or strategy_spatial_rerank_scale > 0.0:
+    needs_aux = (
+        strategy_q_rerank_scale > 0.0
+        or strategy_target_rerank_scale > 0.0
+        or strategy_spatial_rerank_scale > 0.0
+        or strategy_worker_mix_prob > 0.0
+    )
+    if needs_aux:
         aux = network.strategy_auxiliary(obs_arr, mask, active)
     if strategy_q_rerank_scale > 0.0:
         logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
@@ -109,12 +119,33 @@ def _policy_action(
             network.pad_size,
             strategy_spatial_rerank_scale,
         )[0]
+    action_key, worker_key = jrandom.split(key)
     index = jax.lax.cond(
         policy_mode == 0,
         lambda _: jnp.argmax(logits),
-        lambda _: jrandom.categorical(key, logits),
+        lambda _: jrandom.categorical(action_key, logits),
         None,
     )
+    if strategy_worker_mix_prob > 0.0:
+        finish_probability = (
+            jax.nn.softmax(aux.finish_logits, axis=-1)[1] if strategy_worker_finish_gate else jnp.asarray(1.0)
+        )
+        worker_probability = jnp.clip(strategy_worker_mix_prob * finish_probability, 0.0, 1.0)
+        worker_action = strategy_worker_action(
+            obs_arr,
+            mask,
+            active,
+            aux.source_logits,
+            aux.target_logits,
+            network.pad_size,
+        )
+        worker_index = adaptive_action_to_index(worker_action, network.pad_size)
+        if strategy_worker_policy_margin >= 0.0:
+            worker_supported = logits[worker_index] >= jnp.max(logits) - strategy_worker_policy_margin
+        else:
+            worker_supported = jnp.asarray(True)
+        use_worker = (jrandom.uniform(worker_key) < worker_probability) & worker_supported
+        index = jnp.where(use_worker, worker_index, index)
     return adaptive_index_to_action(index, network.pad_size)
 
 
@@ -129,6 +160,53 @@ def strategy_q_rerank_logits(
     legal_mean = jnp.sum(jnp.where(legal, action_q_values, 0.0), axis=-1, keepdims=True) / legal_count
     q_bias = jnp.where(legal, action_q_values - legal_mean, 0.0)
     return policy_logits + scale * q_bias
+
+
+def strategy_worker_action(
+    obs_arr: jnp.ndarray,
+    legal_mask: jnp.ndarray,
+    active: jnp.ndarray,
+    source_logits: jnp.ndarray,
+    target_logits: jnp.ndarray,
+    pad_size: int,
+) -> jnp.ndarray:
+    """Choose a source-target plan and execute one legal target-conditioned worker step."""
+    coords = jnp.arange(pad_size)
+    rows = coords[:, None]
+    cols = coords[None, :]
+    target_scores = jnp.where(active, target_logits, -1.0e9)
+    target_index = jnp.argmax(target_scores.reshape(-1))
+    target_row = target_index // pad_size
+    target_col = target_index % pad_size
+
+    movable = jnp.any(legal_mask, axis=-1)
+    army_score = 0.25 * jnp.log1p(jnp.maximum(obs_arr[0], 0.0))
+    route_distance = jnp.abs(rows - target_row) + jnp.abs(cols - target_col)
+    source_scores = source_logits + army_score - 0.05 * route_distance.astype(jnp.float32)
+    source_index = jnp.argmax(jnp.where(movable, source_scores, -1.0e9).reshape(-1))
+    source_row = source_index // pad_size
+    source_col = source_index % pad_size
+
+    direction_ids = jnp.arange(4)
+    dest_rows = source_row + DIRECTIONS[:, 0]
+    dest_cols = source_col + DIRECTIONS[:, 1]
+    current_distance = jnp.abs(source_row - target_row) + jnp.abs(source_col - target_col)
+    next_distance = jnp.abs(dest_rows - target_row) + jnp.abs(dest_cols - target_col)
+    progress = current_distance - next_distance
+    legal_dirs = legal_mask[source_row, source_col]
+    direction_scores = jnp.where(legal_dirs, progress.astype(jnp.float32), -1.0e9)
+    direction = jnp.argmax(direction_scores).astype(jnp.int32)
+    has_move = jnp.max(direction_scores) > -1.0e8
+    return jnp.array(
+        [
+            (~has_move).astype(jnp.int32),
+            source_row.astype(jnp.int32),
+            source_col.astype(jnp.int32),
+            direction,
+            jnp.int32(0),
+        ],
+        dtype=jnp.int32,
+    )
 
 
 def strategy_target_rerank_logits(
@@ -259,6 +337,9 @@ def evaluate_batch(
     strategy_target_rerank_scale=0.0,
     strategy_target_finish_gate=False,
     strategy_spatial_rerank_scale=0.0,
+    strategy_worker_mix_prob=0.0,
+    strategy_worker_finish_gate=False,
+    strategy_worker_policy_margin=-1.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -360,6 +441,9 @@ def evaluate_batch(
                 strategy_target_rerank_scale,
                 strategy_target_finish_gate,
                 strategy_spatial_rerank_scale,
+                strategy_worker_mix_prob,
+                strategy_worker_finish_gate,
+                strategy_worker_policy_margin,
             )
         )(
             obs_arr,
@@ -406,6 +490,9 @@ def evaluate_policy_opponent_batch(
     strategy_target_rerank_scale=0.0,
     strategy_target_finish_gate=False,
     strategy_spatial_rerank_scale=0.0,
+    strategy_worker_mix_prob=0.0,
+    strategy_worker_finish_gate=False,
+    strategy_worker_policy_margin=-1.0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -508,6 +595,9 @@ def evaluate_policy_opponent_batch(
                 strategy_target_rerank_scale,
                 strategy_target_finish_gate,
                 strategy_spatial_rerank_scale,
+                strategy_worker_mix_prob,
+                strategy_worker_finish_gate,
+                strategy_worker_policy_margin,
             )
         )(
             obs_arr,
@@ -575,6 +665,9 @@ def parse_args():
     parser.add_argument("--strategy-target-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-target-finish-gate", action="store_true")
     parser.add_argument("--strategy-spatial-rerank-scale", type=float, default=0.0)
+    parser.add_argument("--strategy-worker-mix-prob", type=float, default=0.0)
+    parser.add_argument("--strategy-worker-finish-gate", action="store_true")
+    parser.add_argument("--strategy-worker-policy-margin", type=float, default=-1.0)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -633,6 +726,14 @@ def parse_args():
         parser.error("--strategy-spatial-rerank-scale must be non-negative")
     if args.strategy_spatial_rerank_scale > 0.0 and not (args.strategy_aux and args.strategy_spatial_aux):
         parser.error("--strategy-spatial-rerank-scale requires --strategy-aux --strategy-spatial-aux")
+    if not (0.0 <= args.strategy_worker_mix_prob <= 1.0):
+        parser.error("--strategy-worker-mix-prob must be between 0 and 1")
+    if args.strategy_worker_mix_prob > 0.0 and not (args.strategy_aux and args.strategy_spatial_aux):
+        parser.error("--strategy-worker-mix-prob requires --strategy-aux --strategy-spatial-aux")
+    if args.strategy_worker_finish_gate and args.strategy_worker_mix_prob <= 0.0:
+        parser.error("--strategy-worker-finish-gate requires --strategy-worker-mix-prob")
+    if args.strategy_worker_policy_margin < 0.0 and args.strategy_worker_policy_margin != -1.0:
+        parser.error("--strategy-worker-policy-margin must be non-negative, or -1 to disable")
     return args
 
 
@@ -726,6 +827,14 @@ def main():
         print(f"Target bias: scale={args.strategy_target_rerank_scale:g}{gate_label}")
     if args.strategy_spatial_rerank_scale > 0.0:
         print(f"Spatial bias: scale={args.strategy_spatial_rerank_scale:g}")
+    if args.strategy_worker_mix_prob > 0.0:
+        gate_label = " finish-gated" if args.strategy_worker_finish_gate else ""
+        margin_label = (
+            f", policy-margin={args.strategy_worker_policy_margin:g}"
+            if args.strategy_worker_policy_margin >= 0.0
+            else ""
+        )
+        print(f"Worker mix:  p={args.strategy_worker_mix_prob:g}{gate_label}{margin_label}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -772,6 +881,9 @@ def main():
                     args.strategy_target_rerank_scale,
                     args.strategy_target_finish_gate,
                     args.strategy_spatial_rerank_scale,
+                    args.strategy_worker_mix_prob,
+                    args.strategy_worker_finish_gate,
+                    args.strategy_worker_policy_margin,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -792,6 +904,9 @@ def main():
                     args.strategy_target_rerank_scale,
                     args.strategy_target_finish_gate,
                     args.strategy_spatial_rerank_scale,
+                    args.strategy_worker_mix_prob,
+                    args.strategy_worker_finish_gate,
+                    args.strategy_worker_policy_margin,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -834,6 +949,9 @@ def main():
         "strategy_target_rerank_scale": args.strategy_target_rerank_scale,
         "strategy_target_finish_gate": args.strategy_target_finish_gate,
         "strategy_spatial_rerank_scale": args.strategy_spatial_rerank_scale,
+        "strategy_worker_mix_prob": args.strategy_worker_mix_prob,
+        "strategy_worker_finish_gate": args.strategy_worker_finish_gate,
+        "strategy_worker_policy_margin": args.strategy_worker_policy_margin,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

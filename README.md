@@ -863,6 +863,8 @@ uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py \
   --strategy-target-rerank-scale 0.5
 ```
 
+For explicit source/target execution probes, `evaluate_adaptive_policy.py` also supports `--strategy-worker-mix-prob <p>`. This selects a source/target plan from the spatial heads and, with probability `p`, executes one legal target-conditioned worker move instead of the sampled policy action. `--strategy-worker-policy-margin <margin>` only permits worker moves whose base-policy logit is within `margin` of the current best action, and `--strategy-worker-finish-gate` scales the mix probability by the finish head. Current fixed-v5 probes regressed, so treat this as a diagnostic path rather than a promotion setting.
+
 `--strategy-target-finish-gate` multiplies that target bias by the finish-head probability. This is an inference-only probe and does not change checkpoint weights; current evidence says it can move wins between rows, but has not passed 256-row confirmation.
 
 ## 验证
