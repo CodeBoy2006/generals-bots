@@ -843,3 +843,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not keep sweeping candidate gate thresholds; move toward a trained target-conditioned Worker action head or a larger accepted-plan dataset with an explicit candidate-scoring gate.
 - **Context:** Candidate-only gate avoided the worst full-legal argmax failures but still did not confirm. At 256 fixed-v5 max250, baseline was `10.55%/9.77%` p0/p1 wins (`9.77%` min), while candidate threshold `1` with policy margin `4` scored `9.38%/11.72%` (`9.38%` min), again moving weakness between seats rather than increasing min win rate.
+
+## [2026-06-17 19:59] Plan-Q Target-Conditioned Worker
+- **Changes:** Added `adaptive_plan_worker_supervised.py` for offline Plan-Q best-plan Worker training, and extended `evaluate_adaptive_policy.py` with `--strategy-plan-worker-path` plus rerank-scale support. Documented commands and fixed-v5/Expander results.
+- **Status:** Completed
+- **Next Steps:** Do not promote v0 directly. Scale Plan-Q/Worker data with more fixed-v5 decisive states, then train mixed best/all accepted-plan Workers and add a confidence gate before stronger Worker influence.
+- **Context:** Best-plan v0 trained on 403 non-pass Plan-Q examples (`Act 16.4% -> 41.2%`, `Src 30.8% -> 54.6%`, `Dir 45.2% -> 65.5%`). Fixed-v5 max250 256-row improved at low scale (`9.77%` min baseline to `10.55%` at scale `0.02`, `11.33%` at scale `0.05`), while Expander 256-row at scale `0.02` was roughly flat (`76.56%` min baseline to `76.17%`).

@@ -5791,3 +5791,106 @@ from successful Plan-Q/worker trajectories, or collect a larger accepted-plan
 dataset with explicit positive/negative candidate labels and a separate gate
 head that scores candidates rather than primitive actions.
 ```
+
+## 2026-06-17 Plan-Q Target-Conditioned Worker v0
+
+Added `adaptive_plan_worker_supervised.py`, an offline trainer for a learned
+target-conditioned Worker from Plan-Q shards. It consumes each Plan-Q row and
+builds a Worker observation:
+
+```text
+worker_obs = adaptive_obs + source_one_hot + target_one_hot + route_potential
+```
+
+For v0, the trainer uses `selection=best`: one best non-pass source-target plan
+per state, ordered by replacement outcome and shaped plan score. The Worker
+network is a normal adaptive policy network over primitive actions. It can warm
+start from the old 18-channel Worker and expand to the current 35-channel
+U-Net/fog/history observation plus three command planes.
+
+Added `evaluate_adaptive_policy.py` support:
+
+```text
+--strategy-plan-worker-path <worker.eqx>
+--strategy-plan-worker-channels
+--strategy-plan-worker-network-arch
+--strategy-plan-worker-rerank-scale
+```
+
+At inference, the base strategy-spatial checkpoint chooses its normal policy
+action. The evaluator also constructs a source-target command from the spatial
+heads, runs the learned Worker, centers Worker logits over legal actions, and
+adds them as a small policy-logit bias. This is still a rerank probe, not a hard
+controller.
+
+Training run:
+
+```text
+dataset: runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz
+examples: 403 best non-pass plans
+init:    runs/adaptive-worker-split-random-v1/generals-adaptive-worker-split-random-v1.eqx
+output:  runs/adaptive-plan-worker-best-v0/generals-adaptive-plan-worker-best-v0.eqx
+input:   38 channels = 35 adaptive/fog/history + 3 command planes
+loss:    action=0.2, source=1.0, direction=1.0
+epochs:  120
+```
+
+Offline result:
+
+| metric | start | end |
+| --- | ---: | ---: |
+| loss | `3.4277` | `2.5087` |
+| action accuracy | `16.4%` | `41.2%` |
+| source accuracy | `30.8%` | `54.6%` |
+| direction accuracy | `45.2%` | `65.5%` |
+| useful action | `16.4%` | `41.2%` |
+
+Fixed-v5 max250, 128 games/row on seed `83940`:
+
+| plan-worker scale | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `6.25%` | `8.59%` | `6.25%` | `53.91%` | `55.47%` |
+| `0.02` | `8.59%` | `8.59%` | `8.59%` | `59.38%` | `56.25%` |
+| `0.05` | `8.59%` | `11.72%` | `8.59%` | `58.59%` | `57.81%` |
+| `0.10` | `7.81%` | `10.16%` | `7.81%` | `57.03%` | `58.59%` |
+
+Fixed-v5 max250, 256 games/row on seed `83960`:
+
+| plan-worker scale | p0 win | p1 win | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off | `9.77%` | `12.89%` | `9.77%` | `52.34%` | `50.39%` |
+| `0.02` | `10.55%` | `11.33%` | `10.55%` | `51.95%` | `50.00%` |
+| `0.05` | `11.33%` | `11.33%` | `11.33%` | `53.91%` | `50.39%` |
+
+Scale `0.05` is best on fixed-v5, but it harms the adaptive Expander gate.
+
+Expander adaptive 8/12/16, 128 games/row on seed `83980`:
+
+| scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| off | `72.66%` | `71.09%` | `78.12%` | `84.38%` | `78.91%` | `80.47%` | `71.09%` |
+| `0.02` | `76.56%` | `71.09%` | `78.12%` | `84.38%` | `73.44%` | `80.47%` | `71.09%` |
+| `0.05` | `72.66%` | `68.75%` | `80.47%` | `80.47%` | `76.56%` | `82.81%` | `68.75%` |
+
+Expander adaptive 8/12/16, 256 games/row on seed `84000`:
+
+| scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| off | `77.73%` | `79.30%` | `82.03%` | `79.30%` | `76.56%` | `82.81%` | `76.56%` |
+| `0.02` | `77.73%` | `80.08%` | `83.98%` | `81.25%` | `78.12%` | `76.17%` | `76.17%` |
+
+Conclusion:
+
+```text
+Plan-Worker v0 is the first Worker-style probe that improves fixed-v5 max250
+under 256-row confirmation without clearly collapsing the Expander adaptive
+gate.
+It is not a promotion setting: fixed-v5 min remains only 10-11%, and scale 0.05
+hurts Expander 8p1 at 128-row.
+Scale 0.02 is the safer diagnostic setting: fixed-v5 min improves by +0.78pp
+and Expander 256-row min changes by -0.39pp, likely within evaluation noise.
+This supports the next route: collect larger Plan-Q/Worker shards with more
+decisive fixed-v5 states, train Plan-Worker on mixed best/all accepted plans,
+and add a learned confidence gate before allowing stronger Worker influence.
+Do not promote v0, but do continue Plan-Worker data scaling.
+```

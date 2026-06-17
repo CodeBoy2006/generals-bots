@@ -846,6 +846,8 @@ Plan action labels use the standard adaptive action index, including the single 
 
 `evaluate_adaptive_policy.py --strategy-q-replace-worker-candidate` restricts the replacement gate to the single source/target worker action produced by the spatial heads instead of taking the best Q over every legal primitive action. Use it with `--strategy-q-replace-threshold` and `--strategy-aux --strategy-spatial-aux`. Early probes did not improve fixed-v5 max250 either, so this is useful mainly for separating action-Q calibration failures from candidate-generation failures.
 
+`adaptive_plan_worker_supervised.py` trains a separate target-conditioned Worker from Plan-Q shards. It appends `source_one_hot`, `target_one_hot`, and `route_potential` command planes to the saved adaptive observation, then supervises the Worker policy with the selected plan action. `evaluate_adaptive_policy.py --strategy-plan-worker-path <worker.eqx> --strategy-plan-worker-rerank-scale <x>` can load that Worker and use its centered logits as a small bias on the base strategy-spatial checkpoint. The first best-plan v0 run improved fixed-v5 max250 at 256 games/row with low scale `0.02`, while keeping Expander 256-row min roughly flat; treat it as a data-scaling direction, not a promotion setting.
+
 `--plan-policy-weight` uses the same aggregated Plan-Q action target to update policy logits directly. Use it only with `--update-scope all` and a positive `--policy-kl-weight`; early probes showed it can damage seat balance even when KL anchored.
 
 `evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
