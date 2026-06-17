@@ -765,3 +765,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `adaptive-strategy-q-rerank-v1`. Next strategy-inference branch should use more structured target/finish gating or replacement-outcome search Q instead of global centered all-action reranking.
 - **Context:** Q head training was successful as supervision (`QKL 5.4646 -> 0.5882`, Q action match `10.7% -> 58.9%`), but gameplay did not pass gate. Expander scale `0.05` improved 256-row min (`73.44% -> 75.00%`) but failed 512-row confirmation (`71.68%` vs scale-0 `71.88%`). Fixed-v5 max250 128-row did not improve (`10.94%` min at scale 0 and 0.05, `10.16%` at 0.10). Artifacts remain under ignored `runs/`.
+
+## [2026-06-17 17:58] Target-Conditioned Rerank Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-target-rerank-scale` and `--strategy-target-finish-gate`, using the enemy-general belief head as an inference-time movement target. The evaluator now creates `--json-output` parent directories automatically. Updated README and strategy docs with target-rerank commands and GPU sweeps.
+- **Status:** Completed
+- **Next Steps:** Do not promote target-rerank inference. The next useful branch should train explicit target/source heads or replacement-outcome correction targets instead of deriving a hand-coded Manhattan movement bias from belief logits.
+- **Context:** Ungated target scale `0.50` looked best at 128-row Expander (`74.22%` min), but 256-row confirmation regressed against no target bias (`73.44%` vs `75.78%` min), mostly by hurting 8x while helping 16x. Finish gating did not stabilize the effect. Fixed-v5 max250 stayed far below gate (`6.25%` min at target scale `0.50` vs `5.47%` same-seed baseline).

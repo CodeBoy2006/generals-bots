@@ -39,6 +39,7 @@ from adaptive_common import (
 from adaptive_network import load_or_create_adaptive_network
 from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
+from generals.core.action import DIRECTIONS
 from generals.core import game
 from train import random_action, stack_learner_actions
 
@@ -74,11 +75,31 @@ class AdaptiveEvalRow:
 
 
 @eqx.filter_jit
-def _policy_action(network, obs_arr, mask, active, key, policy_mode, strategy_q_rerank_scale: float):
+def _policy_action(
+    network,
+    obs_arr,
+    mask,
+    active,
+    key,
+    policy_mode,
+    strategy_q_rerank_scale: float,
+    strategy_target_rerank_scale: float,
+    strategy_target_finish_gate: bool,
+):
     logits, _ = network.logits_value(obs_arr, mask, active)
-    if strategy_q_rerank_scale > 0.0:
+    if strategy_q_rerank_scale > 0.0 or strategy_target_rerank_scale > 0.0:
         aux = network.strategy_auxiliary(obs_arr, mask, active)
+    if strategy_q_rerank_scale > 0.0:
         logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
+    if strategy_target_rerank_scale > 0.0:
+        logits = strategy_target_rerank_logits(
+            logits[None, :],
+            aux.enemy_general_logits[None, :, :],
+            aux.finish_logits[None, :],
+            network.pad_size,
+            strategy_target_rerank_scale,
+            strategy_target_finish_gate,
+        )[0]
     index = jax.lax.cond(
         policy_mode == 0,
         lambda _: jnp.argmax(logits),
@@ -99,6 +120,45 @@ def strategy_q_rerank_logits(
     legal_mean = jnp.sum(jnp.where(legal, action_q_values, 0.0), axis=-1, keepdims=True) / legal_count
     q_bias = jnp.where(legal, action_q_values - legal_mean, 0.0)
     return policy_logits + scale * q_bias
+
+
+def strategy_target_rerank_logits(
+    policy_logits: jnp.ndarray,
+    target_logits: jnp.ndarray,
+    finish_logits: jnp.ndarray,
+    pad_size: int,
+    scale: float,
+    finish_gate: bool,
+) -> jnp.ndarray:
+    """Bias legal moves that reduce distance to the predicted enemy-general target."""
+    target_probs = jax.nn.softmax(target_logits.reshape(target_logits.shape[0], -1), axis=-1)
+    coords = jnp.arange(pad_size, dtype=jnp.float32)
+    rows = jnp.repeat(coords, pad_size)
+    cols = jnp.tile(coords, pad_size)
+    target_row = jnp.sum(target_probs * rows[None, :], axis=-1)
+    target_col = jnp.sum(target_probs * cols[None, :], axis=-1)
+
+    source_rows = jnp.repeat(coords, pad_size)
+    source_cols = jnp.tile(coords, pad_size)
+    direction_ids = jnp.arange(8) % 4
+    dest_rows = source_rows[None, :] + DIRECTIONS[direction_ids, 0][:, None]
+    dest_cols = source_cols[None, :] + DIRECTIONS[direction_ids, 1][:, None]
+    source_distance = jnp.abs(source_rows[None, None, :] - target_row[:, None, None])
+    source_distance += jnp.abs(source_cols[None, None, :] - target_col[:, None, None])
+    dest_distance = jnp.abs(dest_rows[None, :, :] - target_row[:, None, None])
+    dest_distance += jnp.abs(dest_cols[None, :, :] - target_col[:, None, None])
+    move_bias = (source_distance - dest_distance).reshape(target_logits.shape[0], 8 * pad_size * pad_size)
+    action_bias = jnp.concatenate([move_bias, jnp.zeros((target_logits.shape[0], 1), dtype=move_bias.dtype)], axis=-1)
+
+    if finish_gate:
+        finish_probability = jax.nn.softmax(finish_logits, axis=-1)[:, 1]
+        action_bias = action_bias * finish_probability[:, None]
+
+    legal = policy_logits > -1.0e8
+    legal_count = jnp.maximum(jnp.sum(legal, axis=-1, keepdims=True), 1)
+    legal_mean = jnp.sum(jnp.where(legal, action_bias, 0.0), axis=-1, keepdims=True) / legal_count
+    centered_bias = jnp.where(legal, action_bias - legal_mean, 0.0)
+    return policy_logits + scale * centered_bias
 
 
 def crop_observation(obs, size: int):
@@ -147,6 +207,8 @@ def evaluate_batch(
     scoreboard_history=False,
     fog_memory=False,
     strategy_q_rerank_scale=0.0,
+    strategy_target_rerank_scale=0.0,
+    strategy_target_finish_gate=False,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -237,7 +299,17 @@ def evaluate_batch(
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
         policy_actions = jax.vmap(
-            lambda o, m, a, k: _policy_action(network, o, m, a, k, policy_mode, strategy_q_rerank_scale)
+            lambda o, m, a, k: _policy_action(
+                network,
+                o,
+                m,
+                a,
+                k,
+                policy_mode,
+                strategy_q_rerank_scale,
+                strategy_target_rerank_scale,
+                strategy_target_finish_gate,
+            )
         )(
             obs_arr,
             masks,
@@ -280,6 +352,8 @@ def evaluate_policy_opponent_batch(
     scoreboard_history=False,
     fog_memory=False,
     strategy_q_rerank_scale=0.0,
+    strategy_target_rerank_scale=0.0,
+    strategy_target_finish_gate=False,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -371,7 +445,17 @@ def evaluate_policy_opponent_batch(
         policy_keys = jrandom.split(policy_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
         policy_actions = jax.vmap(
-            lambda o, m, a, k: _policy_action(network, o, m, a, k, policy_mode, strategy_q_rerank_scale)
+            lambda o, m, a, k: _policy_action(
+                network,
+                o,
+                m,
+                a,
+                k,
+                policy_mode,
+                strategy_q_rerank_scale,
+                strategy_target_rerank_scale,
+                strategy_target_finish_gate,
+            )
         )(
             obs_arr,
             masks,
@@ -434,6 +518,8 @@ def parse_args():
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
+    parser.add_argument("--strategy-target-rerank-scale", type=float, default=0.0)
+    parser.add_argument("--strategy-target-finish-gate", action="store_true")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -482,6 +568,12 @@ def parse_args():
         parser.error("--strategy-q-rerank-scale must be non-negative")
     if args.strategy_q_rerank_scale > 0.0 and not args.strategy_aux:
         parser.error("--strategy-q-rerank-scale requires --strategy-aux")
+    if args.strategy_target_rerank_scale < 0.0:
+        parser.error("--strategy-target-rerank-scale must be non-negative")
+    if args.strategy_target_rerank_scale > 0.0 and not args.strategy_aux:
+        parser.error("--strategy-target-rerank-scale requires --strategy-aux")
+    if args.strategy_target_finish_gate and args.strategy_target_rerank_scale <= 0.0:
+        parser.error("--strategy-target-finish-gate requires --strategy-target-rerank-scale")
     return args
 
 
@@ -567,6 +659,9 @@ def main():
         print("Strategy:   auxiliary heads loaded")
     if args.strategy_q_rerank_scale > 0.0:
         print(f"StratQ bias: scale={args.strategy_q_rerank_scale:g}")
+    if args.strategy_target_rerank_scale > 0.0:
+        gate_label = " finish-gated" if args.strategy_target_finish_gate else ""
+        print(f"Target bias: scale={args.strategy_target_rerank_scale:g}{gate_label}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -610,6 +705,8 @@ def main():
                     args.scoreboard_history,
                     args.fog_memory,
                     args.strategy_q_rerank_scale,
+                    args.strategy_target_rerank_scale,
+                    args.strategy_target_finish_gate,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -627,6 +724,8 @@ def main():
                     args.scoreboard_history,
                     args.fog_memory,
                     args.strategy_q_rerank_scale,
+                    args.strategy_target_rerank_scale,
+                    args.strategy_target_finish_gate,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -665,11 +764,15 @@ def main():
         "pyramid_context": args.pyramid_context,
         "strategy_aux": args.strategy_aux,
         "strategy_q_rerank_scale": args.strategy_q_rerank_scale,
+        "strategy_target_rerank_scale": args.strategy_target_rerank_scale,
+        "strategy_target_finish_gate": args.strategy_target_finish_gate,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }
     if args.json_output is not None:
-        Path(args.json_output).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        output_path = Path(args.json_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print()
     print(f"Minimum win rate: {min_win_rate * 100:.2f}%")

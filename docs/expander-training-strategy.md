@@ -4865,3 +4865,60 @@ Scale 0.05 looked promising at 128 and 256 rows, but 512-row confirmation regres
 Fixed-v5 max250 did not improve; rerank changed draw/loss mix but did not create wins.
 Do not promote q-rerank-v1. The next strategy-inference branch should be more structured: target-conditioned movement bias, finish-only gating, or replacement-outcome search Q, rather than a global action-logit bias over every step.
 ```
+
+## 2026-06-17 Target-Conditioned Rerank Probe
+
+Added inference-only target-conditioned reranking to `evaluate_adaptive_policy.py`:
+
+```text
+--strategy-target-rerank-scale
+--strategy-target-finish-gate
+```
+
+Mechanism:
+
+```text
+1. Use strategy_auxiliary().enemy_general_logits as a belief map.
+2. Convert the belief map to an expected target coordinate.
+3. For each legal primitive move, compute:
+     distance(source, target) - distance(destination, target)
+4. Center that progress score over legal actions and add it to policy logits.
+5. Optionally multiply the bias by finish-head P(finish_within_250).
+```
+
+This probe is more structured than global Q reranking: it only rewards moves that make spatial progress toward the learned target belief, and it does not update the checkpoint.
+
+Expander 128-row, seed 81520:
+
+| mode | scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ungated | 0.10 | `72.66%` | `76.56%` | `83.59%` | `88.28%` | `74.22%` | `79.69%` | `72.66%` |
+| ungated | 0.25 | `75.00%` | `73.44%` | `78.91%` | `89.84%` | `70.31%` | `78.12%` | `70.31%` |
+| ungated | 0.50 | `75.78%` | `74.22%` | `83.59%` | `82.03%` | `77.34%` | `78.12%` | `74.22%` |
+| finish-gated | 0.10 | `71.09%` | `73.44%` | `86.72%` | `83.59%` | `77.34%` | `78.91%` | `71.09%` |
+| finish-gated | 0.25 | `70.31%` | `78.12%` | `85.16%` | `85.94%` | `73.44%` | `80.47%` | `70.31%` |
+| finish-gated | 0.50 | `78.12%` | `74.22%` | `82.81%` | `92.19%` | `73.44%` | `81.25%` | `73.44%` |
+
+Expander 256-row confirmation, seed 81540:
+
+| scale | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `76.56%` | `75.78%` | `83.59%` | `82.03%` | `77.73%` | `82.81%` | `75.78%` |
+| target 0.50 | `73.44%` | `74.61%` | `85.94%` | `82.42%` | `81.64%` | `80.86%` | `73.44%` |
+
+Fixed-v5 max250 128-row, seed 81560:
+
+| scale | p0 | p1 | min | draw p0/p1 |
+| ---: | ---: | ---: | ---: | --- |
+| 0 | `10.16%` | `5.47%` | `5.47%` | `57.81% / 56.25%` |
+| target 0.50 | `9.38%` | `6.25%` | `6.25%` | `60.16% / 52.34%` |
+
+Conclusion:
+
+```text
+Target-conditioned reranking is directionally interpretable but still not promotable.
+The best 128-row result was ungated scale 0.50, but 256-row confirmation showed it trades away 8x reliability for 16x gains.
+Finish gating did not stabilize the bias, probably because the finish head is not calibrated well enough for gating primitive movement.
+Fixed-v5 remained far below the gate; the p1 tick-up was too small and too noisy to matter.
+Next step should learn a target/source head or replacement-outcome correction directly, rather than deriving a hand-coded Manhattan target bias from enemy-general belief.
+```

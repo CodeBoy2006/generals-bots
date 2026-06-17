@@ -714,6 +714,27 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 Evaluate Q reranking with `evaluate_adaptive_policy.py --strategy-aux --strategy-q-rerank-scale <scale>`. Treat this as a probe: current results show the Q head can learn the offline teacher distribution, but direct all-action reranking has not passed 512-row promotion.
 
+`evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py \
+  runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx \
+  --grid-sizes 8,12,16 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --scoreboard-history \
+  --fog-memory \
+  --value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --outcome-head \
+  --strategy-aux \
+  --strategy-target-rerank-scale 0.5
+```
+
+`--strategy-target-finish-gate` multiplies that target bias by the finish-head probability. This is an inference-only probe and does not change checkpoint weights; current evidence says it can move wins between rows, but has not passed 256-row confirmation.
+
 ## 验证
 
 运行完整测试：
