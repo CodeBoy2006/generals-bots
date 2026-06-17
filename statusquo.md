@@ -933,3 +933,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat explicit pair scorer as a top-k shortlist candidate only; do not wire it as a single-plan evaluator selector.
 - **Context:** Highgap-v0 validation metrics were pair@1 `18.0%`, pair@2 `23.8%`, pair@4 `33.5%`, source `30.7%`, target `38.3%`, corr `+0.127`. Top-k is better than argmax but still too weak for direct gameplay integration.
+
+## [2026-06-17 21:52] Plan Pair Evaluator
+- **Changes:** Added `adaptive_plan_pair_evaluate.py`, a standalone no-training evaluator for additive and explicit Plan-Q pair scorers. Updated README and zh manual with the diagnostic use case.
+- **Status:** Completed
+- **Next Steps:** Use this only for scorer sanity checks. The next promotion-oriented route is midgame decisive trajectory imitation, not online Plan-Q scorer integration.
+- **Context:** The evaluator reports pair@1/pair@2/pair@4, source/target accuracy, correlation, and margin on the same split used by scorer training. It keeps top-k Plan-Q diagnostics reproducible without starting another training run.
