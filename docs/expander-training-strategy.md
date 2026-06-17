@@ -7203,3 +7203,65 @@ filters:
 
 Start with U-Net v4 + rollout-search against Expander and fixed v5 on 8x8; keep
 draw-heavy contact shards separate for anti-draw supervision.
+
+### Midgame search imitation v0-v3
+
+Collected rollout-search decisive shards under
+`runs/adaptive-strategy-search-decisive-v0/`:
+
+```text
+unet-v4-search-expander-win:     5,414 rows
+unet-v4-search-v5-win:           3,930 rows
+unet-v4-search-v5-draw:          2,904 rows
+unet-v4-search-expander-win-b:  11,139 rows
+unet-v4-search-v5-win-b:         6,280 rows
+```
+
+All winning shards use `turn>=80`, contact, visible enemy, win-or-finish250, and
+terminal-window<=120 filters. The draw shard uses the same contact/time/window
+filters with `draw_only`.
+
+Training/eval summary:
+
+```text
+v0:
+  data: first search wins + v5 draw
+  weights: KL=1.0, action CE=0.3, lr=1e-5
+  result: overfit/regressed
+  Expander 64-row min: 64.06%
+  fixed-v5 max250 64-row min: 9.38%
+
+v1:
+  data: v4-expander-balanced + first search wins, no draw shard
+  weights: KL=4.0, action CE=0.15, lr=5e-6
+  result: best candidate, not promotion
+  Expander 256-row min: 75.78%
+  same-seed v4 base 256-row min: 74.22%
+  Expander 512-row min: 74.61%
+  same-seed v4 base 512-row min: 70.51%
+  fixed-v5 max250 64-row min: 10.94%
+
+v2:
+  data: v1 data + v5 draw shard
+  action CE mode: non-draw
+  result: 64-row positive, 256-row regression
+  Expander 64-row min: 79.69%
+  Expander 256-row min: 70.31%
+  same-seed v4 base 256-row min: 72.27%
+  fixed-v5 max250 64-row min: 7.81%
+
+v3:
+  data: v4-expander-balanced + all search win shards
+  weights: KL=5.0, action CE=0.12, lr=4e-6
+  result: more search action rows regressed weak rows
+  Expander 256-row min: 70.31%
+```
+
+Current conclusion: rollout-search winning trajectories are useful, but direct
+action imitation has a narrow stability window. The best run, v1, improves the
+same-seed 512-row Expander min over v4 base by about 4pp, but still misses the
+75% promotion line and does not improve fixed-v5 max250. Do not continue by
+simply adding more search-action rows or increasing action CE. Next attempts
+should either keep v1 as a conservative supervised base and collect more diverse
+winning windows, or move search supervision into value/finish/intent targets
+with action CE staying weak.

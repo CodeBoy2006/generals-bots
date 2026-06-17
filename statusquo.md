@@ -963,3 +963,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect midgame decisive shards with `min_save_turn>=80`, contact, win/finish, and terminal-window filters; start with U-Net v4 search trajectories against Expander and fixed v5.
 - **Context:** CUDA smoke wrote `runs/adaptive-strategy-search-smoke/search-smoke-00000.npz` with `adaptive-unet-ppo-v4`, scoreboard history, fog memory, `top_k=2`, `rollout_steps=2`, and `rollouts_per_action=1`.
+
+## [2026-06-17 22:52] Midgame Search Imitation Probes
+- **Changes:** Added `adaptive_strategy_supervised.py --action-ce-weight-mode` so draw-heavy shards can keep KL/outcome/finish/belief/intent losses without contributing draw actions to CE/QCE. Collected search decisive shards and trained/evaluated v0-v3 under ignored `runs/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote v0-v3. Keep v1 as the strongest diagnostic candidate, but next work should use search trajectories for value/finish/intent or collect more diverse winning windows rather than scaling action CE rows.
+- **Context:** v1 was best: Expander 512-row min `74.61%` vs same-seed v4 base `70.51%`, but it missed the 75% line and fixed-v5 max250 stayed weak (`10.94%` min at 64 rows). v2 showed draw action CE filtering helps 64-row but failed 256-row; v3 showed adding more search-action rows regressed to `70.31%` 256-row min.

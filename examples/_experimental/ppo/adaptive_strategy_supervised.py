@@ -26,6 +26,11 @@ from adaptive_network import load_or_create_adaptive_network
 from adaptive_search_distill import binary_cross_entropy_with_logits
 from generals.agents.ppo_policy_agent import parse_policy_channels
 
+OUTCOME_LOSS = 0
+OUTCOME_DRAW = 1
+OUTCOME_WIN = 2
+ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins")
+
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
     """Expand explicit paths or glob patterns into a stable shard list."""
@@ -49,6 +54,7 @@ def load_strategy_dataset(
     max_samples_per_shard: int | None = None,
     seed: int = 0,
     finish_head_mode: str = "binary",
+    action_ce_weight_mode: str = "all",
 ) -> dict[str, jnp.ndarray]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
     rng = np.random.default_rng(seed)
@@ -66,6 +72,7 @@ def load_strategy_dataset(
         "target_heatmap": [],
         "teacher_logits": [],
         "teacher_action": [],
+        "action_weight": [],
     }
     for path in paths:
         shard = np.load(path)
@@ -98,6 +105,15 @@ def load_strategy_dataset(
         chunks["target_heatmap"].append(shard["target_heatmap"][shard_indices].astype(np.float32))
         chunks["teacher_logits"].append(shard["teacher_logits"][shard_indices].astype(np.float32))
         chunks["teacher_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
+        outcome = shard["outcome"][shard_indices].astype(np.int32)
+        outcome_known = shard["outcome_known"][shard_indices].astype(np.float32) > 0.0
+        if action_ce_weight_mode == "non-draw":
+            action_weight = ~(outcome_known & (outcome == OUTCOME_DRAW))
+        elif action_ce_weight_mode == "wins":
+            action_weight = outcome_known & (outcome == OUTCOME_WIN)
+        else:
+            action_weight = np.ones_like(outcome, dtype=np.bool_)
+        chunks["action_weight"].append(action_weight.astype(np.float32))
 
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
     if max_samples is not None:
@@ -179,6 +195,7 @@ def train_step(
         target_heatmap,
         teacher_logits,
         teacher_actions,
+        action_weights,
     ) = batch
 
     def loss_fn(net):
@@ -243,10 +260,11 @@ def train_step(
             policy_kl = jnp.mean(policy_kl_per_sample)
 
             action_ce_losses = -student_log_probs[jnp.arange(student_log_probs.shape[0]), teacher_actions]
-            action_ce = jnp.mean(action_ce_losses)
-            teacher_action_accuracy = jnp.mean(
-                (jnp.argmax(student_logits, axis=-1) == teacher_actions).astype(jnp.float32)
-            )
+            action_normalizer = jnp.maximum(jnp.sum(action_weights), 1.0)
+            action_ce = jnp.sum(action_ce_losses * action_weights) / action_normalizer
+            teacher_action_accuracy = jnp.sum(
+                (jnp.argmax(student_logits, axis=-1) == teacher_actions).astype(jnp.float32) * action_weights
+            ) / action_normalizer
 
         q_policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
         q_action_ce = jnp.asarray(0.0, dtype=jnp.float32)
@@ -261,8 +279,11 @@ def train_step(
             q_policy_kl = jnp.mean(q_policy_kl_per_sample)
 
             q_action_ce_losses = -q_log_probs[jnp.arange(q_log_probs.shape[0]), teacher_actions]
-            q_action_ce = jnp.mean(q_action_ce_losses)
-            q_action_accuracy = jnp.mean((jnp.argmax(q_logits, axis=-1) == teacher_actions).astype(jnp.float32))
+            action_normalizer = jnp.maximum(jnp.sum(action_weights), 1.0)
+            q_action_ce = jnp.sum(q_action_ce_losses * action_weights) / action_normalizer
+            q_action_accuracy = jnp.sum(
+                (jnp.argmax(q_logits, axis=-1) == teacher_actions).astype(jnp.float32) * action_weights
+            ) / action_normalizer
 
         source_loss = jnp.asarray(0.0, dtype=jnp.float32)
         source_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
@@ -306,6 +327,7 @@ def train_step(
             "target_accuracy": target_accuracy,
             "finish_weight_mean": jnp.mean(finish_weights),
             "outcome_weight_mean": jnp.mean(outcome_weights),
+            "action_weight_mean": jnp.mean(action_weights),
         }
         return loss, metrics
 
@@ -361,6 +383,7 @@ def train_epoch(
             dataset["target_heatmap"][idx],
             dataset["teacher_logits"][idx],
             dataset["teacher_action"][idx],
+            dataset["action_weight"][idx],
         )
         network, opt_state, loss, metrics = train_step(
             network,
@@ -425,6 +448,7 @@ def parse_args():
     parser.add_argument("--outcome-weight", type=float, default=0.0)
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
+    parser.add_argument("--action-ce-weight-mode", choices=ACTION_CE_WEIGHT_MODES, default="all")
     parser.add_argument("--q-kl-weight", type=float, default=0.0)
     parser.add_argument("--q-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--source-weight", type=float, default=0.0)
@@ -495,6 +519,7 @@ def main():
         args.max_samples_per_shard,
         args.seed,
         args.finish_head_mode,
+        args.action_ce_weight_mode,
     )
     key = jrandom.PRNGKey(args.seed)
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
@@ -520,6 +545,7 @@ def main():
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
         f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
+        f"action_ce_mode={args.action_ce_weight_mode}, "
         f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}, "
         f"source={args.source_weight:g}, target={args.target_weight:g}"
     )
@@ -590,6 +616,7 @@ def main():
             f"Outcome {float(metrics['outcome_loss']):.4f}/{float(metrics['outcome_accuracy']) * 100:5.1f}% | "
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
+            f"ActW {float(metrics['action_weight_mean']):.3f} | "
             f"QKL {float(metrics['q_policy_kl']):.4f} | "
             f"QCE {float(metrics['q_action_ce']):.4f}/{float(metrics['q_action_accuracy']) * 100:5.1f}% | "
             f"Src {float(metrics['source_loss']):.4f}/{float(metrics['source_accuracy']) * 100:5.1f}% | "

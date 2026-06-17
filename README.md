@@ -647,6 +647,8 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 For multi-horizon finishability, use `--finish-head-mode multi-horizon`. This expands the strategy finish head to three independent BCE logits for `finish_within_50`, `finish_within_100`, and `finish_within_250`; warm-start old binary-finish checkpoints with `--init-finish-head-mode binary`. Evaluation and PPO warm-starts that need to load such checkpoints should pass `--strategy-finish-outputs 3` or `--init-strategy-finish-outputs 3` respectively.
 
+Draw-heavy shards should not usually contribute action CE. `adaptive_strategy_supervised.py --action-ce-weight-mode non-draw` keeps policy KL, outcome, finish, belief, and intent losses on known draw samples, but removes those rows from action CE/QCE. `wins` is stricter and only applies action CE/QCE to known winning rows; `all` preserves the historical behavior.
+
 This is a representation-learning step, not a gameplay promotion step. Use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head.
 
 For a cautious policy-coupled follow-up, start from a checkpoint that already has trained strategy heads, cap each shard to avoid long fixed-v5 rollouts dominating the batch, and require a positive policy KL anchor:
