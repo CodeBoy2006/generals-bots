@@ -663,6 +663,7 @@ def parse_args():
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-aux-weight", type=float, default=0.0)
     parser.add_argument("--init-outcome-head", action="store_true")
+    parser.add_argument("--init-strategy-aux", action="store_true")
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="runs/generals-adaptive-ppo.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -787,6 +788,8 @@ def main():
             print("Warm global:   enabled")
         if args.init_context_residual:
             print("Warm context:  enabled")
+        if args.init_strategy_aux:
+            print("Warm strategy: enabled")
     if args.context_residual:
         print("Context res:   5x5 zero-init residual branch")
     if args.context_only_update:
@@ -852,6 +855,7 @@ def main():
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_aux_weight > 0.0,
         init_outcome_head=args.init_outcome_head,
+        init_strategy_aux=args.init_strategy_aux,
         global_context=network_global_context,
         init_global_context=args.init_global_context,
         context_residual=args.context_residual,

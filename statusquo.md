@@ -681,3 +681,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote these context PPO checkpoints. Next branch should pretrain representation heads with belief/finish/intent supervision or move to a real U-Net/Transformer torso rather than more small residual PPO continuation.
 - **Context:** Context-only v1 had a favorable 64-row seed at `73.44%` min versus base `68.75%`, but 256-row confirmation was `70.70%` versus same-seed base `71.88%`. Low-LR joint v2 scored only `65.62%` min over 64 games/row while same-seed base was `71.88%`.
+
+## [2026-06-17 13:30] Context Auxiliary Pretrain Probe
+- **Changes:** Added `adaptive_search_distill.py --context-residual`, `--init-context-residual`, and `--freeze-context-strategy-aux`, plus `train_adaptive.py --init-strategy-aux` so PPO can warm start from context+strategy auxiliary checkpoints while dropping aux heads. Ran GPU probes in `runs/adaptive-context-aux-v1/` and `runs/adaptive-context-aux-ppo-v1/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote these checkpoints. The next architecture branch should be an actual U-Net/Transformer torso or richer memory/belief-map input, since the small residual context branch still leaves 16x draw/finish bottlenecks.
+- **Context:** Context aux v1 reduced intent loss from `10.25` to `4.98` and belief loss from `20.25` to `8.38` with KL only `0.017`, but direct 64-row eval was only `65.62%` min versus base `64.06%`. Aux->PPO improved a weak 64-row seed from base `60.94%` to `64.06%`, still far below the promotion platform.

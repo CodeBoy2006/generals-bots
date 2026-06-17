@@ -316,6 +316,16 @@ def mask_strategy_aux_grads(grads):
     return masked
 
 
+def mask_context_strategy_aux_grads(grads):
+    """Keep gradients for the residual context branch and strategy auxiliary heads."""
+    masked = mask_strategy_aux_grads(grads)
+    if grads.context_conv1 is not None:
+        masked = eqx.tree_at(lambda net: net.context_conv1, masked, grads.context_conv1)
+    if grads.context_conv2 is not None:
+        masked = eqx.tree_at(lambda net: net.context_conv2, masked, grads.context_conv2)
+    return masked
+
+
 def compute_adaptive_conservative_loss(
     student_network,
     base_network,
@@ -1013,6 +1023,7 @@ def train_adaptive_soft_minibatch(
     temperature,
     freeze_legacy_weights=False,
     freeze_strategy_aux_only=False,
+    freeze_context_strategy_aux=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Train one adaptive soft-target distillation minibatch."""
@@ -1112,7 +1123,9 @@ def train_adaptive_soft_minibatch(
         return distill_loss + strategy_loss, metrics
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(student_network)
-    if freeze_strategy_aux_only:
+    if freeze_context_strategy_aux:
+        grads = mask_context_strategy_aux_grads(grads)
+    elif freeze_strategy_aux_only:
         grads = mask_strategy_aux_grads(grads)
     elif freeze_legacy_weights:
         grads = mask_legacy_distill_grads(grads, legacy_input_channels)
@@ -1302,6 +1315,7 @@ def train_adaptive_soft_epoch(
     temperature,
     freeze_legacy_weights=False,
     freeze_strategy_aux_only=False,
+    freeze_context_strategy_aux=False,
     legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
 ):
     """Run adaptive soft-target distillation over shuffled minibatches."""
@@ -1391,6 +1405,7 @@ def train_adaptive_soft_epoch(
                 temperature,
                 freeze_legacy_weights,
                 freeze_strategy_aux_only,
+                freeze_context_strategy_aux,
                 legacy_input_channels,
             )
             epoch_loss += loss
@@ -2004,11 +2019,14 @@ def parse_args():
     parser.add_argument("--base-global-context", action="store_true")
     parser.add_argument("--base-scoreboard-history", action="store_true")
     parser.add_argument("--init-global-context", action="store_true")
+    parser.add_argument("--context-residual", action="store_true")
+    parser.add_argument("--init-context-residual", action="store_true")
     parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
     parser.add_argument("--freeze-legacy-weights", action="store_true")
     parser.add_argument("--freeze-strategy-aux-only", action="store_true")
+    parser.add_argument("--freeze-context-strategy-aux", action="store_true")
     parser.add_argument("--target-mode", choices=TARGET_MODE_NAMES, default="soft")
     parser.add_argument("--soft-weight-mode", choices=SOFT_WEIGHT_MODE_NAMES, default="active")
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
@@ -2138,6 +2156,21 @@ def parse_args():
         or args.strategy_belief_weight > 0.0
     ):
         parser.error("--freeze-strategy-aux-only requires at least one strategy auxiliary loss")
+    if args.freeze_context_strategy_aux:
+        if args.target_mode != "soft":
+            parser.error("--freeze-context-strategy-aux requires --target-mode soft")
+        if not args.context_residual:
+            parser.error("--freeze-context-strategy-aux requires --context-residual")
+        if args.freeze_strategy_aux_only:
+            parser.error("--freeze-context-strategy-aux cannot be combined with --freeze-strategy-aux-only")
+        if not (
+            args.strategy_q_weight > 0.0
+            or args.strategy_q_rank_weight > 0.0
+            or args.strategy_intent_weight > 0.0
+            or args.strategy_finish_weight > 0.0
+            or args.strategy_belief_weight > 0.0
+        ):
+            parser.error("--freeze-context-strategy-aux requires at least one strategy auxiliary loss")
     try:
         args.channels = parse_policy_channels(args.channels)
         args.base_channels = parse_policy_channels(args.base_channels or args.channels)
@@ -2198,6 +2231,10 @@ def main():
         print(f"Warm inputs:   {init_input_channels} channels")
     if args.init_global_context:
         print("Warm global:   enabled")
+    if args.init_context_residual:
+        print("Warm context:  enabled")
+    if args.context_residual:
+        print("Context res:   5x5 zero-init residual branch")
     if args.scoreboard_history:
         print("Score history: enabled")
     elif network_global_context:
@@ -2210,6 +2247,8 @@ def main():
         print("Frozen legacy: conv1 old inputs + trunk/heads")
     if args.freeze_strategy_aux_only:
         print("Frozen policy: strategy auxiliary heads only")
+    if args.freeze_context_strategy_aux:
+        print("Frozen policy: context residual + strategy auxiliary heads only")
     if mixed_learner:
         mixed_p0_envs, mixed_p1_envs = split_mixed_env_counts(args.num_envs)
         learner_label = f"mixed players 0/1 ({mixed_p0_envs}+{mixed_p1_envs} envs)"
@@ -2265,6 +2304,8 @@ def main():
         init_strategy_aux=args.init_strategy_aux,
         global_context=network_global_context,
         init_global_context=args.init_global_context,
+        context_residual=args.context_residual,
+        init_context_residual=args.init_context_residual,
     )
     base_network = load_or_create_adaptive_network(
         base_key,
@@ -2554,6 +2595,7 @@ def main():
                 args.temperature,
                 args.freeze_legacy_weights,
                 args.freeze_strategy_aux_only,
+                args.freeze_context_strategy_aux,
                 ADAPTIVE_INPUT_CHANNELS,
             )
         jax.block_until_ready(student_network)

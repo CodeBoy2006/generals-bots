@@ -1048,6 +1048,27 @@ def test_strategy_q_replay_keeps_q_weights_only():
     assert jnp.allclose(augmented[SOFT_STRATEGY_BELIEF_WEIGHT_INDEX][-2:], 0.0)
 
 
+def test_context_strategy_aux_grad_mask_preserves_context_and_aux_only():
+    from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
+    from examples._experimental.ppo.adaptive_search_distill import mask_context_strategy_aux_grads
+
+    grads = AdaptivePolicyValueNetwork(
+        jrandom.PRNGKey(0),
+        pad_size=6,
+        channels=(16, 16, 16, 8),
+        strategy_aux=True,
+        context_residual=True,
+    )
+
+    masked = mask_context_strategy_aux_grads(grads)
+
+    assert jnp.allclose(masked.conv4.weight, 0.0)
+    assert jnp.allclose(masked.policy_conv.weight, 0.0)
+    assert jnp.allclose(masked.context_conv1.weight, grads.context_conv1.weight)
+    assert jnp.allclose(masked.strategy_intent_linear2.weight, grads.strategy_intent_linear2.weight)
+    assert jnp.allclose(masked.strategy_enemy_general_conv.weight, grads.strategy_enemy_general_conv.weight)
+
+
 def test_adaptive_soft_loss_can_add_extra_improvement_term():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork

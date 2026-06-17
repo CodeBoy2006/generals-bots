@@ -3381,3 +3381,67 @@ all trainable weights updated
 | same-seed base | `71.88%` | 16p0/16p1 |
 
 Conclusion: the zero-init context branch and context-only update path are implemented and runnable on GPU, but these PPO probes do not promote. v1 can improve a favorable 64-row seed but fails 256-row control; v2 drifts below the base immediately. This suggests the architecture hook alone is insufficient under the current PPO objective. The next representation step should either train the context branch from supervised belief/finish/intent targets before PPO, or move to an explicit U-Net/Transformer-style torso instead of another small residual PPO continuation.
+
+## 2026-06-17 Context Auxiliary Pretrain Probe
+
+Implemented distillation support for context-branch representation pretraining:
+
+```text
+adaptive_search_distill.py --context-residual
+adaptive_search_distill.py --init-context-residual
+adaptive_search_distill.py --freeze-context-strategy-aux
+train_adaptive.py --init-strategy-aux
+```
+
+`--freeze-context-strategy-aux` keeps gradients only on the residual context branch and strategy auxiliary heads. This lets KL keep policy logits near the base while full-state labels train intent/finish/belief representations. `train_adaptive.py --init-strategy-aux` lets PPO warm start from such a checkpoint while dropping the auxiliary heads.
+
+### Context aux v1
+
+Run:
+
+```text
+runs/adaptive-context-aux-v1/
+base/init: composite-balanced history checkpoint
+student: context_residual + strategy_aux
+freeze: context + strategy heads only
+loss: KL + intent 0.05 + finish 0.05 + belief 0.02
+search: top_k=2, rollout_steps=16, rollouts_per_action=1
+```
+
+The auxiliary losses learned quickly while KL stayed small:
+
+```text
+iter 1:  KL 0.00045, Intent 10.25, Belief 20.25
+iter 10: KL 0.00352, Intent 8.58,  Belief 16.66
+iter 20: KL 0.01711, Intent 4.98,  Belief 8.38
+```
+
+64 games/row on seed `77880`:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| context aux direct | `65.62%` | 16p0 |
+| same-seed base | `64.06%` | 16p0 |
+
+This is a small same-seed improvement but nowhere near promotion.
+
+### Aux -> PPO v1
+
+Run:
+
+```text
+runs/adaptive-context-aux-ppo-v1/
+init: adaptive-context-aux-v1 final
+train_adaptive.py --init-strategy-aux --init-context-residual
+update scope: context branch only
+rollout: 128 envs x 256 steps x 20 iters
+```
+
+64 games/row on seed `77980`:
+
+| model | min win rate | bottleneck |
+| --- | ---: | --- |
+| aux -> PPO final | `64.06%` | 16p0 |
+| same-seed base | `60.94%` | 16p1 |
+
+Conclusion: supervised context pretraining works mechanically and improves auxiliary losses, but it still does not solve 16x draw/finish. It can patch some weak seeds, yet the promoted policy remains below the current adaptive platform. The next high-value architecture step should be a real U-Net/Transformer torso or an explicit belief-map input/memory stack, not further 5x5 context-branch PPO.
