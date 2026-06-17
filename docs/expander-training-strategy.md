@@ -6480,3 +6480,92 @@ features, accepted-plan source positives, or a separate Worker-conditioned
 source selector. Fixed-v5 gameplay smoke was skipped because the frozen v5
 policy file was not present at /tmp/generals-ppo-8x8-expander-gpu-v5.eqx.
 ```
+
+### Plan-pair additive ranking
+
+Added `adaptive_plan_q_supervised.py --plan-pair-rank-weight`, which ranks the
+full source-target candidate matrix with additive proposal-map scores:
+
+```text
+pair_logit[source, target] = source_logit[source] + target_logit[target]
+pair_target = softmax(plan_value[source, target] / temperature)
+```
+
+This keeps old behavior unchanged when the weight is 0, but tests whether the
+decomposed source/target maps can recover the best plan without a separate
+Commander pair scorer.
+
+GPU smoke 4, sharp rank-only on evaluator-aligned model-worker source
+candidates:
+
+```text
+dataset: runs/adaptive-plan-q-model-worker-candidates-v0/plan-q-00000.npz
+output: runs/adaptive-plan-q-source-target-rank-worker-source-v0/generals-adaptive-plan-q-source-target-rank-worker-source-v0.eqx
+weights: source_q_rank=1.0, target_q_rank=1.0
+outcome_weight: 0.65
+rank_temperature: 0.05
+epochs: 64
+device: cuda:0
+```
+
+Result:
+
+| metric | epoch 1 | epoch 64 |
+| --- | ---: | ---: |
+| total loss | `2.9824` | `2.6890` |
+| source rank loss / best / corr | `1.5672 / 34.4% / +0.080` | `1.3679 / 33.4% / +0.127` |
+| target rank loss / best / corr | `1.4152 / 29.7% / -0.028` | `1.3212 / 42.3% / +0.303` |
+
+GPU smoke 5, pair-rank only on the same model-worker shard:
+
+```text
+output: runs/adaptive-plan-q-pair-rank-worker-source-v0/generals-adaptive-plan-q-pair-rank-worker-source-v0.eqx
+weights: plan_pair_rank=1.0
+outcome_weight: 0.65
+rank_temperature: 0.05
+epochs: 64
+device: cuda:0
+```
+
+Result:
+
+| metric | epoch 1 | epoch 64 |
+| --- | ---: | ---: |
+| total loss | `2.9690` | `2.6773` |
+| pair rank loss / pair best / source best / target best / corr | `2.9690 / 8.7% / 35.8% / 28.0% / +0.013` | `2.6773 / 15.3% / 33.8% / 43.9% / +0.179` |
+
+GPU smoke 6, independent rank plus pair-rank:
+
+```text
+output: runs/adaptive-plan-q-pair-rank-combo-worker-source-v0/generals-adaptive-plan-q-pair-rank-combo-worker-source-v0.eqx
+weights: source_q_rank=0.5, target_q_rank=1.0, plan_pair_rank=1.0
+outcome_weight: 0.65
+rank_temperature: 0.05
+epochs: 64
+device: cuda:0
+```
+
+Result:
+
+| metric | epoch 1 | epoch 64 |
+| --- | ---: | ---: |
+| total loss | `5.1621` | `4.6850` |
+| source rank loss / best / corr | `1.5548 / 36.2% / +0.089` | `1.3673 / 33.6% / +0.123` |
+| target rank loss / best / corr | `1.4148 / 29.5% / -0.068` | `1.3214 / 41.8% / +0.307` |
+| pair rank loss / pair best / source best / target best / corr | `2.9699 / 7.2% / 36.2% / 26.5% / +0.009` | `2.6799 / 15.9% / 33.6% / 43.7% / +0.171` |
+
+Conclusion:
+
+```text
+Model-worker source candidates improve source ranking from the raw
+model-candidate shard, but source remains much weaker than target.
+
+Additive source+target pair ranking is above the 1/16 random baseline
+(15-16% pair top1), so the Plan-Q signal is present. It is still too weak to
+be a promotion path, and combining independent rank losses does not materially
+improve it.
+
+Next route should not continue spatial/rerank-scale sweeps. Use an explicit
+plan-pair/Commander scorer, or make source selection target-conditioned with
+Worker-conditioned route, army, safety, and accepted-plan features.
+```

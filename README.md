@@ -813,11 +813,15 @@ This trainer defaults to frozen trunk/policy updates and only moves the source/t
 
 For outcome/Q proposal-map supervision, the trainer also accepts
 `--source-q-mse-weight`, `--target-q-mse-weight`, `--source-q-rank-weight`,
-`--target-q-rank-weight`, `--q-rank-temperature`, and
-`--q-target-outcome-weight`. These losses recompute source/target targets from
-the saved `plan_q` matrix, optionally blending decisive plan outcomes into
-loss/draw/win values, then train candidate-local source/target value rankings
-instead of only the precomputed source/target CE marginals.
+`--target-q-rank-weight`, `--plan-pair-rank-weight`,
+`--q-rank-temperature`, and `--q-target-outcome-weight`. These losses recompute
+source/target targets from the saved `plan_q` matrix, optionally blending
+decisive plan outcomes into loss/draw/win values, then train candidate-local
+source/target value rankings instead of only the precomputed source/target CE
+marginals. `--plan-pair-rank-weight` ranks the full source-target candidate
+matrix with additive `source_logit + target_logit` pair scores; it is a
+diagnostic for whether decomposed proposal maps can recover the best plan
+without adding an explicit Commander pair scorer.
 
 The same trainer can train the strategy action-Q head directly from plan outcomes:
 

@@ -885,3 +885,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the Q-map checkpoints directly. Use outcome-Q target ranking for target proposals, but redesign source labels around executor-aware source selection, accepted-plan positives, or Worker-conditioned route/army features.
 - **Context:** CUDA smoke on `runs/adaptive-plan-q-model-candidates-v0/plan-q-00000.npz` showed Q-MSE falls without ranking (`target best 26.7%`, corr `-0.107`). Sharp rank-only supervision improved target ranking from `25.7%` to `42.6%` and corr to `+0.276`, but source ranking stayed near random (`23.7%`). Fixed-v5 gameplay smoke was skipped because `/tmp/generals-ppo-8x8-expander-gpu-v5.eqx` is absent.
+
+## [2026-06-17 20:53] Plan Pair Ranking Probe
+- **Changes:** Added `adaptive_plan_q_supervised.py --plan-pair-rank-weight`, an additive source+target candidate-pair rank loss for Plan-Q shards. Ran worker-source and pair-rank GPU probes and documented results.
+- **Status:** Completed
+- **Next Steps:** Do not promote pair-rank checkpoints. Next route should use an explicit plan-pair/Commander scorer or target-conditioned source selector/Worker-conditioned source head; additive source+target decomposition is too weak.
+- **Context:** Model-worker source rank reached `33.4%`/corr `+0.127`; pair-rank reached `15.3%` pair top1 (`S33.8%/T43.9%`, corr `+0.179`); combo reached `15.9%` pair top1 but did not materially improve source/target. All runs were CUDA and saved under ignored `runs/`.

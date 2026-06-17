@@ -201,6 +201,52 @@ def indexed_spatial_q_rank_ce(
     return loss, accuracy, entropy
 
 
+def indexed_plan_pair_rank_ce(
+    source_logits: jnp.ndarray,
+    target_logits: jnp.ndarray,
+    source_indices: jnp.ndarray,
+    target_indices: jnp.ndarray,
+    plan_values: jnp.ndarray,
+    sample_weight: jnp.ndarray,
+    temperature: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Train additive source+target scores to rank the full candidate plan matrix."""
+    flat_source_logits = source_logits.reshape(source_logits.shape[0], -1)
+    flat_target_logits = target_logits.reshape(target_logits.shape[0], -1)
+    source_candidate_logits = jnp.take_along_axis(flat_source_logits, source_indices, axis=1)
+    target_candidate_logits = jnp.take_along_axis(flat_target_logits, target_indices, axis=1)
+    pair_logits = source_candidate_logits[:, :, None] + target_candidate_logits[:, None, :]
+    flat_pair_logits = pair_logits.reshape(pair_logits.shape[0], -1)
+    flat_plan_values = jax.lax.stop_gradient(plan_values.reshape(plan_values.shape[0], -1))
+    target_probs = jax.nn.softmax(flat_plan_values / temperature, axis=1)
+    log_probs = jax.nn.log_softmax(flat_pair_logits, axis=1)
+    losses = -jnp.sum(target_probs * log_probs, axis=1)
+    normalizer = jnp.maximum(jnp.sum(sample_weight), 1.0)
+    loss = jnp.sum(losses * sample_weight) / normalizer
+
+    pred_best = jnp.argmax(flat_pair_logits, axis=1)
+    target_best = jnp.argmax(flat_plan_values, axis=1)
+    pair_accuracy = jnp.sum((pred_best == target_best).astype(jnp.float32) * sample_weight) / normalizer
+    source_accuracy = jnp.sum(
+        ((pred_best // plan_values.shape[2]) == (target_best // plan_values.shape[2])).astype(jnp.float32)
+        * sample_weight
+    )
+    source_accuracy = source_accuracy / normalizer
+    target_accuracy = jnp.sum(
+        ((pred_best % plan_values.shape[2]) == (target_best % plan_values.shape[2])).astype(jnp.float32)
+        * sample_weight
+    )
+    target_accuracy = target_accuracy / normalizer
+
+    pred_centered = flat_pair_logits - jnp.mean(flat_pair_logits, axis=1, keepdims=True)
+    target_centered = flat_plan_values - jnp.mean(flat_plan_values, axis=1, keepdims=True)
+    covariance = jnp.mean(pred_centered * target_centered, axis=1)
+    pred_std = jnp.sqrt(jnp.mean(pred_centered**2, axis=1) + 1.0e-6)
+    target_std = jnp.sqrt(jnp.mean(target_centered**2, axis=1) + 1.0e-6)
+    correlation = jnp.sum((covariance / (pred_std * target_std)) * sample_weight) / normalizer
+    return loss, pair_accuracy, source_accuracy, target_accuracy, correlation
+
+
 @eqx.filter_jit
 def train_step(
     network,
@@ -219,6 +265,7 @@ def train_step(
     target_q_mse_weight: float,
     source_q_rank_weight: float,
     target_q_rank_weight: float,
+    plan_pair_rank_weight: float,
     q_rank_temperature: float,
     q_target_outcome_weight: float,
     replacement_gate_weight: float,
@@ -276,6 +323,11 @@ def train_step(
         target_q_rank_loss = jnp.asarray(0.0, dtype=jnp.float32)
         target_q_rank_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         target_q_rank_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        plan_pair_rank_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        plan_pair_rank_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        plan_pair_source_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        plan_pair_target_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        plan_pair_correlation = jnp.asarray(0.0, dtype=jnp.float32)
         needs_spatial_heads = (
             source_weight > 0.0
             or target_weight > 0.0
@@ -283,6 +335,7 @@ def train_step(
             or target_q_mse_weight > 0.0
             or source_q_rank_weight > 0.0
             or target_q_rank_weight > 0.0
+            or plan_pair_rank_weight > 0.0
         )
         if needs_spatial_heads:
             if outputs.source_logits is None or outputs.target_logits is None:
@@ -321,6 +374,7 @@ def train_step(
                 or target_q_mse_weight > 0.0
                 or source_q_rank_weight > 0.0
                 or target_q_rank_weight > 0.0
+                or plan_pair_rank_weight > 0.0
             ):
                 plan_values = plan_value_targets(plan_q, plan_outcomes, q_target_outcome_weight)
                 source_q_targets = jnp.max(plan_values, axis=2)
@@ -342,6 +396,21 @@ def train_step(
                     outputs.target_logits,
                     target_indices,
                     target_q_targets,
+                    sample_weight,
+                    q_rank_temperature,
+                )
+                (
+                    plan_pair_rank_loss,
+                    plan_pair_rank_accuracy,
+                    plan_pair_source_accuracy,
+                    plan_pair_target_accuracy,
+                    plan_pair_correlation,
+                ) = indexed_plan_pair_rank_ce(
+                    outputs.source_logits,
+                    outputs.target_logits,
+                    source_indices,
+                    target_indices,
+                    plan_values,
                     sample_weight,
                     q_rank_temperature,
                 )
@@ -431,6 +500,7 @@ def train_step(
             + target_q_mse_weight * target_q_mse
             + source_q_rank_weight * source_q_rank_loss
             + target_q_rank_weight * target_q_rank_loss
+            + plan_pair_rank_weight * plan_pair_rank_loss
             + replacement_gate_weight * replacement_gate_loss
         )
         metrics = {
@@ -458,6 +528,11 @@ def train_step(
             "target_q_rank_accuracy": target_q_rank_accuracy,
             "source_q_rank_entropy": source_q_rank_entropy,
             "target_q_rank_entropy": target_q_rank_entropy,
+            "plan_pair_rank_loss": plan_pair_rank_loss,
+            "plan_pair_rank_accuracy": plan_pair_rank_accuracy,
+            "plan_pair_source_accuracy": plan_pair_source_accuracy,
+            "plan_pair_target_accuracy": plan_pair_target_accuracy,
+            "plan_pair_correlation": plan_pair_correlation,
             "policy_kl": policy_kl,
             "action_ce": action_ce,
             "teacher_action_accuracy": teacher_action_accuracy,
@@ -667,6 +742,7 @@ def train_epoch(
     target_q_mse_weight: float,
     source_q_rank_weight: float,
     target_q_rank_weight: float,
+    plan_pair_rank_weight: float,
     q_rank_temperature: float,
     q_target_outcome_weight: float,
     replacement_gate_weight: float,
@@ -718,6 +794,7 @@ def train_epoch(
             target_q_mse_weight,
             source_q_rank_weight,
             target_q_rank_weight,
+            plan_pair_rank_weight,
             q_rank_temperature,
             q_target_outcome_weight,
             replacement_gate_weight,
@@ -776,6 +853,12 @@ def parse_args():
     parser.add_argument("--target-q-mse-weight", type=float, default=0.0)
     parser.add_argument("--source-q-rank-weight", type=float, default=0.0)
     parser.add_argument("--target-q-rank-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--plan-pair-rank-weight",
+        type=float,
+        default=0.0,
+        help="Rank full source-target plan pairs with additive source+target logits.",
+    )
     parser.add_argument("--q-rank-temperature", type=float, default=0.25)
     parser.add_argument(
         "--q-target-outcome-weight",
@@ -833,6 +916,7 @@ def parse_args():
             args.target_q_mse_weight,
             args.source_q_rank_weight,
             args.target_q_rank_weight,
+            args.plan_pair_rank_weight,
             args.replacement_gate_weight,
         )
     ):
@@ -862,6 +946,7 @@ def parse_args():
         or args.target_q_mse_weight > 0.0
         or args.source_q_rank_weight > 0.0
         or args.target_q_rank_weight > 0.0
+        or args.plan_pair_rank_weight > 0.0
     ) and not args.strategy_spatial_aux:
         parser.error("source/target Plan-Q supervision requires --strategy-spatial-aux")
     return args
@@ -893,6 +978,7 @@ def main():
         f"action_q={args.action_q_weight:g}, action_q_mse={args.action_q_mse_weight:g}, "
         f"source_q_mse={args.source_q_mse_weight:g}, target_q_mse={args.target_q_mse_weight:g}, "
         f"source_q_rank={args.source_q_rank_weight:g}, target_q_rank={args.target_q_rank_weight:g}, "
+        f"plan_pair_rank={args.plan_pair_rank_weight:g}, "
         f"replacement_gate={args.replacement_gate_weight:g}"
     )
     print(f"Action-Q temp: {args.action_q_temperature:g}")
@@ -901,6 +987,7 @@ def main():
         or args.target_q_mse_weight > 0.0
         or args.source_q_rank_weight > 0.0
         or args.target_q_rank_weight > 0.0
+        or args.plan_pair_rank_weight > 0.0
     ):
         print(
             "Q-target:     "
@@ -963,6 +1050,7 @@ def main():
             args.target_q_mse_weight,
             args.source_q_rank_weight,
             args.target_q_rank_weight,
+            args.plan_pair_rank_weight,
             args.q_rank_temperature,
             args.q_target_outcome_weight,
             args.replacement_gate_weight,
@@ -996,6 +1084,11 @@ def main():
             f"TgtRank {float(metrics['target_q_rank_loss']):.4f}/"
             f"{float(metrics['target_q_rank_accuracy']) * 100:5.1f}%/"
             f"H{float(metrics['target_q_rank_entropy']):.3f} | "
+            f"PairRank {float(metrics['plan_pair_rank_loss']):.4f}/"
+            f"{float(metrics['plan_pair_rank_accuracy']) * 100:5.1f}%/"
+            f"S{float(metrics['plan_pair_source_accuracy']) * 100:5.1f}%/"
+            f"T{float(metrics['plan_pair_target_accuracy']) * 100:5.1f}%/"
+            f"{float(metrics['plan_pair_correlation']):+.3f} | "
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"PlanPol {float(metrics['plan_policy_loss']):.4f}/"
