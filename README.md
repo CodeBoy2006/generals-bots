@@ -643,6 +643,41 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 This is a representation-learning step, not a gameplay promotion step. Use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head.
 
+For a cautious policy-coupled follow-up, start from a checkpoint that already has trained strategy heads, cap each shard to avoid long fixed-v5 rollouts dominating the batch, and require a positive policy KL anchor:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v1/v4-expander-balanced/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max250/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max750/*.npz' \
+  --max-samples-per-shard 4096 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --init-model-path runs/adaptive-strategy-heads-v4-balanced-v1/generals-adaptive-strategy-heads-v4-balanced-v1.eqx \
+  --update-scope all \
+  --policy-kl-weight 1.0 \
+  --action-ce-weight 0.05 \
+  --lr 0.0000005 \
+  --model-path runs/adaptive-strategy-coupled-v4-balanced-v1/generals-adaptive-strategy-coupled-v4-balanced-v1.eqx
+```
+
+`--update-scope all` is intentionally guarded by `--policy-kl-weight > 0` because otherwise the offline strategy losses can move the trunk without an action-distribution anchor. Current coupled checkpoints are diagnostic artifacts; keep using 256/512-row promotion gates before replacing the active Expander base.
+
 ## 验证
 
 运行完整测试：

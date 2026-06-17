@@ -753,3 +753,9 @@
 - **Status:** Completed
 - **Next Steps:** Expand the strategy dataset with fixed-v5 max500/max750 and more max250 decisive/draw rows, then run policy-coupled strategy training with a KL anchor so finish/belief/intent features can influence action logits.
 - **Context:** CUDA v0 training on 6208 samples reduced loss `2.3954 -> 0.3566`, intent accuracy reached `76.4%`, finish accuracy reached `89.0%`, and belief BCE fell `1.6549 -> 0.1375`. Outcome supervision was left off because the warm-start outcome head is badly calibrated on fixed-v5 draw-heavy states. Policy logit diff versus U-Net imitation v3 was exactly `0.0`, confirming no gameplay promotion is expected yet.
+
+## [2026-06-17 17:35] Policy-Coupled Strategy Supervision
+- **Changes:** Extended `adaptive_strategy_supervised.py` with `--update-scope all`, policy KL/action CE anchors, and `--max-samples-per-shard`; documented fixed-v5 max500/max750 and v4 Expander anchor shards plus coupled GPU probes in README and `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote coupled v1/v4 checkpoints. Next branch should make strategy predictions affect action selection more directly, such as finish/Q reranking, target-conditioned action bias, or replacement-outcome search heads, instead of full-trunk action-KL coupling.
+- **Context:** Coupled v1 from v3 improved 512-row Expander min over same-seed v4 (`74.61%` vs `73.63%`) but weakened 16x rows and fixed-v5 stayed low (`10.55%` min at 256 max250). v4-coupled unbalanced collapsed 8p0 to `70.70%` at 256. Balanced v4-coupled preserved 16x but still trailed v4 on same-seed Expander (`73.44%` vs `73.83%` min) and fixed-v5 (`9.77%` vs `10.55%` min). All models stayed under ignored `runs/`; evaluation should be run serially on GPU to avoid allocation warnings.

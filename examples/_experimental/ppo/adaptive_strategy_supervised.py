@@ -43,8 +43,14 @@ def expand_dataset_paths(patterns: list[str]) -> list[Path]:
     return unique
 
 
-def load_strategy_dataset(paths: list[Path], max_samples: int | None = None) -> dict[str, jnp.ndarray]:
+def load_strategy_dataset(
+    paths: list[Path],
+    max_samples: int | None = None,
+    max_samples_per_shard: int | None = None,
+    seed: int = 0,
+) -> dict[str, jnp.ndarray]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
+    rng = np.random.default_rng(seed)
     chunks: dict[str, list[np.ndarray]] = {
         "obs": [],
         "legal_mask": [],
@@ -55,18 +61,26 @@ def load_strategy_dataset(paths: list[Path], max_samples: int | None = None) -> 
         "outcome": [],
         "outcome_weight": [],
         "enemy_general": [],
+        "teacher_logits": [],
+        "teacher_action": [],
     }
     for path in paths:
         shard = np.load(path)
-        chunks["obs"].append(shard["obs"].astype(np.float32))
-        chunks["legal_mask"].append(shard["legal_mask"].astype(np.bool_))
-        chunks["active"].append(shard["active"].astype(np.bool_))
-        chunks["intent"].append(shard["intent"].astype(np.int32))
-        chunks["finish"].append((shard["finish_within_250"] > 0.5).astype(np.int32))
-        chunks["finish_weight"].append(shard["outcome_known"].astype(np.float32))
-        chunks["outcome"].append(shard["outcome"].astype(np.int32))
-        chunks["outcome_weight"].append(shard["outcome_known"].astype(np.float32))
-        chunks["enemy_general"].append(shard["enemy_general_heatmap"].astype(np.float32))
+        shard_samples = shard["obs"].shape[0]
+        shard_indices = np.arange(shard_samples)
+        if max_samples_per_shard is not None and shard_samples > max_samples_per_shard:
+            shard_indices = np.sort(rng.choice(shard_samples, size=max_samples_per_shard, replace=False))
+        chunks["obs"].append(shard["obs"][shard_indices].astype(np.float32))
+        chunks["legal_mask"].append(shard["legal_mask"][shard_indices].astype(np.bool_))
+        chunks["active"].append(shard["active"][shard_indices].astype(np.bool_))
+        chunks["intent"].append(shard["intent"][shard_indices].astype(np.int32))
+        chunks["finish"].append((shard["finish_within_250"][shard_indices] > 0.5).astype(np.int32))
+        chunks["finish_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
+        chunks["outcome"].append(shard["outcome"][shard_indices].astype(np.int32))
+        chunks["outcome_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
+        chunks["enemy_general"].append(shard["enemy_general_heatmap"][shard_indices].astype(np.float32))
+        chunks["teacher_logits"].append(shard["teacher_logits"][shard_indices].astype(np.float32))
+        chunks["teacher_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
 
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
     if max_samples is not None:
@@ -102,9 +116,24 @@ def train_step(
     finish_weight: float,
     belief_weight: float,
     outcome_weight: float,
+    policy_kl_weight: float,
+    action_ce_weight: float,
+    freeze_base: bool,
 ):
     """Train one minibatch of frozen-trunk strategy auxiliary losses."""
-    obs, masks, active, intent_targets, finish_targets, finish_weights, outcome_targets, outcome_weights, enemy_general = batch
+    (
+        obs,
+        masks,
+        active,
+        intent_targets,
+        finish_targets,
+        finish_weights,
+        outcome_targets,
+        outcome_weights,
+        enemy_general,
+        teacher_logits,
+        teacher_actions,
+    ) = batch
 
     def loss_fn(net):
         outputs = jax.vmap(lambda o, m, a: net.strategy_auxiliary(o, m, a))(obs, masks, active)
@@ -144,27 +173,50 @@ def train_step(
             )
             outcome_accuracy = outcome_accuracy / outcome_normalizer
 
+        policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
+        action_ce = jnp.asarray(0.0, dtype=jnp.float32)
+        teacher_action_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        if policy_kl_weight > 0.0 or action_ce_weight > 0.0:
+            student_logits = jax.vmap(lambda o, m, a: net.logits_value(o, m, a)[0])(obs, masks, active)
+            teacher_log_probs = jax.nn.log_softmax(teacher_logits, axis=-1)
+            teacher_probs = jnp.exp(teacher_log_probs)
+            student_log_probs = jax.nn.log_softmax(student_logits, axis=-1)
+            policy_kl_per_sample = jnp.sum(teacher_probs * (teacher_log_probs - student_log_probs), axis=-1)
+            policy_kl = jnp.mean(policy_kl_per_sample)
+
+            action_ce_losses = -student_log_probs[jnp.arange(student_log_probs.shape[0]), teacher_actions]
+            action_ce = jnp.mean(action_ce_losses)
+            teacher_action_accuracy = jnp.mean(
+                (jnp.argmax(student_logits, axis=-1) == teacher_actions).astype(jnp.float32)
+            )
+
         loss = (
             intent_weight * intent_loss
             + finish_weight * finish_loss
             + belief_weight * belief_loss
             + outcome_weight * outcome_loss
+            + policy_kl_weight * policy_kl
+            + action_ce_weight * action_ce
         )
         metrics = {
             "intent_loss": intent_loss,
             "finish_loss": finish_loss,
             "belief_loss": belief_loss,
             "outcome_loss": outcome_loss,
+            "policy_kl": policy_kl,
+            "action_ce": action_ce,
             "intent_accuracy": intent_accuracy,
             "finish_accuracy": finish_accuracy,
             "outcome_accuracy": outcome_accuracy,
+            "teacher_action_accuracy": teacher_action_accuracy,
             "finish_weight_mean": jnp.mean(finish_weights),
             "outcome_weight_mean": jnp.mean(outcome_weights),
         }
         return loss, metrics
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(network)
-    grads = mask_strategy_supervised_grads(grads, outcome_weight > 0.0)
+    if freeze_base:
+        grads = mask_strategy_supervised_grads(grads, outcome_weight > 0.0)
     params = eqx.filter(network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     return eqx.apply_updates(network, updates), opt_state, loss, metrics
@@ -181,6 +233,9 @@ def train_epoch(
     finish_weight: float,
     belief_weight: float,
     outcome_weight: float,
+    policy_kl_weight: float,
+    action_ce_weight: float,
+    freeze_base: bool,
 ):
     """Shuffle one full pass over the loaded shards."""
     num_samples = dataset["obs"].shape[0]
@@ -202,6 +257,8 @@ def train_epoch(
             dataset["outcome"][idx],
             dataset["outcome_weight"][idx],
             dataset["enemy_general"][idx],
+            dataset["teacher_logits"][idx],
+            dataset["teacher_action"][idx],
         )
         network, opt_state, loss, metrics = train_step(
             network,
@@ -212,6 +269,9 @@ def train_epoch(
             finish_weight,
             belief_weight,
             outcome_weight,
+            policy_kl_weight,
+            action_ce_weight,
+            freeze_base,
         )
         loss_sum += loss
         metrics_sum = metrics if metrics_sum is None else jax.tree.map(lambda a, b: a + b, metrics_sum, metrics)
@@ -222,6 +282,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train adaptive strategy auxiliary heads from NPZ shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--max-samples-per-shard", type=int, default=None)
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
@@ -246,10 +307,13 @@ def parse_args():
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--update-scope", choices=("strategy-heads", "all"), default="strategy-heads")
     parser.add_argument("--intent-weight", type=float, default=0.2)
     parser.add_argument("--finish-weight", type=float, default=0.4)
     parser.add_argument("--belief-weight", type=float, default=0.3)
     parser.add_argument("--outcome-weight", type=float, default=0.0)
+    parser.add_argument("--policy-kl-weight", type=float, default=0.0)
+    parser.add_argument("--action-ce-weight", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -262,6 +326,8 @@ def parse_args():
         parser.error(str(exc))
     if args.max_samples is not None and args.max_samples <= 0:
         parser.error("--max-samples must be positive")
+    if args.max_samples_per_shard is not None and args.max_samples_per_shard <= 0:
+        parser.error("--max-samples-per-shard must be positive")
     if args.input_channels <= 0:
         parser.error("--input-channels must be positive")
     if args.init_input_channels is not None and args.init_input_channels <= 0:
@@ -270,7 +336,7 @@ def parse_args():
         parser.error("--num-epochs and --minibatch-size must be positive")
     if args.lr <= 0.0:
         parser.error("--lr must be positive")
-    if args.weight_decay != 0.0:
+    if args.weight_decay != 0.0 and args.update_scope == "strategy-heads":
         parser.error("--weight-decay must stay 0 because this trainer freezes most parameters with a gradient mask")
     if args.value_loss == "hl-gauss" and args.value_bins <= 1:
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
@@ -280,17 +346,29 @@ def parse_args():
             parser.error("--init-value-bins must be greater than 1 for --init-value-loss hl-gauss")
     elif args.init_value_bins is not None:
         parser.error("--init-value-bins requires --init-value-loss hl-gauss")
-    if any(weight < 0.0 for weight in (args.intent_weight, args.finish_weight, args.belief_weight, args.outcome_weight)):
+    if any(
+        weight < 0.0
+        for weight in (
+            args.intent_weight,
+            args.finish_weight,
+            args.belief_weight,
+            args.outcome_weight,
+            args.policy_kl_weight,
+            args.action_ce_weight,
+        )
+    ):
         parser.error("loss weights must be non-negative")
     if args.outcome_weight > 0.0 and not args.outcome_head:
         parser.error("--outcome-weight requires --outcome-head")
+    if args.update_scope == "all" and args.policy_kl_weight <= 0.0:
+        parser.error("--update-scope all requires a positive --policy-kl-weight to anchor policy drift")
     return args
 
 
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
-    dataset = load_strategy_dataset(paths, args.max_samples)
+    dataset = load_strategy_dataset(paths, args.max_samples, args.max_samples_per_shard, args.seed)
     key = jrandom.PRNGKey(args.seed)
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
     init_value_bins = (
@@ -303,14 +381,21 @@ def main():
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
     print(f"Samples:       {dataset['obs'].shape[0]}")
+    if args.max_samples_per_shard is not None:
+        print(f"Shard cap:     {args.max_samples_per_shard}")
     print(f"Network arch:  {args.network_arch}")
     print(f"Warm start:    {args.init_model_path}")
     print(
         "Loss weights:  "
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
-        f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}"
+        f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}, "
+        f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}"
     )
-    print("Update scope:  strategy auxiliary heads" + (" + outcome head" if args.outcome_weight > 0.0 else ""))
+    if args.update_scope == "strategy-heads":
+        scope_label = "strategy auxiliary heads" + (" + outcome head" if args.outcome_weight > 0.0 else "")
+    else:
+        scope_label = "all trainable network weights with policy KL anchor"
+    print(f"Update scope:  {scope_label}")
     print()
 
     network = load_or_create_adaptive_network(
@@ -351,6 +436,9 @@ def main():
             args.finish_weight,
             args.belief_weight,
             args.outcome_weight,
+            args.policy_kl_weight,
+            args.action_ce_weight,
+            args.update_scope == "strategy-heads",
         )
         jax.block_until_ready(network)
         print(
@@ -359,6 +447,8 @@ def main():
             f"Finish {float(metrics['finish_loss']):.4f}/{float(metrics['finish_accuracy']) * 100:5.1f}% | "
             f"Belief {float(metrics['belief_loss']):.4f} | "
             f"Outcome {float(metrics['outcome_loss']):.4f}/{float(metrics['outcome_accuracy']) * 100:5.1f}% | "
+            f"KL {float(metrics['policy_kl']):.4f} | "
+            f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"Time {time.time() - t0:.2f}s"
         )
 

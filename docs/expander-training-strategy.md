@@ -4606,3 +4606,169 @@ The v0 strategy labels are learnable, and the frozen-head update path is safe.
 This checkpoint is not expected to improve gameplay yet because policy logits are identical to U-Net imitation v3.
 The next useful step is to expand the dataset with fixed-v5 max500/max750 and more max250 draw/decisive rows, then run policy-coupled strategy training where the U-Net trunk/policy is allowed a small KL-anchored update.
 ```
+
+## 2026-06-17 Policy-Coupled Strategy Supervision v1
+
+Extended `adaptive_strategy_supervised.py` with:
+
+```text
+--update-scope strategy-heads|all
+--policy-kl-weight
+--action-ce-weight
+--max-samples-per-shard
+```
+
+`strategy-heads` remains the default frozen mode. `all` updates the full network, but is guarded by a required positive policy KL weight so trunk/policy coupling cannot run without an action-distribution anchor. `--max-samples-per-shard` randomly caps each shard before concatenation, which is needed because long fixed-v5 rollouts otherwise dominate mixed offline batches.
+
+Expanded dataset shards:
+
+| shard | samples | finish250 | draw risk | contact | notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `fixed-v5-max500-00000.npz` | 8320 | `0.292` | `0.180` | `0.903` | 21 episodes, 11 learner wins, 3 draws |
+| `fixed-v5-max750-00000.npz` | 12160 | `0.297` | `0.000` | `0.909` | 29 episodes, 17 learner wins, 0 draws |
+| `v4-expander-00000.npz` | 8192 | `0.213` | `0.000` | `0.704` | v4 teacher anchor, 14 episodes, 11 wins |
+| `v4-expander-balanced-00000.npz` | 8192 | `0.187` | `0.000` | `0.627` | v4 balanced anchor |
+| `v4-expander-balanced-00001.npz` | 8192 | `0.148` | `0.000` | `0.835` | v4 balanced anchor |
+| `v4-expander-balanced-00002.npz` | 8192 | `0.164` | `0.145` | `0.837` | v4 balanced anchor with some draw states |
+
+### Coupled v1 from U-Net imitation v3 heads
+
+Training:
+
+```text
+init:
+  runs/adaptive-strategy-supervised-v0/generals-adaptive-strategy-supervised-v0.eqx
+datasets:
+  v3 Expander v0
+  fixed-v5 max250/max500/max750
+epochs: 10
+lr: 5e-7
+loss:
+  policy_kl 1.0
+  action_ce 0.05
+  intent 0.1
+  finish 0.2
+  belief 0.1
+artifact:
+  runs/adaptive-strategy-coupled-v1/generals-adaptive-strategy-coupled-v1.eqx
+```
+
+Training curve:
+
+```text
+KL 0.6248 -> 0.5333
+ActCE 1.0973 -> 1.0354
+teacher action match 64.5% -> 65.0%
+finish loss 0.7564 -> 0.6744
+```
+
+Expander 256-row, seed 81100:
+
+| checkpoint | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| v3 | `75.00%` | `75.00%` | `78.52%` | `76.56%` | `77.34%` | `75.78%` | `75.00%` |
+| v4 | `73.83%` | `78.52%` | `82.42%` | `81.25%` | `77.73%` | `78.12%` | `73.83%` |
+| coupled v1 | `76.56%` | `79.69%` | `81.25%` | `82.42%` | `76.95%` | `76.95%` | `76.56%` |
+
+Expander 512-row, seed 81140:
+
+| checkpoint | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| v4 | `73.63%` | `75.59%` | `85.35%` | `83.01%` | `80.27%` | `79.10%` | `73.63%` |
+| coupled v1 | `74.80%` | `75.98%` | `83.79%` | `84.18%` | `77.34%` | `74.61%` | `74.61%` |
+
+Fixed-v5 max250, 256-row, seed 81120:
+
+| checkpoint | p0 | p1 | min | draw p0/p1 |
+| --- | ---: | ---: | ---: | --- |
+| v3 | `8.98%` | `7.42%` | `7.42%` | `55.47% / 55.47%` |
+| coupled v1 | `10.55%` | `10.94%` | `10.55%` | `54.30% / 57.81%` |
+
+Interpretation:
+
+```text
+Coupling from v3 is a real method signal: it improved same-seed Expander 256 and 512 min and improved fixed-v5 over v3.
+It is not a promotion candidate because it weakens v4's 16x rows and remains far below the fixed-v5 best gate.
+```
+
+### Coupled from v4 with unbalanced v4 anchor
+
+Frozen heads:
+
+```text
+init: v4
+datasets: one v4 Expander shard + fixed-v5 max250/max500/max750
+samples: 32832
+intent acc: 16.9% -> 78.9%
+finish acc: 61.8% -> 66.7%
+belief BCE: 0.1176 -> 0.0789
+artifact: runs/adaptive-strategy-heads-v4-v1/generals-adaptive-strategy-heads-v4-v1.eqx
+```
+
+Coupled training:
+
+```text
+artifact: runs/adaptive-strategy-coupled-v4-v1/generals-adaptive-strategy-coupled-v4-v1.eqx
+KL 0.4801 -> 0.4134
+teacher action match stayed about 70%
+```
+
+Results:
+
+| eval | p0/8p0 | p1/8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Expander 256 | `70.70%` | `76.17%` | `87.11%` | `79.69%` | `76.95%` | `77.73%` | `70.70%` |
+| fixed-v5 max250 256 | `8.98%` | `15.23%` | - | - | - | - | `8.98%` |
+
+Interpretation:
+
+```text
+Unbalanced v4-coupled training overfits the mixed offline objective and hurts 8p0 badly.
+Do not continue this exact recipe.
+```
+
+### Balanced v4-coupled probe
+
+Frozen heads:
+
+```text
+init: v4
+datasets: 3 v4 Expander shards + fixed-v5 max250/max500/max750
+max_samples_per_shard: 4096
+samples: 24576
+intent acc: 15.6% -> 79.1%
+finish acc: 35.9% -> 66.5%
+belief BCE: 0.2002 -> 0.0835
+artifact: runs/adaptive-strategy-heads-v4-balanced-v1/generals-adaptive-strategy-heads-v4-balanced-v1.eqx
+```
+
+Coupled training:
+
+```text
+artifact: runs/adaptive-strategy-coupled-v4-balanced-v1/generals-adaptive-strategy-coupled-v4-balanced-v1.eqx
+KL 0.3131 -> 0.2805
+teacher action match 80.0% -> 78.5%
+```
+
+Expander 256-row, seed 81320:
+
+| checkpoint | 8p0 | 8p1 | 12p0 | 12p1 | 16p0 | 16p1 | min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| v4 | `75.39%` | `73.83%` | `81.64%` | `79.30%` | `80.47%` | `80.08%` | `73.83%` |
+| balanced coupled | `76.56%` | `73.44%` | `80.08%` | `82.03%` | `79.69%` | `79.30%` | `73.44%` |
+
+Fixed-v5 max250, 256-row, seed 81340:
+
+| checkpoint | p0 | p1 | min | draw p0/p1 |
+| --- | ---: | ---: | ---: | --- |
+| v4 | `13.28%` | `10.55%` | `10.55%` | `44.92% / 53.12%` |
+| balanced coupled | `11.72%` | `9.77%` | `9.77%` | `44.92% / 53.91%` |
+
+Conclusion:
+
+```text
+Balanced policy-coupled supervision preserves 16x better than the unbalanced run, but it still does not beat v4 on 256-row Expander or fixed-v5.
+The useful artifact is the trainer/data infrastructure, not the checkpoints.
+Current offline action KL/CE is still too blunt: it can reduce KL and learn heads, but it does not reliably convert finish/belief/intent representation into stronger decisions.
+Next direction should make strategy heads affect inference explicitly, e.g. finish/Q reranking, target-conditioned action bias, or search-labeled replacement-outcome heads, rather than pushing the whole trunk with plain action KL.
+```
