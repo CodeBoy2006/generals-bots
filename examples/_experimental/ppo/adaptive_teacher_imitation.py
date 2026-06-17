@@ -44,10 +44,18 @@ from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array, p
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
 from train import checkpoint_path_for_iteration, prune_old_checkpoints, random_action, stack_learner_actions
-from train_adaptive import split_mixed_env_counts, teacher_obs_from_student_obs
+from train_adaptive import (
+    OUTCOME_DRAW,
+    OUTCOME_LOSS,
+    OUTCOME_WIN,
+    rollout_outcome_targets,
+    split_mixed_env_counts,
+    teacher_obs_from_student_obs,
+)
 
 POLICY_MODE_NAMES = ("sample", "greedy")
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
+OUTCOME_WEIGHT_MODES = ("none", "terminal")
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -410,7 +418,11 @@ def collect_mixed_teacher_imitation_rollout(
 
 def flatten_imitation_batch(batch):
     """Flatten time/environment axes for imitation training."""
-    obs, masks, active, actions, teacher_indices, teacher_logits, dones, infos = batch
+    if len(batch) == 8:
+        obs, masks, active, actions, teacher_indices, teacher_logits, dones, infos = batch
+        sample_weights = jnp.ones_like(teacher_indices, dtype=jnp.float32)
+    else:
+        obs, masks, active, actions, teacher_indices, teacher_logits, sample_weights, dones, infos = batch
     batch_size = obs.shape[0] * obs.shape[1]
     return (
         obs.reshape(batch_size, *obs.shape[2:]),
@@ -419,7 +431,30 @@ def flatten_imitation_batch(batch):
         actions.reshape(batch_size, -1),
         teacher_indices.reshape(batch_size),
         teacher_logits.reshape(batch_size, teacher_logits.shape[-1]),
+        sample_weights.reshape(batch_size),
     )
+
+
+def outcome_sample_weights(
+    winners: jnp.ndarray,
+    dones: jnp.ndarray,
+    learner_players: jnp.ndarray,
+    mode: str,
+    win_weight: float,
+    loss_weight: float,
+    draw_weight: float,
+    unknown_weight: float,
+) -> jnp.ndarray:
+    """Return per-transition imitation weights from rollout outcomes."""
+    if mode == "none":
+        return jnp.ones_like(dones, dtype=jnp.float32)
+    targets, known = rollout_outcome_targets(winners, dones, learner_players)
+    weights = jnp.where(
+        targets == OUTCOME_WIN,
+        win_weight,
+        jnp.where(targets == OUTCOME_LOSS, loss_weight, jnp.where(targets == OUTCOME_DRAW, draw_weight, 1.0)),
+    )
+    return jnp.where(known > 0.0, weights, unknown_weight).astype(jnp.float32)
 
 
 @eqx.filter_jit
@@ -434,7 +469,7 @@ def train_imitation_minibatch(
     temperature: float,
 ):
     """Train one shuffled imitation minibatch."""
-    obs, masks, active, actions, teacher_indices, teacher_logits = minibatch
+    obs, masks, active, actions, teacher_indices, teacher_logits, sample_weights = minibatch
 
     def loss_fn(net):
         student_logits = jax.vmap(lambda o, m, ac: net.logits_value(o, m, ac)[0])(obs, masks, active)
@@ -448,13 +483,18 @@ def train_imitation_minibatch(
         action_ce_losses = -student_log_probs[jnp.arange(student_log_probs.shape[0]), action_indices]
         probs = jax.nn.softmax(student_logits, axis=-1)
         entropy = -jnp.sum(probs * student_log_probs, axis=-1)
+        normalizer = jnp.maximum(jnp.sum(sample_weights), 1.0)
+        kl_loss = jnp.sum(kl_losses * sample_weights) / normalizer
+        action_ce_loss = jnp.sum(action_ce_losses * sample_weights) / normalizer
+        entropy_loss = jnp.sum(entropy * sample_weights) / normalizer
         loss = (
-            kl_weight * jnp.mean(kl_losses) * (temperature**2)
-            + action_ce_weight * jnp.mean(action_ce_losses)
-            - entropy_weight * jnp.mean(entropy)
+            kl_weight * kl_loss * (temperature**2)
+            + action_ce_weight * action_ce_loss
+            - entropy_weight * entropy_loss
         )
-        accuracy = jnp.mean(jnp.argmax(student_logits, axis=-1) == teacher_indices)
-        return loss, (jnp.mean(kl_losses), jnp.mean(action_ce_losses), accuracy, jnp.mean(entropy))
+        correct = (jnp.argmax(student_logits, axis=-1) == teacher_indices).astype(jnp.float32)
+        accuracy = jnp.sum(correct * sample_weights) / normalizer
+        return loss, (kl_loss, action_ce_loss, accuracy, entropy_loss, jnp.mean(sample_weights))
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(network)
     params = eqx.filter(network, eqx.is_inexact_array)
@@ -572,6 +612,11 @@ def parse_args():
     parser.add_argument("--action-ce-weight", type=float, default=3.0)
     parser.add_argument("--entropy-weight", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--outcome-weight-mode", choices=OUTCOME_WEIGHT_MODES, default="none")
+    parser.add_argument("--win-action-weight", type=float, default=1.0)
+    parser.add_argument("--loss-action-weight", type=float, default=1.0)
+    parser.add_argument("--draw-action-weight", type=float, default=1.0)
+    parser.add_argument("--unknown-action-weight", type=float, default=1.0)
     parser.add_argument("--init-model-path", default=None)
     parser.add_argument("--model-path", default="runs/generals-adaptive-teacher-imitation.eqx")
     parser.add_argument("--checkpoint-dir", default=None)
@@ -634,6 +679,13 @@ def parse_args():
         parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.kl_weight < 0.0 or args.action_ce_weight < 0.0 or args.entropy_weight < 0.0:
         parser.error("loss weights must be non-negative")
+    if (
+        args.win_action_weight < 0.0
+        or args.loss_action_weight < 0.0
+        or args.draw_action_weight < 0.0
+        or args.unknown_action_weight < 0.0
+    ):
+        parser.error("outcome action weights must be non-negative")
     if args.kl_weight == 0.0 and args.action_ce_weight == 0.0:
         parser.error("at least one of --kl-weight or --action-ce-weight must be positive")
     if args.temperature <= 0.0:
@@ -716,6 +768,13 @@ def main():
         f"kl={args.kl_weight:g}, ce={args.action_ce_weight:g}, "
         f"entropy={args.entropy_weight:g}, temp={args.temperature:g}"
     )
+    if args.outcome_weight_mode != "none":
+        print(
+            "Outcome wts:   "
+            f"mode={args.outcome_weight_mode}, win={args.win_action_weight:g}, "
+            f"loss={args.loss_action_weight:g}, draw={args.draw_action_weight:g}, "
+            f"unknown={args.unknown_action_weight:g}"
+        )
     if args.scoreboard_history:
         print("Score history: enabled")
     elif student_global_context:
@@ -813,6 +872,12 @@ def main():
     scoreboard_history_p1 = empty_scoreboard_history(p1_envs)
     fog_memory_p0 = empty_adaptive_fog_memory(p0_envs, args.pad_to)
     fog_memory_p1 = empty_adaptive_fog_memory(p1_envs, args.pad_to)
+    learner_players_for_batch = jnp.concatenate(
+        [
+            jnp.zeros((p0_envs,), dtype=jnp.int32),
+            jnp.ones((p1_envs,), dtype=jnp.int32),
+        ]
+    )
 
     checkpoint_paths = []
     model_stem = Path(args.model_path).stem
@@ -859,6 +924,18 @@ def main():
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
+        obs, masks, active, actions, teacher_indices, teacher_logits, dones, infos = batch
+        sample_weights = outcome_sample_weights(
+            infos.winner,
+            dones,
+            learner_players_for_batch,
+            args.outcome_weight_mode,
+            args.win_action_weight,
+            args.loss_action_weight,
+            args.draw_action_weight,
+            args.unknown_action_weight,
+        )
+        batch = (obs, masks, active, actions, teacher_indices, teacher_logits, sample_weights, dones, infos)
         student_network, opt_state, loss, metrics, key = train_imitation_epoch(
             student_network,
             opt_state,
@@ -882,16 +959,18 @@ def main():
             prune_old_checkpoints(checkpoint_paths, args.keep_checkpoints)
 
         if iteration == 1 or iteration % 10 == 0 or iteration == args.num_iterations:
-            _, _, _, _, teacher_indices, _, dones, infos = batch
+            _, _, _, _, teacher_indices, _, sample_weights, dones, infos = batch
             episodes = int(jnp.sum(dones))
             wins = int(jnp.sum(dones & (infos.winner >= 0)))
+            mean_weight = float(jnp.mean(sample_weights))
             elapsed = time.time() - t0
             samples = args.num_envs * args.num_steps
-            kl, ce, accuracy, entropy = metrics
+            kl, ce, accuracy, entropy, batch_weight = metrics
             print(
                 f"Iter {iteration:4d} | Loss: {float(loss):.4f} | "
                 f"KL: {float(kl):.4f} | CE: {float(ce):.4f} | "
                 f"Acc: {float(accuracy) * 100:5.1f}% | Ent: {float(entropy):.2f} | "
+                f"W: {mean_weight:.2f}/{float(batch_weight):.2f} | "
                 f"Episodes: {episodes:4d} | Decisive: {wins:4d} | "
                 f"SPS: {samples / elapsed:8.0f} | Time: {elapsed:.2f}s"
             )

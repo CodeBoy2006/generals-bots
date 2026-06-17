@@ -4107,3 +4107,107 @@ Next direction:
 2. Use search teacher or outcome-labeled replacement actions to teach earlier general capture.
 3. Preserve v4 as the Expander large-map base; do not promote fixed-v5 imitation checkpoints yet.
 ```
+
+## 2026-06-17 Fixed-v5 Imitation Outcome Weighting
+
+Added `adaptive_teacher_imitation.py --outcome-weight-mode terminal`, which uses known rollout outcomes to weight imitation KL/CE samples:
+
+```text
+--win-action-weight
+--loss-action-weight
+--draw-action-weight
+--unknown-action-weight
+```
+
+The intent was to bias v5 imitation toward teacher trajectories that actually produce decisive wins inside the 250-step gate, instead of giving slow draw trajectories equal weight.
+
+### Winner-biased imitation v4
+
+Run:
+
+```text
+runs/adaptive-fixed-v5-imitation-v4/
+init: runs/adaptive-fixed-v5-imitation-v3/generals-adaptive-fixed-v5-imitation-v3.eqx
+teacher/opponent: fixed v5 sample distribution
+teacher action mode: greedy
+loss: KL 1.0 + CE 8.0
+outcome weights: win=3.0, loss=0.5, draw=0.1, unknown=0.5
+rollout/update: 128 envs x 128 steps x 80 iters x 4 epochs
+```
+
+Training stayed numerically stable, with weighted action accuracy around `86-88%`:
+
+```text
+iter 1:  Loss 3.0882, KL 0.2162, CE 0.3590, Acc 87.0%, W 0.62
+iter 40: Loss 3.3363, KL 0.2684, CE 0.3835, Acc 86.7%, W 0.46
+iter 80: Loss 3.3722, KL 0.2907, CE 0.3852, Acc 86.6%, W 0.45
+```
+
+512 games/seat on seed `79880`, `max_steps=250`:
+
+| model | 8p0 | 8p1 | min | p0 decisive | p1 decisive | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fixed-v5 imitation v3 | `12.70%` | `15.82%` | `12.70%` | `50.39%` | `52.60%` | `74.80%` | `69.92%` |
+| fixed-v5 imitation v4 | `13.48%` | `15.43%` | `13.48%` | `54.76%` | `51.30%` | `75.39%` | `69.92%` |
+
+Conclusion: outcome weighting slightly improved same-seed min and p0 decisive rate, but not enough to change the strategic picture. It did not reduce draw rate.
+
+### Sample-teacher / KL-dominant imitation v5
+
+Greedy CE was suspected of making the student too deterministic and slow, so v5 switched to sampled teacher actions and KL-dominant loss:
+
+```text
+runs/adaptive-fixed-v5-imitation-v5/
+init: fixed-v5 imitation v3
+teacher/opponent: fixed v5 sample distribution
+teacher action mode: sample
+loss: KL 2.0 + CE 1.0 + entropy 0.001
+rollout/update: 128 envs x 128 steps x 40 iters x 3 epochs
+```
+
+Training reduced KL and raised student entropy:
+
+```text
+iter 1:  KL 0.1566, CE 0.8832, Acc 69.6%, Ent 0.58
+iter 40: KL 0.0696, CE 0.9208, Acc 67.8%, Ent 0.92
+```
+
+512 games/seat on seed `79940`, `max_steps=250`:
+
+| model | 8p0 | 8p1 | min | p0 decisive | p1 decisive | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fixed-v5 imitation v5 final | `14.26%` | `15.62%` | `14.26%` | `48.67%` | `49.08%` | `70.70%` | `68.16%` |
+| fixed-v5 imitation v5 iter030 | `14.65%` | `15.04%` | `14.65%` | `45.45%` | `45.03%` | `67.77%` | `66.60%` |
+
+The 128-row checkpoint sweep on seed `79960` suggested iter030/iter040 were better than earlier checkpoints, and the 512-row same-seed check confirmed iter030 is the best artifact in this sub-branch so far.
+
+### KL-heavy continuation v6
+
+v6 continued from v5 iter030 with even more KL and very small sampled CE:
+
+```text
+runs/adaptive-fixed-v5-imitation-v6/
+init: v5 iter030
+loss: KL 3.0 + CE 0.2 + entropy 0.002
+```
+
+512 games/seat on seed `80020`, `max_steps=250`:
+
+| model | 8p0 | 8p1 | min | p0 draw | p1 draw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fixed-v5 imitation v6 | `12.70%` | `14.84%` | `12.70%` | `68.16%` | `63.28%` |
+
+Conclusion: too much KL-only calibration regressed the gate. The best current pure checkpoint for the fixed-v5 gate is:
+
+```text
+runs/adaptive-fixed-v5-imitation-v5/ckpts/generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx
+512-row max250 min: 14.65%
+```
+
+Overall conclusion:
+
+```text
+Outcome weighting and sample-teacher KL both help a little, but action-distribution imitation is still not enough.
+The bottleneck is now explicit finish/search outcome selection, not merely matching v5 logits.
+Next experiment should add finish/draw-risk supervision or search-labeled finish actions on v5-vs-v5 states.
+```

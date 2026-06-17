@@ -723,3 +723,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the fixed-v5 imitation or finish checkpoints. Keep U-Net PPO v4 as the Expander base. Next branch should train explicit finish/draw-risk or search-to-outcome targets on v5-vs-v5 rollouts; plain PPO timeout fine-tuning did not solve the 250-step draw bottleneck.
 - **Context:** U-Net PPO v4 scored only `9.57%` min over 512 games/seat against fixed 8x8 v5 sample at max250. Direct PPO vs v5 stayed at `7.62%` min. Fixed-v5 imitation improved the gate, with best final v3 at `13.48%` min and roughly `48-52%` decisive rate, but draw stayed near `70%`. At max750, imitation v1 reached `42.77%` min, showing the clone is slow rather than purely losing. All training/eval used `cuda:0`; model artifacts stayed under ignored `runs/`.
+
+## [2026-06-17 16:14] Fixed-v5 Imitation Calibration
+- **Changes:** Added outcome-weighted KL/CE support to `adaptive_teacher_imitation.py` via `--outcome-weight-mode terminal` and per-outcome action weights. Updated README and strategy docs with winner-biased and sample-teacher GPU runs.
+- **Status:** Completed
+- **Next Steps:** Do not continue pure action-distribution imitation as the main route. The next aligned branch should train finish/draw-risk or search-labeled finish actions on v5-vs-v5 states, because the best imitation checkpoint still fails the fixed-v5 gate.
+- **Context:** Winner-biased v4 improved same-seed min only from v3 `12.70%` to `13.48%`. Sample-teacher/KL v5 produced the best artifact so far, `runs/adaptive-fixed-v5-imitation-v5/ckpts/generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx`, at `14.65%` min over 512 games/seat max250. KL-heavy v6 regressed to `12.70%` min. Draw remains the core bottleneck (`~66-70%` at max250).
