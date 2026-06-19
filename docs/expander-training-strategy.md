@@ -10964,3 +10964,175 @@ PPO attempt should either:
   2. train against a mixed opponent curriculum that includes Expander protection
      in the rollout itself, not only via KL.
 ```
+
+## 2026-06-20 Mixed-Opponent And Value Calibration Follow-up
+
+Corrected schema note:
+
+```text
+safe v3 can load with current strategy heads if the checkpoint template includes
+both outcome and strategy heads:
+  --outcome-aux-weight / --outcome-head
+  --init-outcome-head
+  --strategy-aux
+  --init-strategy-aux
+  --strategy-finish-outputs 3
+
+The earlier apparent strategy schema mismatch was caused by omitting the outcome
+head, which shifted Equinox leaf order and made the outcome layer appear where
+the strategy intent layer was expected.
+```
+
+Mixed-opponent PPO with full safe-v3 schema:
+
+```text
+run:
+  runs/adaptive-ppo-mixed-opponent-safev3-full-v0/
+
+init/teacher:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+
+opponent curriculum:
+  8x8 rows: fixed v5 with p=0.5, otherwise Expander fallback
+  12/16 rows: Expander fallback
+
+training:
+  num_envs 32
+  rollout 128
+  iterations 30
+  sparse terminal reward
+  top_advantage_fraction 0.25 stratified
+  EMA 0.999
+  outcome_aux_weight 0.2
+  strategy heads preserved
+```
+
+Results:
+
+```text
+fixed-v5 max250, 256 games/seat, seed 86640:
+  p0 16.41%
+  p1 11.33%
+  min 11.33%
+
+Expander adaptive, 128 games/row, seed 86680:
+  8p0  74.22%
+  8p1  76.56%
+  12p0 83.59%
+  12p1 84.38%
+  16p0 77.34%
+  16p1 78.12%
+  min 74.22%
+```
+
+Value-calibration implementation:
+
+```text
+adaptive_strategy_supervised.py:
+  added --value-target-weight
+
+target:
+  selected outcome label -> value target
+  loss/draw/win -> -1/0/+1
+
+with --value-loss hl-gauss:
+  train PPO value logits with HL-Gauss CE
+
+with --update-scope strategy-value-heads:
+  keep trunk/policy/action logits frozen
+  train strategy heads, outcome head, value_linear1, and value heads
+```
+
+Value calibration run:
+
+```text
+run:
+  runs/adaptive-valuecal-trajectory-v0/
+
+data:
+  fixed-v5 searchwin trajectory
+  terminal searchwin fixed-v5
+  fixed-v5 draw contrast
+  fixed-v5 contact/searchwin
+  Expander safe-v3 protection
+
+filters:
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+
+sample cap:
+  max_samples_per_shard 2048
+  max_samples 50000
+
+training:
+  update_scope strategy-value-heads
+  no action CE
+  label_source trajectory
+  finish 0.50
+  outcome 0.25
+  value 0.50
+  belief 0.20
+  intent 0.10
+  lr 5e-5
+  epochs 8
+```
+
+Training signal:
+
+```text
+samples: 45,866
+value loss: 5.2276 -> 2.9189
+value MAE:  0.673  -> 0.609
+outcome acc: 41.8% -> 44.6%
+finish acc:  59.4% -> 60.0%
+intent acc:  55.6% -> 58.4%
+```
+
+Value-calibrated mixed-opponent PPO:
+
+```text
+run:
+  runs/adaptive-ppo-valuecal-mixed-v0/
+
+init/teacher:
+  runs/adaptive-valuecal-trajectory-v0/
+
+same mixed-opponent PPO recipe as safev3-full-v0
+```
+
+Results:
+
+```text
+fixed-v5 max250, 256 games/seat, seed 86640:
+  p0 15.23%
+  p1 11.33%
+  min 11.33%
+
+Expander adaptive, 128 games/row, seed 86680:
+  8p0  74.22%
+  8p1  76.56%
+  12p0 82.03%
+  12p1 82.03%
+  16p0 84.38%
+  16p1 76.56%
+  min 74.22%
+```
+
+Conclusion:
+
+```text
+Preserving full strategy/outcome heads and calibrating value from trajectory
+labels did not move the fixed-v5 short-time gate beyond 11.33% min. The value
+loss learns, but the PPO update still does not discover decisive execution.
+
+Do not promote:
+  adaptive-ppo-mixed-opponent-safev3-full-v0
+  adaptive-valuecal-trajectory-v0
+  adaptive-ppo-valuecal-mixed-v0
+
+Next direction should not be longer plain PPO or value-only pretraining. The
+remaining gap is execution/control: source-target outcome-Q, plan-conditioned
+Worker with stronger positive gates, or advantage-labeled action selection from
+counterfactual plans.
+```

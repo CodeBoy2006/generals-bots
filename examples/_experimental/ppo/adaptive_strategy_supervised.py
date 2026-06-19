@@ -23,7 +23,7 @@ import numpy as np
 import optax
 
 from adaptive_common import parse_grid_sizes
-from adaptive_network import load_or_create_adaptive_network
+from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_network
 from adaptive_search_distill import binary_cross_entropy_with_logits
 from generals.agents.ppo_policy_agent import parse_policy_channels
 
@@ -358,6 +358,7 @@ def mask_strategy_supervised_grads(
     grads,
     keep_outcome: bool,
     keep_value_bottleneck: bool = False,
+    keep_value_heads: bool = False,
     keep_policy_head: bool = False,
 ):
     """Keep gradients only for selected supervised heads and optional pooled bottleneck."""
@@ -365,8 +366,22 @@ def mask_strategy_supervised_grads(
     if keep_policy_head:
         masked = eqx.tree_at(lambda net: net.policy_conv, masked, grads.policy_conv)
         masked = eqx.tree_at(lambda net: net.pass_linear, masked, grads.pass_linear)
-    if keep_value_bottleneck:
+    if keep_value_bottleneck or keep_value_heads:
         masked = eqx.tree_at(lambda net: net.value_linear1, masked, grads.value_linear1)
+    if keep_value_heads:
+        masked = eqx.tree_at(lambda net: net.value_linear2, masked, grads.value_linear2)
+        if grads.categorical_value_linear2 is not None:
+            masked = eqx.tree_at(lambda net: net.categorical_value_linear2, masked, grads.categorical_value_linear2)
+        if grads.size_value_linear1:
+            masked = eqx.tree_at(lambda net: net.size_value_linear1, masked, grads.size_value_linear1)
+        if grads.size_value_linear2:
+            masked = eqx.tree_at(lambda net: net.size_value_linear2, masked, grads.size_value_linear2)
+        if grads.size_categorical_value_linear2:
+            masked = eqx.tree_at(
+                lambda net: net.size_categorical_value_linear2,
+                masked,
+                grads.size_categorical_value_linear2,
+            )
     if keep_outcome and grads.outcome_linear2 is not None:
         masked = eqx.tree_at(lambda net: net.outcome_linear2, masked, grads.outcome_linear2)
     if grads.strategy_intent_linear2 is not None:
@@ -505,6 +520,7 @@ def train_step(
     finish_weight: float,
     belief_weight: float,
     outcome_weight: float,
+    value_target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
     q_kl_weight: float,
@@ -520,6 +536,7 @@ def train_step(
     balance_outcome_labels: bool,
     freeze_base: bool,
     train_value_bottleneck: bool,
+    train_value_heads: bool,
     train_policy_head: bool,
     multi_horizon_finish: bool,
 ):
@@ -613,6 +630,30 @@ def train_step(
             )
             outcome_accuracy = outcome_accuracy / outcome_normalizer
 
+        value_target_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        value_target_mae = jnp.asarray(0.0, dtype=jnp.float32)
+        if value_target_weight > 0.0:
+            _, values, value_logits, _ = jax.vmap(lambda o, m, a: net.logits_value_auxiliary(o, m, a))(
+                obs,
+                masks,
+                active,
+            )
+            value_targets = outcome_targets.astype(jnp.float32) - float(OUTCOME_DRAW)
+            if value_logits is not None:
+                value_losses = hl_gauss_value_loss(
+                    value_logits,
+                    value_targets,
+                    net.value_bins,
+                    net.value_min,
+                    net.value_max,
+                    net.value_sigma,
+                )
+            else:
+                value_losses = 0.5 * jnp.square(values - value_targets)
+            value_normalizer = jnp.maximum(jnp.sum(outcome_weights), 1.0)
+            value_target_loss = jnp.sum(value_losses * outcome_weights) / value_normalizer
+            value_target_mae = jnp.sum(jnp.abs(values - value_targets) * outcome_weights) / value_normalizer
+
         policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
         action_ce = jnp.asarray(0.0, dtype=jnp.float32)
         teacher_action_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
@@ -703,6 +744,7 @@ def train_step(
             + finish_weight * finish_loss
             + belief_weight * belief_loss
             + outcome_weight * outcome_loss
+            + value_target_weight * value_target_loss
             + policy_kl_weight * policy_kl
             + action_ce_weight * action_ce
             + q_kl_weight * q_policy_kl
@@ -717,6 +759,7 @@ def train_step(
             "finish_loss": finish_loss,
             "belief_loss": belief_loss,
             "outcome_loss": outcome_loss,
+            "value_target_loss": value_target_loss,
             "policy_kl": policy_kl,
             "action_ce": action_ce,
             "q_policy_kl": q_policy_kl,
@@ -728,6 +771,7 @@ def train_step(
             "intent_accuracy": intent_accuracy,
             "finish_accuracy": finish_accuracy,
             "outcome_accuracy": outcome_accuracy,
+            "value_target_mae": value_target_mae,
             "teacher_action_accuracy": teacher_action_accuracy,
             "q_action_accuracy": q_action_accuracy,
             "search_q_rank_accuracy": search_q_rank_accuracy,
@@ -737,6 +781,7 @@ def train_step(
             "target_accuracy": target_accuracy,
             "finish_weight_mean": jnp.mean(finish_weights),
             "outcome_weight_mean": jnp.mean(outcome_weights),
+            "value_target_weight_mean": jnp.mean(outcome_weights),
             "action_weight_mean": jnp.mean(action_weights),
             "search_q_weight_mean": search_q_weight_mean,
             "search_q_value_weight_mean": search_q_value_weight_mean,
@@ -749,6 +794,7 @@ def train_step(
             grads,
             outcome_weight > 0.0,
             train_value_bottleneck,
+            train_value_heads,
             train_policy_head,
         )
     params = eqx.filter(network, eqx.is_inexact_array)
@@ -767,6 +813,7 @@ def train_epoch(
     finish_weight: float,
     belief_weight: float,
     outcome_weight: float,
+    value_target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
     q_kl_weight: float,
@@ -782,6 +829,7 @@ def train_epoch(
     balance_outcome_labels: bool,
     freeze_base: bool,
     train_value_bottleneck: bool,
+    train_value_heads: bool,
     train_policy_head: bool,
     multi_horizon_finish: bool,
 ):
@@ -825,6 +873,7 @@ def train_epoch(
             finish_weight,
             belief_weight,
             outcome_weight,
+            value_target_weight,
             policy_kl_weight,
             action_ce_weight,
             q_kl_weight,
@@ -840,6 +889,7 @@ def train_epoch(
             balance_outcome_labels,
             freeze_base,
             train_value_bottleneck,
+            train_value_heads,
             train_policy_head,
             multi_horizon_finish,
         )
@@ -909,6 +959,12 @@ def parse_args():
     parser.add_argument("--finish-weight", type=float, default=0.4)
     parser.add_argument("--belief-weight", type=float, default=0.3)
     parser.add_argument("--outcome-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--value-target-weight",
+        type=float,
+        default=0.0,
+        help="Fit the PPO value head to loss/draw/win targets from the selected label source.",
+    )
     parser.add_argument("--balance-finish-labels", action="store_true")
     parser.add_argument("--balance-outcome-labels", action="store_true")
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
@@ -1004,6 +1060,7 @@ def parse_args():
             args.finish_weight,
             args.belief_weight,
             args.outcome_weight,
+            args.value_target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
             args.q_kl_weight,
@@ -1023,6 +1080,8 @@ def parse_args():
         parser.error("--search-q-outcome-score-weight must be non-negative")
     if args.outcome_weight > 0.0 and not args.outcome_head:
         parser.error("--outcome-weight requires --outcome-head")
+    if args.value_target_weight > 0.0 and args.value_loss == "hl-gauss" and args.value_bins <= 1:
+        parser.error("--value-target-weight with --value-loss hl-gauss requires --value-bins > 1")
     if args.update_scope in ("policy-heads", "all") and args.policy_kl_weight <= 0.0:
         parser.error("--update-scope policy-heads/all requires a positive --policy-kl-weight to anchor policy drift")
     if (args.source_weight > 0.0 or args.target_weight > 0.0) and not args.strategy_spatial_aux:
@@ -1092,6 +1151,7 @@ def main():
         "Loss weights:  "
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
         f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}, "
+        f"value={args.value_target_weight:g}, "
         f"balance_finish={args.balance_finish_labels}, balance_outcome={args.balance_outcome_labels}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
         f"action_ce_mode={args.action_ce_weight_mode}, "
@@ -1107,6 +1167,8 @@ def main():
         scope_label = "strategy auxiliary heads + pooled value bottleneck"
         if args.outcome_weight > 0.0:
             scope_label += " + outcome head"
+        if args.value_target_weight > 0.0:
+            scope_label += " + value heads"
     elif args.update_scope == "policy-heads":
         scope_label = "policy output head + strategy auxiliary heads"
         if args.outcome_weight > 0.0:
@@ -1158,6 +1220,7 @@ def main():
             args.finish_weight,
             args.belief_weight,
             args.outcome_weight,
+            args.value_target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
             args.q_kl_weight,
@@ -1173,6 +1236,7 @@ def main():
             args.balance_outcome_labels,
             args.update_scope in ("strategy-heads", "strategy-value-heads", "policy-heads"),
             args.update_scope == "strategy-value-heads",
+            args.value_target_weight > 0.0,
             args.update_scope == "policy-heads",
             args.finish_head_mode == "multi-horizon",
         )
@@ -1183,6 +1247,7 @@ def main():
             f"Finish {float(metrics['finish_loss']):.4f}/{float(metrics['finish_accuracy']) * 100:5.1f}% | "
             f"Belief {float(metrics['belief_loss']):.4f} | "
             f"Outcome {float(metrics['outcome_loss']):.4f}/{float(metrics['outcome_accuracy']) * 100:5.1f}% | "
+            f"Value {float(metrics['value_target_loss']):.4f}/MAE {float(metrics['value_target_mae']):.3f} | "
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"ActW {float(metrics['action_weight_mean']):.3f} | "
