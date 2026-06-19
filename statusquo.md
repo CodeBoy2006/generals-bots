@@ -1022,3 +1022,9 @@
 - **Status:** Completed
 - **Next Steps:** Scale the same midgame/contact/high-gap data recipe 3-5x and mix 12/16 Expander contact rows before another full-policy update; do not return to terminal-window-only imitation.
 - **Context:** New dataset kept 16315 rows with trajectory loss/draw/win `5365/8347/2603` and search-best win rows `2151` (`13.18%`). Fixed-v5 max250 256-row min improved from `9.77%` to `11.33%`; Expander 8/12/16 128-row min moved from `75.00%` to `75.78%`.
+
+## [2026-06-19 20:18] Scaled Decisive Imitation Probes
+- **Changes:** Collected/derived ignored GPU datasets under `runs/adaptive-midgame-contact-searchwin-fixed-v5-v1/`, `runs/adaptive-midgame-contact-searchwin-expander-12-16-v0/`, and `runs/adaptive-midgame-contact-searchwin-decisive-filter-v0/`; trained/evaluated v4-v8 variants; documented results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop action-CE imitation sweeps on these shards. Use the decisive filtered data for a plan-conditioned Worker or gated plan executor, mixed with the base policy rather than globally biasing primitive logits.
+- **Context:** v4 reached fixed-v5 max250 256-row min `11.72%` but regressed Expander min to `73.44%`; v5-lite `9.38%`, v6 `8.59%`, v7 `11.33%` with Expander `72.66%`, and v8 decisive-only `10.94%`. Current safe checkpoint remains `runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx`.

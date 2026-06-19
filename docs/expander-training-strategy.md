@@ -8221,3 +8221,182 @@ useful next step is to scale this exact data recipe, not tune thresholds:
 This is a better direction than terminal-window-only decisive imitation because
 it preserves draw/loss rows as negative strategic context while keeping primitive
 action imitation tied to local search rollouts that actually win.
+
+## 2026-06-19: Scaled Search-Best-Win / Decisive-Only Probes
+
+Expanded the same midgame/contact/high-gap recipe and added 12/16 Expander
+protection data. All artifacts were written under ignored `runs/`, not cache
+directories.
+
+Additional fixed-v5 `max250` search-best-win data:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-v1/
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  outcome_known
+  search_gap >= 0.25
+kept rows:
+  28474
+trajectory outcome:
+  loss 8554, draw 14679, win 5241
+search_best_outcome:
+  loss 15, draw 24796, win 3663
+search_best_win action rows:
+  12.86%
+groups:
+  8p0 14428, 8p1 14046
+```
+
+12/16 Expander protection data:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-expander-12-16-v0/
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  outcome_known
+  search_gap >= 0.25
+kept rows:
+  36137
+trajectory outcome:
+  loss 2320, draw 2351, win 31466
+search_best_outcome:
+  loss 2, draw 26003, win 10132
+search_best_win action rows:
+  28.04%
+groups:
+  12p0 8083, 12p1 8721, 16p0 10312, 16p1 9021
+```
+
+Filtered decisive rows for positive-only trajectory imitation:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-decisive-filter-v0/
+filter:
+  search_best_outcome == win
+kept rows:
+  fixed-v5-v0: 2151
+  fixed-v5-v1: 3663
+  expander-12-16-v0: 10132
+groups:
+  8p0 2926, 8p1 2888
+  12p0 2134, 12p1 2593
+  16p0 3016, 16p1 2389
+```
+
+Main-policy probes from the v3 safe checkpoint:
+
+```text
+v4 mixed broad data:
+  init: adaptive-midgame-search-imitation-v1
+  data: fixed-v5-v0 + fixed-v5-v1 + expander-12-16-v0
+  label_source: trajectory
+  action_ce_weight_mode: search-best-win
+  final KL: 0.0203
+  fixed-v5 max250 256 seed86640:
+    p0 30/105/121, win 11.72%, draw 47.27%
+    p1 34/89/133, win 13.28%, draw 51.95%
+    min 11.72%
+  Expander 8/12/16 128 seed86680:
+    8p0 78.12%, 8p1 78.91%
+    12p0 79.69%, 12p1 84.38%
+    16p0 73.44%, 16p1 76.56%
+    min 73.44%
+  verdict:
+    fixed-v5 small positive, but 16p0 Expander regression; do not promote.
+
+v5-lite conservative mixed:
+  init: adaptive-midgame-contact-searchwin-imitation-v3
+  policy_kl=4.0, action_ce=0.10, lr=2e-6
+  final KL: 0.0055
+  fixed-v5 max250 256 seed86640:
+    p0 28/98/130, win 10.94%, draw 50.78%
+    p1 24/86/146, win  9.38%, draw 57.03%
+    min 9.38%
+  Expander 8/12/16 128 seed86680:
+    8p0 73.44%, 8p1 79.69%
+    12p0 83.59%, 12p1 83.59%
+    16p0 83.59%, 16p1 78.91%
+    min 73.44%
+  verdict:
+    conservative broad update loses fixed-v5 and 8p0 Expander; do not promote.
+
+v6 search-best labels:
+  init: adaptive-midgame-contact-searchwin-imitation-v3
+  label_source: search-best
+  action_ce_weight_mode: search-best-win
+  final KL: 0.0053
+  fixed-v5 max250 256 seed86640:
+    p0 29/103/124, win 11.33%, draw 48.44%
+    p1 22/88/146,  win  8.59%, draw 57.03%
+    min 8.59%
+  verdict:
+    full search-best labels are still draw-heavy; no Expander eval needed.
+
+v7 broad + decisive oversample:
+  init: adaptive-midgame-contact-searchwin-imitation-v3
+  data: broad shards plus filtered decisive duplicate shards
+  label_source: search-best
+  action row weight: 0.368
+  final KL: 0.0187
+  fixed-v5 max250 256 seed86640:
+    p0 34/92/130, win 13.28%, draw 50.78%
+    p1 29/88/139, win 11.33%, draw 54.30%
+    min 11.33%
+  Expander 8/12/16 128 seed86680:
+    8p0 72.66%, 8p1 75.78%
+    12p0 83.59%, 12p1 85.16%
+    16p0 79.69%, 16p1 78.91%
+    min 72.66%
+  verdict:
+    decisive oversampling changes behavior but regresses 8p0; do not promote.
+
+v8 decisive-only:
+  init: adaptive-midgame-contact-searchwin-imitation-v3
+  data: filtered decisive rows only
+  label_source: search-best
+  action_ce=0.80, policy_kl=2.0
+  action row weight: 1.000
+  final KL: 0.0784
+  fixed-v5 max250 256 seed86640:
+    p0 34/106/116, win 13.28%, draw 45.31%
+    p1 28/86/142,  win 10.94%, draw 55.47%
+    min 10.94%
+  verdict:
+    strong decisive-only action imitation lowers draw for p0 but does not raise
+    min win rate. Do not run Expander promotion eval.
+```
+
+Current best safe checkpoint from this line remains:
+
+```text
+runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+```
+
+Interpretation:
+
+```text
+1. Scaling broad search-best-win contact data did not solve fixed-v5.
+2. Using search_best_outcome for finish/outcome labels is too draw-heavy.
+3. Positive-only decisive imitation is learnable but still cannot compress the
+   rollout-search policy into one primitive action head.
+4. The remaining gap is execution-conditioned planning, not another CE weight.
+```
+
+Next decision: stop action-CE imitation sweeps on these shards. Use the
+decisive filtered data as supervision for a plan-conditioned Worker or gated
+plan executor:
+
+```text
+source/target proposal from existing spatial heads
+plan-conditioned Worker action head
+gate by finish/draw confidence
+mix with base policy rather than overwriting primitive logits globally
+```
