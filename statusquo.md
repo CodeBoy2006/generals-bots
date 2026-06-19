@@ -291,3 +291,9 @@
 - **Status:** Completed
 - **Next Steps:** Execute Task 1 first using TDD: adaptive parsing, active-cell input encoding, valid masks, and single-pass action encoding.
 - **Context:** The plan keeps fixed-size PPO paths intact and adds adaptive scripts beside them. It does not yet prove the 90% target; it defines the infrastructure path toward producing and verifying one 8/12/16 checkpoint.
+
+## [2026-06-19 20:11] Web Renderer Design
+- **Changes:** Added `docs/superpowers/specs/2026-06-19-web-renderer-design.md` specifying the browser Canvas renderer, Python/FastAPI WebSocket session layer, JSON snapshot and command protocols, migration phases, error handling, dependencies, and verification strategy for replacing pygame-only display paths.
+- **Status:** Completed
+- **Next Steps:** Review and approve the spec, then write an implementation plan before adding `generals/web/`, `examples/play_web.py`, and frontend assets.
+- **Context:** The design keeps Python/JAX authoritative for game rules and PPO inference, retains pygame during migration, and targets remote browser usability without porting JAX or checkpoints to WebAssembly.
