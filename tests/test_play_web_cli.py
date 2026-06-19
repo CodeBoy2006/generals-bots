@@ -1,4 +1,5 @@
 import sys
+import importlib
 from pathlib import Path
 
 from examples.play_web import args_to_config, parse_args
@@ -85,3 +86,12 @@ def test_static_browser_assets_and_real_asset_mounts_exist():
     assert "/static" in paths
     assert "/assets/images" in paths
     assert "/assets/fonts" in paths
+
+
+def test_web_runtime_factory_import_does_not_import_pygame():
+    sys.modules.pop("pygame", None)
+
+    runtime = importlib.import_module("generals.agents.ppo_runtime")
+    importlib.reload(runtime)
+
+    assert "pygame" not in sys.modules

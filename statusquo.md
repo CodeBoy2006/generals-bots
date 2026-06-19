@@ -321,3 +321,9 @@
 - **Status:** Completed
 - **Next Steps:** Run full regression, smoke the server and browser UI, then merge and push the completed implementation.
 - **Context:** The browser renderer is now documented as the preferred path for remote machines without GUI display, while the pygame path remains available for local desktop use.
+
+## [2026-06-19 20:46] Web Runtime Decoupling
+- **Changes:** Moved shared PPO map/model/rollout-search factories into `generals/agents/ppo_runtime.py`, updated pygame and web entry points to use it, added a no-pygame web runtime import test, and fixed the browser board frame to stay square.
+- **Status:** Completed
+- **Next Steps:** Run final verification, merge the `web-renderer` worktree branch back to master, and push.
+- **Context:** Browser WebSocket sessions now load PPO agents without importing `generals.gui` or emitting pygame startup logs; pygame remains available through `examples/play_against_model.py`.

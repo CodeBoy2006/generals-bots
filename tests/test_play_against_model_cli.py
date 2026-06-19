@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import pytest
 
 import examples.play_against_model as play_against_model
+import generals.agents.ppo_runtime as ppo_runtime
 from examples.play_against_model import (
     advance_until_human_can_move,
     auto_tick_due,
@@ -312,10 +313,10 @@ def test_rollout_search_agent_delegates_to_search_action(monkeypatch):
         )
         return jnp.array([1, 0, 0, 0, 0], dtype=jnp.int32)
 
-    monkeypatch.setattr(play_against_model, "load_policy_network", fake_load_policy_network)
-    monkeypatch.setattr(play_against_model, "rollout_search_action", fake_rollout_search_action)
+    monkeypatch.setattr(ppo_runtime, "load_policy_network", fake_load_policy_network)
+    monkeypatch.setattr(ppo_runtime, "rollout_search_action", fake_rollout_search_action)
 
-    agent = play_against_model.RolloutSearchPolicyAgent(
+    agent = ppo_runtime.RolloutSearchPolicyAgent(
         "policy.eqx",
         grid_size=4,
         top_k=2,

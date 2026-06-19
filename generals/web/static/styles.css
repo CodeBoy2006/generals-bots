@@ -179,8 +179,8 @@ input[type="number"] {
 }
 
 .board-frame {
-  width: 100%;
-  max-height: calc(100vh - 116px);
+  width: min(100%, calc(100vh - 116px));
+  justify-self: center;
   aspect-ratio: 1 / 1;
   align-self: start;
   border: 1px solid var(--line);
@@ -378,7 +378,7 @@ h2 {
   }
 
   .board-frame {
-    max-height: none;
+    width: 100%;
   }
 
   .side-panel {

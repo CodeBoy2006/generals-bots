@@ -121,7 +121,7 @@ class WebGameSession:
     @classmethod
     def from_config(cls, config: WebSessionConfig) -> "WebGameSession":
         """Build a session from CLI/server configuration."""
-        from examples.play_against_model import make_grid, make_gui_agent, make_player_names, make_search_config
+        from generals.agents.ppo_runtime import make_grid, make_player_names, make_policy_agent, make_search_config
 
         args = _config_namespace(config)
         key = jrandom.PRNGKey(config.seed)
@@ -141,7 +141,7 @@ class WebGameSession:
                 raise ValueError("model_1_path or opponent_model_path is required")
             opponent_policy_mode = config.opponent_policy_mode or config.policy_mode
             machine_agents = (
-                make_gui_agent(
+                make_policy_agent(
                     model_path,
                     config.grid_size,
                     config.policy_mode,
@@ -151,7 +151,7 @@ class WebGameSession:
                     config.search_policy,
                     search_config,
                 ),
-                make_gui_agent(
+                make_policy_agent(
                     opponent_model_path,
                     config.grid_size,
                     opponent_policy_mode,
@@ -182,7 +182,7 @@ class WebGameSession:
         model_path = config.model_path or config.model_0_path
         if model_path is None:
             raise ValueError("model_path or model_0_path is required")
-        model_agent = make_gui_agent(
+        model_agent = make_policy_agent(
             model_path,
             config.grid_size,
             config.policy_mode,
