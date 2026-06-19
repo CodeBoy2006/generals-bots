@@ -1130,3 +1130,15 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue the p0mix adapter-gate branch unless a future adapter produces many more changed-action positives. The next useful route should train a better adapter/delta source or use contrast rows only for frozen auxiliary calibration.
 - **Context:** Feature-finish gating with draw/search model improved p0 but hurt p1 (`14.84%/9.38%`, min `9.38%`). Learned 14-feature gate had only ~`0.01%` positives (`187` changed actions out of `51,835` rows) and evaluated at fixed-v5 max250 seed `86640` with min `10.94%`, effectively base behavior.
+
+## [2026-06-20 01:00] Midgame Search-Win Trajectory Policy Probe
+- **Changes:** Trained/evaluated ignored GPU runs `runs/adaptive-midgame-searchwin-trajectory-imitation-v0/` and `runs/adaptive-policy-adapter-gate-searchwin-traj-v0/`, then documented the results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop direct all-trunk trajectory imitation and adapter gating from this data. Use search-win trajectories for finish/value calibration or move to controlled PPO from safe v3, where rollout outcome supplies the credit signal.
+- **Context:** Direct all-trunk trajectory imitation learned aux labels but regressed fixed-v5 max250 to 128-row min `7.81%` and Expander 128-row min `68.75%`. Using that checkpoint only as an adapter produced more changed actions than p0mix (`2,033/112,492`) but only `0.13%` positives; learned gate threshold `0.5`/`0.1` both gave fixed-v5 max250 256-row seed `86640` min `10.55%`, below safe-v3 historical `10.94%-11.33%`.
+
+## [2026-06-20 01:10] Controlled Fixed-v5 PPO Probe
+- **Changes:** Added explicit `train_adaptive.py` output flags for preserving strategy aux heads through PPO (`--strategy-aux`, `--strategy-spatial-aux`, `--strategy-finish-outputs`), updated README/manual docs, and trained/evaluated ignored GPU runs `runs/adaptive-ppo-fixed-v5-controlled-v0/` and `runs/adaptive-ppo-fixed-v5-controlled-v1/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote v1. Keep safe v3 as active base; use v0 only as a controlled-PPO diagnostic. Next PPO should preserve strategy aux heads and include Expander protection in the rollout curriculum or stop after the first safe fixed-v5 probe.
+- **Context:** v0 used mixed-seat sparse terminal PPO vs fixed v5 with 256-step rollout, EMA, stratified top-advantage 0.25, and safe-v3 KL. It reached fixed-v5 max250 256-row seed `86640` min `11.33%` and Expander 128-row seed `86680` min `75.78%`, roughly safe-v3 level. v1 continued 60 iters but stayed fixed-v5 min `11.33%` and slipped Expander to min `75.00%`.

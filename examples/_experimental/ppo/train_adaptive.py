@@ -924,7 +924,11 @@ def parse_args():
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-aux-weight", type=float, default=0.0)
     parser.add_argument("--init-outcome-head", action="store_true")
+    parser.add_argument("--strategy-aux", action="store_true")
+    parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--init-strategy-aux", action="store_true")
+    parser.add_argument("--init-strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--teacher-model-path", default=None)
     parser.add_argument("--teacher-kl-weight", type=float, default=0.0)
@@ -1040,6 +1044,12 @@ def parse_args():
         parser.error("--init-value-bins requires --init-value-loss hl-gauss")
     if args.outcome_aux_weight < 0.0:
         parser.error("--outcome-aux-weight must be non-negative")
+    if args.strategy_spatial_aux and not args.strategy_aux:
+        parser.error("--strategy-spatial-aux requires --strategy-aux")
+    if args.init_strategy_spatial_aux and not args.init_strategy_aux:
+        parser.error("--init-strategy-spatial-aux requires --init-strategy-aux")
+    if args.strategy_finish_outputs <= 0:
+        parser.error("--strategy-finish-outputs must be positive")
     if args.init_strategy_finish_outputs <= 0:
         parser.error("--init-strategy-finish-outputs must be positive")
     if args.context_only_update and not (args.context_residual or args.pyramid_context):
@@ -1121,8 +1131,12 @@ def main():
             print("Warm context:  enabled")
         if args.init_pyramid_context:
             print("Warm pyramid:  enabled")
-        if args.init_strategy_aux:
-            print("Warm strategy: enabled")
+    if args.init_strategy_aux:
+        print("Warm strategy: enabled")
+    if args.strategy_aux:
+        print(f"Strategy aux:  finish_outputs={args.strategy_finish_outputs}")
+    if args.strategy_spatial_aux:
+        print("Strategy map:  source/target heads enabled")
     if args.context_residual:
         print("Context res:   5x5 zero-init residual branch")
     if args.pyramid_context:
@@ -1208,7 +1222,11 @@ def main():
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_aux_weight > 0.0,
         init_outcome_head=args.init_outcome_head,
+        strategy_aux=args.strategy_aux,
         init_strategy_aux=args.init_strategy_aux,
+        strategy_spatial_aux=args.strategy_spatial_aux,
+        init_strategy_spatial_aux=args.init_strategy_spatial_aux,
+        strategy_finish_outputs=args.strategy_finish_outputs,
         init_strategy_finish_outputs=args.init_strategy_finish_outputs,
         global_context=network_global_context,
         init_global_context=args.init_global_context,

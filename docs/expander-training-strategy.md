@@ -10657,3 +10657,310 @@ contrast-calibrated finish/outcome features do not fix the sparse-positive
 problem. Close this p0mix adapter-gate branch unless a future adapter produces
 many more candidate changes with clear positive labels.
 ```
+
+## 2026-06-20 Midgame Search-Win Trajectory Policy Probe
+
+Goal:
+
+```text
+Test whether higher-quality midgame/search-controlled winning trajectories can
+update the U-Net main policy directly, instead of acting as source/target or
+Worker inference-time overrides.
+```
+
+Training data:
+
+```text
+winning trajectory:
+  runs/adaptive-midgame-searchwin-trajectory-fixed-v5-safev3-v0/
+  rows: 25,385
+  outcome win: 25,385
+  turn>=80: 18,688
+  search_best win: 8,789
+
+terminal search-win:
+  runs/adaptive-midgame-terminal-searchwin-fixed-v5-safev3-v0/
+  rows: 1,722
+  search_best win: 1,722
+  median turn: 145
+
+draw contrast:
+  runs/adaptive-midgame-draw-fixed-v5-v0/
+
+Expander protection:
+  runs/adaptive-midgame-contact-searchwin-expander-safev3-v0/
+  rows: 23,361
+  sizes: 8/12/16
+```
+
+Run:
+
+```text
+runs/adaptive-midgame-searchwin-trajectory-imitation-v0/
+
+init:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+
+loader filters:
+  time>=80
+  contact
+  visible_enemy_cells>=1
+  search_gap>=0.25
+
+balancing:
+  size-seat-oversample
+
+loss:
+  intent 0.20
+  finish 0.50
+  belief 0.25
+  outcome 0.40
+  policy KL 6.0
+  action CE 0.12
+
+action CE:
+  trajectory wins only
+  only searchwin-trajectory and terminal-searchwin paths
+
+update:
+  all U-Net weights
+  lr 3e-6
+  14 epochs
+```
+
+Training result:
+
+```text
+samples after balance: 64,998
+action weight mean: 0.170
+policy KL: 0.0016 -> 0.0031
+intent acc: 62.4% -> 82.0%
+finish acc: 66.6% -> 66.8%
+outcome acc: 34.5% -> 48.2%
+action acc: 31.6% -> 31.7%
+```
+
+Fixed-v5 max250, 128 games/seat, seed 90720:
+
+```text
+v0 direct policy:
+  p0  7.81%
+  p1 17.19%
+  min 7.81%
+```
+
+Expander adaptive, 128 games/row, seed 90740:
+
+```text
+8p0  71.09%
+8p1  68.75%
+12p0 81.25%
+12p1 81.25%
+16p0 77.34%
+16p1 73.44%
+min  68.75%
+```
+
+Conclusion:
+
+```text
+Do not promote `adaptive-midgame-searchwin-trajectory-imitation-v0`.
+
+Even with conservative KL, direct all-trunk imitation from midgame winning
+trajectories causes broad Expander regression. The auxiliary heads learn, but
+the main policy does not gain stable fixed-v5 strength. This is stronger
+evidence that direct trajectory CE/KL insertion is not the right way to compress
+search-controlled wins into the primitive policy.
+```
+
+Adapter-gate diagnostic using v0 as the adapter:
+
+```text
+run:
+  runs/adaptive-policy-adapter-gate-searchwin-traj-v0/
+
+base:
+  safe v3
+
+adapter:
+  adaptive-midgame-searchwin-trajectory-imitation-v0
+
+gate examples:
+  rows 112,492
+  changed actions 2,033
+  teacher matches 577
+  positives 0.13%
+
+final gate:
+  P+ 0.511
+  P- 0.010
+  Pmean 0.011
+```
+
+Fixed-v5 max250, 256 games/seat, seed 86640:
+
+```text
+safe v3 historical:
+  min about 10.94%-11.33%
+
+v0 adapter + learned gate threshold 0.5:
+  p0 16.80%
+  p1 10.55%
+  min 10.55%
+
+v0 adapter + learned gate threshold 0.1:
+  p0 16.80%
+  p1 10.55%
+  min 10.55%
+```
+
+Interpretation:
+
+```text
+The stronger v0 adapter increases changed-action examples relative to p0mix, but
+the positive rate is still only 0.13%. The learned gate is effectively too sparse
+to produce a promotion-level improvement, and lower threshold does not change the
+result. Close this direct-policy/delta branch for now.
+```
+
+Next technical direction:
+
+```text
+Stop direct all-trunk trajectory imitation and policy-adapter gating from this
+data. Use the trajectory/search-win data for calibrated finish/value targets or
+move to controlled PPO from safe v3, where actual rollout outcome supplies the
+credit signal. If revisiting offline data, prefer Q/value/finish calibration or
+advantage-labeled action selection over primitive CE on trajectory actions.
+```
+
+## 2026-06-20 Controlled Fixed-v5 PPO Probe
+
+Motivation:
+
+```text
+Direct all-trunk offline imitation regressed Expander hard. Test whether actual
+rollout outcome credit, with long rollout + top-advantage + EMA + KL anchor, can
+move fixed-v5 strength without destroying the base distribution.
+```
+
+Implementation note:
+
+```text
+train_adaptive.py now has explicit output-template flags:
+  --strategy-aux
+  --strategy-spatial-aux
+  --strategy-finish-outputs
+
+The old init-only flags still describe the warm-start checkpoint:
+  --init-strategy-aux
+  --init-strategy-spatial-aux
+  --init-strategy-finish-outputs
+
+Passing only init flags reads and discards strategy aux heads. Passing both
+output and init flags preserves strategy heads through PPO.
+```
+
+Run v0:
+
+```text
+runs/adaptive-ppo-fixed-v5-controlled-v0/
+
+init:
+  safe v3
+
+opponent:
+  fixed 8x8 v5 sampled policy
+
+training:
+  num_envs 64
+  learner_player mixed
+  rollout 256
+  iterations 20
+  epochs 1
+  minibatch 2048
+  reward terminal only
+  terminal_reward_scale 1.0
+  gamma 1.0
+  gae_lambda 0.90
+  top_advantage_fraction 0.25
+  top_advantage_mode stratified
+  ema_decay 0.999
+  eval_ema
+  teacher_kl_weight 0.2 to safe v3
+  outcome_aux_weight 0.05
+  lr 1e-6
+```
+
+Training:
+
+```text
+compile emitted a nonfatal 4.28GiB allocator warning
+iter 1:  episodes 66, wins 8, draws 35
+iter 10: episodes 79, wins 5, draws 40
+iter 20: episodes 83, wins 8, draws 46
+```
+
+Evaluation v0:
+
+```text
+fixed-v5 max250, 256 games/seat, seed 86640:
+  p0 16.02%
+  p1 11.33%
+  min 11.33%
+
+Expander adaptive, 128 games/row, seed 86680:
+  8p0  75.78%
+  8p1  77.34%
+  12p0 82.81%
+  12p1 82.81%
+  16p0 81.25%
+  16p1 77.34%
+  min 75.78%
+```
+
+Run v1 continuation:
+
+```text
+runs/adaptive-ppo-fixed-v5-controlled-v1/
+
+init:
+  v0
+
+training:
+  same settings
+  iterations 60
+```
+
+Evaluation v1:
+
+```text
+fixed-v5 max250, 256 games/seat, seed 86640:
+  p0 14.06%
+  p1 11.33%
+  min 11.33%
+
+Expander adaptive, 128 games/row, seed 86680:
+  8p0  75.78%
+  8p1  77.34%
+  12p0 81.25%
+  12p1 78.91%
+  16p0 78.12%
+  16p1 75.00%
+  min 75.00%
+```
+
+Conclusion:
+
+```text
+Controlled PPO is safer than offline all-trunk imitation: v0 preserved Expander
+min at the safe-v3 level and matched/slightly improved fixed-v5 256-row min.
+However, longer continuation did not improve fixed-v5 and started to erode
+12/16 Expander rows. Do not promote v1.
+
+Keep v0 as a controlled-PPO diagnostic checkpoint, not the active base. The next
+PPO attempt should either:
+  1. start again from safe v3 with strategy_aux preserved and a slightly larger
+     fixed-v5 signal batch, or
+  2. train against a mixed opponent curriculum that includes Expander protection
+     in the rollout itself, not only via KL.
+```
