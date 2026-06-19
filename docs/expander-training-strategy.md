@@ -10477,3 +10477,74 @@ domain balancing but with explicit Expander KL/protection rows, or use these
 contrast rows as a small weighted component inside a larger decisive trajectory
 dataset.
 ```
+
+### Draw/Search-Win Oversample Probe
+
+Added oversampling balance modes:
+
+```text
+--balance-strata size-seat-oversample
+--balance-strata size-seat-domain-oversample
+```
+
+The existing `size-seat` and `size-seat-domain` modes still downsample to the
+smallest stratum. The new modes repeat smaller strata up to the largest stratum
+count, which keeps strict contrast filters from throwing away most rows.
+
+Oversampled representation probe:
+
+```text
+run:
+  runs/adaptive-midgame-drawsearch-oversample-repr-v0/
+
+same filters and loss as drawsearch-repr-v0, except:
+  balance_strata = size-seat-domain-oversample
+  seed = 90500
+```
+
+Training data and metrics:
+
+```text
+row filters:
+  kept 2,234 / 91,725 rows
+  sampled 2,234 rows
+  size-seat-domain-oversample -> 5,520 samples
+
+epoch 1 -> 8:
+  loss     2.0589 -> 1.2267
+  intent   77.7%  -> 48.5%
+  finish   44.0%  -> 72.2%
+  outcome   8.8%  -> 77.7%
+  belief   0.0664 -> 0.0648
+  KL       0.0179 -> 0.0116
+  ActCE    3.3438 -> 3.4977
+  ActAcc   24.3%  -> 24.3%
+```
+
+Gameplay against fixed v5 sample, max250, 128 games/seat, seed 86640:
+
+```text
+base v3 / feature-control:
+  p0 11.72%
+  p1 10.94%
+  min 10.94%
+
+drawsearch-oversample-repr-v0:
+  p0  8.59%
+  p1  9.38%
+  min  8.59%
+```
+
+Conclusion:
+
+```text
+The oversampling mode is useful: it fixes the data-retention problem and lets
+the finish/outcome heads learn the intended all-search-win contrast. But using
+those rows to update the full U-Net policy still hurts fixed-v5 gameplay.
+
+Do not promote `adaptive-midgame-drawsearch-oversample-repr-v0`. Do not sweep
+lr/epochs on this same objective. The next useful use of these contrast rows is
+as auxiliary/gating data with policy logits frozen, or as a small weighted slice
+inside a much larger successful-trajectory policy update rather than as the main
+policy-imitation objective.
+```

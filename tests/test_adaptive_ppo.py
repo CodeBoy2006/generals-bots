@@ -1103,7 +1103,12 @@ def test_search_q_value_metrics_uses_candidate_outcomes():
 def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
     import numpy as np
 
-    from examples._experimental.ppo.adaptive_strategy_supervised import OUTCOME_DRAW, OUTCOME_WIN, load_strategy_dataset
+    from examples._experimental.ppo.adaptive_strategy_supervised import (
+        OUTCOME_DRAW,
+        OUTCOME_WIN,
+        balance_strategy_dataset,
+        load_strategy_dataset,
+    )
 
     path = tmp_path / "strategy.npz"
     samples = 4
@@ -1152,6 +1157,12 @@ def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
     )
     assert nonwin_search_win["obs"].shape[0] == 1
     assert int(nonwin_search_win["teacher_action"][0]) == 1
+
+    unbalanced = {name: value[jnp.array([0, 1, 2])] for name, value in dataset.items()}
+    balanced = balance_strategy_dataset(unbalanced, "size-seat", seed=0)
+    oversampled = balance_strategy_dataset(unbalanced, "size-seat-oversample", seed=0)
+    assert balanced["obs"].shape[0] == 2
+    assert oversampled["obs"].shape[0] == 4
 
 
 def test_accepted_replacement_weights_prefer_outcome_then_score():

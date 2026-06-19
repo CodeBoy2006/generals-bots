@@ -1118,3 +1118,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not sweep the small balanced contrast run. Collect more draw/search-win rows or mix the contrast rows as a weighted component with larger decisive trajectory data while protecting Expander with KL/protection rows.
 - **Context:** Existing shards contain useful contrast (`2,234` draw/search-win rows after high-gap/contact filters), but `size-seat-domain` balancing reduced training to `312` samples. `drawsearch-repr-v0` barely learned the all-win search label (`outcome acc 8.2%`) and fixed-v5 max250 seed `86640` regressed from base min `10.94%` to `9.38%`.
+
+## [2026-06-20 00:33] Draw/Search-Win Oversample Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --balance-strata size-seat-oversample/size-seat-domain-oversample`, documented the modes, extended the loader/balancer test, and trained/evaluated ignored GPU run `runs/adaptive-midgame-drawsearch-oversample-repr-v0/`.
+- **Status:** Completed
+- **Next Steps:** Use draw/search-win contrast rows as frozen-policy auxiliary/gating data or as a small weighted slice inside larger successful-trajectory updates; do not continue all-trunk policy updates on this standalone objective.
+- **Context:** Oversampling retained contrast signal (`2,234` filtered rows -> `5,520` balanced samples) and improved finish/outcome training (`72.2%`/`77.7%`), but fixed-v5 max250 seed `86640` regressed to min `8.59%` vs base `10.94%`. Active base remains safe v3.

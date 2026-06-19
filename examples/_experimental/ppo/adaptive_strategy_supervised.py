@@ -31,7 +31,13 @@ OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
 ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win")
-BALANCE_STRATA_MODES = ("none", "size-seat", "size-seat-domain")
+BALANCE_STRATA_MODES = (
+    "none",
+    "size-seat",
+    "size-seat-domain",
+    "size-seat-oversample",
+    "size-seat-domain-oversample",
+)
 LABEL_SOURCE_MODES = ("trajectory", "search-best")
 
 
@@ -314,11 +320,13 @@ def load_strategy_dataset(
 
 
 def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: int) -> dict[str, jnp.ndarray]:
-    """Downsample strategy rows to equal task strata before JAX training."""
+    """Balance strategy rows to equal task strata before JAX training."""
     if mode == "none":
         return dataset
-    if mode not in ("size-seat", "size-seat-domain"):
+    if mode not in BALANCE_STRATA_MODES:
         raise ValueError(f"unknown balance mode: {mode}")
+    include_domain = mode in ("size-seat-domain", "size-seat-domain-oversample")
+    oversample = mode in ("size-seat-oversample", "size-seat-domain-oversample")
     grid_size = np.asarray(dataset["grid_size"])
     seat = np.asarray(dataset["seat"])
     domain = np.asarray(dataset["domain"])
@@ -326,7 +334,7 @@ def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: i
     groups: list[np.ndarray] = []
     for size in sorted(np.unique(grid_size)):
         for player in sorted(np.unique(seat)):
-            if mode == "size-seat-domain":
+            if include_domain:
                 for domain_id in sorted(np.unique(domain)):
                     indices = np.flatnonzero((grid_size == size) & (seat == player) & (domain == domain_id))
                     if indices.size > 0:
@@ -337,9 +345,9 @@ def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: i
                     groups.append(indices)
     if not groups:
         return dataset
-    target_count = min(group.size for group in groups)
+    target_count = max(group.size for group in groups) if oversample else min(group.size for group in groups)
     selected = np.concatenate(
-        [np.sort(rng.choice(group, size=target_count, replace=False)) for group in groups],
+        [rng.choice(group, size=target_count, replace=oversample and group.size < target_count) for group in groups],
         axis=0,
     )
     rng.shuffle(selected)
