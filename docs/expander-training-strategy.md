@@ -9521,3 +9521,163 @@ use the terminal/search-win data as non-primitive supervision: finish/outcome
 calibration, plan/target Q, or a plan-conditioned Worker trained/evaluated
 before it is mixed into the base policy.
 ```
+
+## 2026-06-19: Search-Best Aux-Only and Winning-Trajectory Worker Probe
+
+The previous probe showed that primitive action CE is too blunt even when
+domain-filtered. This probe moved the same signal into non-action heads and an
+isolated Worker.
+
+Binary search-best calibrator, no policy update:
+
+```text
+run:
+  runs/adaptive-midgame-searchbest-binary-calibrator-v0/
+data:
+  fixed-v5-safev3-v0
+  terminal-searchwin fixed-v5
+  expander-safev3-v0
+label source:
+  search-best
+finish head:
+  binary, initialized from multi-horizon safe v3
+update:
+  strategy-value-heads
+final:
+  finish acc 56.7%
+  outcome acc 47.2%
+```
+
+This is too weak to use as a gate. Letting the same labels update the trunk
+under a high policy-KL anchor did not fix it:
+
+```text
+run:
+  runs/adaptive-midgame-searchbest-auxonly-main-v0/
+update:
+  all weights
+policy KL:
+  8.0
+action CE:
+  0.0
+final:
+  KL 0.0009
+  finish acc 51.1%
+  outcome acc 53.5%
+
+fixed-v5 max250, 128 games/seat, seed 89220:
+  p0  7.81%
+  p1 15.62%
+  min  7.81%
+
+Expander 8/12/16, 64 games/row, seed 89240:
+  8p0 70.31%, 8p1 64.06%
+  12p0 79.69%, 12p1 82.81%
+  16p0 78.12%, 16p1 79.69%
+  min 64.06%
+```
+
+Conclusion: even aux-only full-trunk search-best training is not safe enough;
+the KL can remain numerically small while 8x Expander player-1 collapses.
+
+Terminal/search-win Worker:
+
+```text
+run:
+  runs/adaptive-terminal-searchwin-worker-v0/
+data:
+  terminal-searchwin fixed-v5, 1,721 examples after legal filtering
+format:
+  strategy source/target heatmaps + teacher action
+final offline:
+  action acc 38.8%
+  source acc 70.7%
+  direction acc 53.3%
+```
+
+Gameplay against fixed-v5 max250, safe-v3 base, 128 games/seat, seed 89320:
+
+```text
+base off:
+  p0 14.06%
+  p1  7.81%
+  min  7.81%
+
+terminal worker, belief-main-stack, scale 0.02:
+  p0 14.84%
+  p1  5.47%
+  min  5.47%
+
+terminal worker, belief-main-stack, scale 0.02, margin >= 1.0:
+  p0 13.28%
+  p1  5.47%
+  min  5.47%
+```
+
+This Worker learned offline labels but hurt the weak p1 row, so the issue was
+not just terminal data size.
+
+Collected true search-controlled winning trajectories:
+
+```text
+run:
+  runs/adaptive-midgame-searchwin-trajectory-fixed-v5-safev3-v0/
+teacher/search prior:
+  adaptive-midgame-contact-searchwin-imitation-v3
+opponent:
+  fixed v5 sample
+filters:
+  turn >= 50
+  contact
+  visible_enemy_cells >= 1
+  outcome_known
+  trajectory win
+  terminal_window <= 160
+rows:
+  25,385 raw saved rows
+  25,355 Worker examples after legal filtering
+```
+
+Winning-trajectory Worker:
+
+```text
+run:
+  runs/adaptive-searchwin-trajectory-worker-v0/
+final offline:
+  action acc 37.8%
+  source acc 67.8%
+  direction acc 51.7%
+```
+
+Gameplay against fixed-v5 max250, safe-v3 base, 128 games/seat, seed 89520:
+
+```text
+base off:
+  p0 11.72%
+  p1  7.81%
+  min  7.81%
+
+winning-trajectory worker, belief-main-stack, scale 0.02:
+  p0 11.72%
+  p1  7.81%
+  min  7.81%
+
+winning-trajectory worker, belief-main-stack, scale 0.05:
+  p0 12.50%
+  p1  7.81%
+  min  7.81%
+```
+
+Conclusion:
+
+```text
+True winning trajectories are valuable data: they produce a stable Worker and
+avoid the p1 collapse seen in the tiny terminal-only Worker. But the current
+belief-main-stack command source does not release that value; the Worker is
+mostly a no-op at safe scale and only nudges p0 at higher scale.
+
+Do not continue Worker scale scans. The next useful step is better command
+selection, not a stronger executor: train a source/target or command gate on
+true winning-trajectory / Plan-Q counterfactuals, then use the Worker only when
+the command itself is high-confidence.
+```

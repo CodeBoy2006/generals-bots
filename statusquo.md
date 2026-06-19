@@ -1076,3 +1076,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop global primitive CE imitation on these fixed-v5/search-win shards. Reuse the new terminal/search-win data for finish/outcome calibration, plan/target Q, or a plan-conditioned Worker that is validated before it is mixed into the base policy.
 - **Context:** GPU was freed by stopping a stale `play_web.py` process occupying ~12GB. Domain-filtered p0 policy-head reached fixed-v5 128-row min `6.25%` and Expander 64-row min `70.31%`; p0 full-trunk reached fixed-v5 `10.16%` but Expander `65.62%`; two-seat full-trunk reached fixed-v5 `10.16%` but Expander `64.06%`; terminal/search-win full-trunk reached fixed-v5 `8.59%` and Expander `62.50%`. The filter works, but primitive action CE remains the wrong insertion point.
+
+## [2026-06-19 22:41] Winning-Trajectory Worker Probe
+- **Changes:** Ran GPU non-primitive probes: binary search-best calibrator, aux-only KL-anchored trunk training, terminal/search-win Worker, and true search-controlled winning-trajectory Worker. Logged the results in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop Worker scale scans with the current `belief-main-stack` command source. Use the true winning-trajectory data to train command/source-target selection or Plan-Q counterfactual gates, then invoke the Worker only when command confidence is high.
+- **Context:** Binary calibrator was weak (`56.7%` finish acc); aux-only trunk still regressed Expander 8p1 (`64.06%` min). Terminal Worker learned offline (`38.8%` action acc) but hurt fixed-v5 p1. New true winning trajectories kept `25,385` rows; the Worker was stable offline (`37.8%` action acc) and safe but no-op in gameplay: fixed-v5 max250 min stayed `7.81%` at scale `0.02` and `0.05`.
