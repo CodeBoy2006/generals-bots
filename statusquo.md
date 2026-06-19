@@ -297,3 +297,9 @@
 - **Status:** Completed
 - **Next Steps:** Review and approve the spec, then write an implementation plan before adding `generals/web/`, `examples/play_web.py`, and frontend assets.
 - **Context:** The design keeps Python/JAX authoritative for game rules and PPO inference, retains pygame during migration, and targets remote browser usability without porting JAX or checkpoints to WebAssembly.
+
+## [2026-06-19 20:17] Web Renderer Implementation Plan
+- **Changes:** Added `docs/superpowers/plans/2026-06-19-web-renderer.md` with a TDD-oriented task plan for web snapshot serialization, `WebGameSession`, FastAPI/Uvicorn server entry point, static browser Canvas UI, documentation, verification, and push.
+- **Status:** Completed
+- **Next Steps:** Execute Task 1 first: write failing protocol tests for JSON-safe snapshots, then implement `generals/web/schemas.py`.
+- **Context:** The plan keeps pygame compatibility as an explicit verification gate and treats Python/JAX as authoritative for game state, move validation, PPO inference, and rollout search.
