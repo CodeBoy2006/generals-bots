@@ -1034,3 +1034,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not scan worker rerank scale or margin further. Train a gate/scorer on whether the Worker action improves the base action under rollout, then invoke the Worker only when that gate is confident.
 - **Context:** Corrected Worker loader expands the 4-direction legal mask to full/half 8 action planes before filtering labels. Worker v1 trained on `15941` decisive rows and reached action/source/direction accuracy `29.3%/67.7%/41.6%`, but fixed-v5 max250 128-row seed `87060` did not improve min: off `8.59%`, scale `0.02` `8.59%`, scale `0.05` `5.47%`, scale `0.02` margin `1.0` `7.81%`.
+
+## [2026-06-19 20:48] Strategy Worker Gate Probe
+- **Changes:** Added `adaptive_command_gate_supervised.py --dataset-format strategy-worker` to train a binary gate from strategy shards and a learned Plan-Worker, added `evaluate_adaptive_policy.py --strategy-plan-worker-gate-*` inference support, updated README/manual/docs, and trained/evaluated `runs/adaptive-strategy-worker-gate-v1/`.
+- **Status:** Completed
+- **Next Steps:** Stop proxy worker-gate and threshold scans; return to direct Midgame Decisive Trajectory Imitation so decisive search/win signals update the U-Net main policy instead of acting as inference-time overrides.
+- **Context:** GPU training used safe v3 + decisive Worker on fixed-v5 v0/v1 shards: 44,789 rows, 17,311 worker-change examples, 5.52% positives, final gate P+/P- `0.561/0.439`. Fixed-v5 max250 seed `87060`: no gate min `8.59%`, gate `0.55` min `6.25%`, gate `0.65` min `7.81%`; not promotion-worthy.

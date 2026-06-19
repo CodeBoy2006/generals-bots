@@ -25,6 +25,7 @@ from adaptive_common import (
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
+    ADAPTIVE_MOVE_PLANES,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
     adaptive_input_channel_count,
@@ -103,6 +104,7 @@ def _policy_action(
     strategy_plan_worker_rerank_scale: float,
     strategy_plan_worker_min_margin: float,
     strategy_plan_worker_command_source: int,
+    strategy_plan_worker_gate_threshold: float,
     strategy_command_gate_threshold: float,
     strategy_command_gate_source_count: int,
     strategy_command_gate_target_count: int,
@@ -115,6 +117,7 @@ def _policy_action(
         or strategy_spatial_rerank_scale > 0.0
         or strategy_worker_mix_prob > 0.0
         or strategy_plan_worker_rerank_scale > 0.0
+        or strategy_plan_worker_gate_threshold >= 0.0
         or strategy_command_gate_threshold >= 0.0
     )
     if needs_aux:
@@ -138,7 +141,9 @@ def _policy_action(
             network.pad_size,
             strategy_spatial_rerank_scale,
         )[0]
-    if strategy_plan_worker_rerank_scale > 0.0:
+    plan_worker_enabled = strategy_plan_worker_rerank_scale > 0.0 or strategy_plan_worker_gate_threshold >= 0.0
+    if plan_worker_enabled:
+        plan_worker_policy_logits = logits
         if strategy_plan_worker_command_source == PLAN_WORKER_COMMAND_SOURCE_TO_ID["belief-main-stack"]:
             worker_source_logits = jnp.zeros_like(aux.enemy_general_logits)
             worker_target_logits = aux.enemy_general_logits
@@ -154,6 +159,7 @@ def _policy_action(
             network.pad_size,
         )
         worker_logits = plan_worker_network.logits_value(worker_obs, mask, active)[0]
+    if strategy_plan_worker_rerank_scale > 0.0:
         effective_scale = jnp.asarray(strategy_plan_worker_rerank_scale)
         if strategy_plan_worker_min_margin >= 0.0:
             legal_worker_logits = jnp.where(logits > -1.0e8, worker_logits, -1.0e9)
@@ -188,6 +194,36 @@ def _policy_action(
         command_legal = logits[command_index] > -1.0e8
         use_command = (gate_probability >= strategy_command_gate_threshold) & command_legal & (command_index != index)
         index = jnp.where(use_command, command_index, index)
+    if strategy_plan_worker_gate_threshold >= 0.0:
+        legal_worker_logits = jnp.where(plan_worker_policy_logits > -1.0e8, worker_logits, -1.0e9)
+        worker_index = jnp.argmax(legal_worker_logits)
+        pass_index = ADAPTIVE_MOVE_PLANES * network.pad_size * network.pad_size
+        worker_source_index = jnp.minimum(worker_index, pass_index - 1) % (network.pad_size * network.pad_size)
+        worker_target_scores = jnp.where(active, worker_target_logits, -1.0e9)
+        worker_target_index = jnp.argmax(worker_target_scores.reshape(-1))
+        worker_features = command_gate_features(
+            obs_arr,
+            plan_worker_policy_logits,
+            aux.action_q_values,
+            aux.finish_logits,
+            worker_source_logits,
+            worker_target_logits,
+            worker_source_index,
+            worker_target_index,
+            worker_index,
+            index,
+            policy_player,
+            network.pad_size,
+        )
+        worker_probability = jax.nn.sigmoid(command_gate_network(worker_features))
+        worker_legal = plan_worker_policy_logits[worker_index] > -1.0e8
+        use_worker = (
+            (worker_probability >= strategy_plan_worker_gate_threshold)
+            & worker_legal
+            & (worker_index != index)
+            & (worker_index != pass_index)
+        )
+        index = jnp.where(use_worker, worker_index, index)
     if strategy_q_replace_threshold >= 0.0:
         if strategy_q_replace_worker_candidate:
             replacement_action = strategy_worker_action(
@@ -417,7 +453,12 @@ def command_gate_features(
     current_policy = policy_logits[current_index]
     candidate_q = action_q_values[candidate_index]
     current_q = action_q_values[current_index]
-    finish_probability = jax.nn.softmax(finish_logits, axis=-1)[1]
+    if finish_logits.shape[0] == 1:
+        finish_probability = jax.nn.sigmoid(finish_logits[0])
+    elif finish_logits.shape[0] == 2:
+        finish_probability = jax.nn.softmax(finish_logits, axis=-1)[1]
+    else:
+        finish_probability = jax.nn.sigmoid(finish_logits[-1])
     flat_source_logits = source_logits.reshape(-1)
     flat_target_logits = target_logits.reshape(-1)
     return jnp.stack(
@@ -618,6 +659,7 @@ def evaluate_batch(
     strategy_plan_worker_rerank_scale=0.0,
     strategy_plan_worker_min_margin=-1.0,
     strategy_plan_worker_command_source=0,
+    strategy_plan_worker_gate_threshold=-1.0,
     strategy_command_gate_threshold=-1.0,
     strategy_command_gate_source_count=1,
     strategy_command_gate_target_count=1,
@@ -734,6 +776,7 @@ def evaluate_batch(
                 strategy_plan_worker_rerank_scale,
                 strategy_plan_worker_min_margin,
                 strategy_plan_worker_command_source,
+                strategy_plan_worker_gate_threshold,
                 strategy_command_gate_threshold,
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
@@ -794,6 +837,7 @@ def evaluate_policy_opponent_batch(
     strategy_plan_worker_rerank_scale=0.0,
     strategy_plan_worker_min_margin=-1.0,
     strategy_plan_worker_command_source=0,
+    strategy_plan_worker_gate_threshold=-1.0,
     strategy_command_gate_threshold=-1.0,
     strategy_command_gate_source_count=1,
     strategy_command_gate_target_count=1,
@@ -911,6 +955,7 @@ def evaluate_policy_opponent_batch(
                 strategy_plan_worker_rerank_scale,
                 strategy_plan_worker_min_margin,
                 strategy_plan_worker_command_source,
+                strategy_plan_worker_gate_threshold,
                 strategy_command_gate_threshold,
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
@@ -993,6 +1038,9 @@ def parse_args():
     parser.add_argument("--strategy-plan-worker-network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--strategy-plan-worker-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-plan-worker-min-margin", type=float, default=-1.0)
+    parser.add_argument("--strategy-plan-worker-gate-path", default=None)
+    parser.add_argument("--strategy-plan-worker-gate-threshold", type=float, default=-1.0)
+    parser.add_argument("--strategy-plan-worker-gate-hidden-dim", type=int, default=32)
     parser.add_argument(
         "--strategy-plan-worker-command-source",
         choices=PLAN_WORKER_COMMAND_SOURCE_NAMES,
@@ -1082,18 +1130,23 @@ def parse_args():
         parser.error("--strategy-finish-outputs must be positive")
     if args.strategy_finish_outputs != 2 and (args.strategy_target_finish_gate or args.strategy_worker_finish_gate):
         parser.error("finish-gated rerank currently expects a 2-logit binary finish head")
-    if args.strategy_finish_outputs != 2 and args.strategy_command_gate_threshold >= 0.0:
-        parser.error("command gate checkpoints currently expect a 2-logit binary finish head")
     if args.strategy_worker_policy_margin < 0.0 and args.strategy_worker_policy_margin != -1.0:
         parser.error("--strategy-worker-policy-margin must be non-negative, or -1 to disable")
     if args.strategy_plan_worker_rerank_scale < 0.0:
         parser.error("--strategy-plan-worker-rerank-scale must be non-negative")
-    if args.strategy_plan_worker_rerank_scale > 0.0 and args.strategy_plan_worker_path is None:
-        parser.error("--strategy-plan-worker-rerank-scale requires --strategy-plan-worker-path")
-    if args.strategy_plan_worker_rerank_scale > 0.0 and not args.strategy_aux:
-        parser.error("--strategy-plan-worker-rerank-scale requires --strategy-aux")
+    if args.strategy_plan_worker_gate_threshold < 0.0 and args.strategy_plan_worker_gate_threshold != -1.0:
+        parser.error("--strategy-plan-worker-gate-threshold must be between 0 and 1, or -1 to disable")
+    if args.strategy_plan_worker_gate_threshold > 1.0:
+        parser.error("--strategy-plan-worker-gate-threshold must be between 0 and 1")
+    plan_worker_active = (
+        args.strategy_plan_worker_rerank_scale > 0.0 or args.strategy_plan_worker_gate_threshold >= 0.0
+    )
+    if plan_worker_active and args.strategy_plan_worker_path is None:
+        parser.error("Plan-Worker inference requires --strategy-plan-worker-path")
+    if plan_worker_active and not args.strategy_aux:
+        parser.error("Plan-Worker inference requires --strategy-aux")
     if (
-        args.strategy_plan_worker_rerank_scale > 0.0
+        plan_worker_active
         and args.strategy_plan_worker_command_source == "spatial"
         and not args.strategy_spatial_aux
     ):
@@ -1102,6 +1155,10 @@ def parse_args():
         parser.error("--strategy-plan-worker-min-margin must be non-negative, or -1 to disable")
     if args.strategy_plan_worker_min_margin >= 0.0 and args.strategy_plan_worker_rerank_scale <= 0.0:
         parser.error("--strategy-plan-worker-min-margin requires --strategy-plan-worker-rerank-scale")
+    if args.strategy_plan_worker_gate_threshold >= 0.0 and args.strategy_plan_worker_gate_path is None:
+        parser.error("--strategy-plan-worker-gate-threshold requires --strategy-plan-worker-gate-path")
+    if args.strategy_plan_worker_gate_hidden_dim <= 0:
+        parser.error("--strategy-plan-worker-gate-hidden-dim must be positive")
     if args.strategy_command_gate_threshold < 0.0 and args.strategy_command_gate_threshold != -1.0:
         parser.error("--strategy-command-gate-threshold must be between 0 and 1, or -1 to disable")
     if args.strategy_command_gate_threshold > 1.0:
@@ -1119,6 +1176,11 @@ def parse_args():
         and args.strategy_command_gate_threshold < 0.0
     ):
         parser.error("multi-command gate counts require --strategy-command-gate-threshold")
+    if (
+        args.strategy_command_gate_threshold >= 0.0
+        and args.strategy_plan_worker_gate_threshold >= 0.0
+    ):
+        parser.error("Use either --strategy-command-gate-threshold or --strategy-plan-worker-gate-threshold, not both")
     try:
         args.strategy_plan_worker_channels = parse_policy_channels(args.strategy_plan_worker_channels)
     except ValueError as exc:
@@ -1183,9 +1245,15 @@ def main():
             init_network_arch=args.strategy_plan_worker_network_arch,
         )
     command_gate_network = None
-    if args.strategy_command_gate_path is not None:
-        command_gate_network = CommandGateNetwork(net_key, hidden_dim=args.strategy_command_gate_hidden_dim)
-        command_gate_network = eqx.tree_deserialise_leaves(args.strategy_command_gate_path, command_gate_network)
+    gate_path = args.strategy_command_gate_path or args.strategy_plan_worker_gate_path
+    if gate_path is not None:
+        gate_hidden_dim = (
+            args.strategy_plan_worker_gate_hidden_dim
+            if args.strategy_plan_worker_gate_path is not None
+            else args.strategy_command_gate_hidden_dim
+        )
+        command_gate_network = CommandGateNetwork(net_key, hidden_dim=gate_hidden_dim)
+        command_gate_network = eqx.tree_deserialise_leaves(gate_path, command_gate_network)
     opponent_network = None
     if args.opponent_policy_path is not None:
         opponent_network = PolicyValueNetwork(
@@ -1258,6 +1326,14 @@ def main():
         )
         if args.strategy_plan_worker_min_margin >= 0.0:
             print(f"Plan worker: min_margin={args.strategy_plan_worker_min_margin:g}")
+    if args.strategy_plan_worker_gate_threshold >= 0.0:
+        print(f"Plan worker gate: {args.strategy_plan_worker_gate_path}")
+        print(
+            "Plan worker gate: "
+            f"threshold={args.strategy_plan_worker_gate_threshold:g}, "
+            f"hidden={args.strategy_plan_worker_gate_hidden_dim}, "
+            f"command={args.strategy_plan_worker_command_source}"
+        )
     if args.strategy_command_gate_threshold >= 0.0:
         print(f"Command gate: {args.strategy_command_gate_path}")
         print(
@@ -1325,6 +1401,7 @@ def main():
                     args.strategy_plan_worker_rerank_scale,
                     args.strategy_plan_worker_min_margin,
                     PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
+                    args.strategy_plan_worker_gate_threshold,
                     args.strategy_command_gate_threshold,
                     args.strategy_command_gate_source_count,
                     args.strategy_command_gate_target_count,
@@ -1359,6 +1436,7 @@ def main():
                     args.strategy_plan_worker_rerank_scale,
                     args.strategy_plan_worker_min_margin,
                     PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
+                    args.strategy_plan_worker_gate_threshold,
                     args.strategy_command_gate_threshold,
                     args.strategy_command_gate_source_count,
                     args.strategy_command_gate_target_count,
@@ -1415,6 +1493,9 @@ def main():
         "strategy_plan_worker_rerank_scale": args.strategy_plan_worker_rerank_scale,
         "strategy_plan_worker_min_margin": args.strategy_plan_worker_min_margin,
         "strategy_plan_worker_command_source": args.strategy_plan_worker_command_source,
+        "strategy_plan_worker_gate_path": args.strategy_plan_worker_gate_path,
+        "strategy_plan_worker_gate_threshold": args.strategy_plan_worker_gate_threshold,
+        "strategy_plan_worker_gate_hidden_dim": args.strategy_plan_worker_gate_hidden_dim,
         "strategy_command_gate_path": args.strategy_command_gate_path,
         "strategy_command_gate_threshold": args.strategy_command_gate_threshold,
         "strategy_command_gate_hidden_dim": args.strategy_command_gate_hidden_dim,

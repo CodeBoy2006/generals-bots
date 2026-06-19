@@ -25,7 +25,14 @@ import optax
 from adaptive_command_gate import COMMAND_GATE_FEATURE_DIM, COMMAND_GATE_FEATURE_NAMES, CommandGateNetwork
 from adaptive_common import ADAPTIVE_MOVE_PLANES, parse_grid_sizes
 from adaptive_network import load_or_create_adaptive_network
+from evaluate_adaptive_policy import (
+    PLAN_WORKER_COMMAND_SOURCE_NAMES,
+    PLAN_WORKER_COMMAND_SOURCE_TO_ID,
+    command_gate_features,
+    strategy_plan_worker_obs,
+)
 from generals.agents.ppo_policy_agent import parse_policy_channels
+from train_adaptive import OUTCOME_WIN
 
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
@@ -64,13 +71,96 @@ def _compute_network_outputs(network, obs: np.ndarray, legal_mask: np.ndarray, a
         q_chunks.append(np.asarray(aux.action_q_values))
         source_chunks.append(np.asarray(aux.source_logits))
         target_chunks.append(np.asarray(aux.target_logits))
-        finish_chunks.append(np.asarray(jax.nn.softmax(aux.finish_logits, axis=-1)[:, 1]))
+        if aux.finish_logits.shape[-1] == 1:
+            finish = jax.nn.sigmoid(aux.finish_logits[:, 0])
+        elif aux.finish_logits.shape[-1] == 2:
+            finish = jax.nn.softmax(aux.finish_logits, axis=-1)[:, 1]
+        else:
+            finish = jax.nn.sigmoid(aux.finish_logits[:, -1])
+        finish_chunks.append(np.asarray(finish))
     return (
         np.concatenate(logits_chunks, axis=0),
         np.concatenate(q_chunks, axis=0),
         np.concatenate(source_chunks, axis=0),
         np.concatenate(target_chunks, axis=0),
         np.concatenate(finish_chunks, axis=0),
+    )
+
+
+def _compute_strategy_worker_gate_outputs(
+    network,
+    plan_worker_network,
+    obs: np.ndarray,
+    legal_mask: np.ndarray,
+    active: np.ndarray,
+    seats: np.ndarray,
+    batch_size: int,
+    command_source: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build gate features for the learned Worker top action on strategy shards."""
+    feature_chunks = []
+    current_chunks = []
+    worker_chunks = []
+    target_chunks = []
+    pad_size = active.shape[-1]
+    pass_index = ADAPTIVE_MOVE_PLANES * pad_size * pad_size
+    for start in range(0, obs.shape[0], batch_size):
+        end = min(start + batch_size, obs.shape[0])
+        obs_batch = jnp.asarray(obs[start:end])
+        legal_batch = jnp.asarray(legal_mask[start:end])
+        active_batch = jnp.asarray(active[start:end])
+        seat_batch = jnp.asarray(seats[start:end])
+
+        logits = jax.vmap(lambda o, m, a: network.logits_value(o, m, a)[0])(obs_batch, legal_batch, active_batch)
+        aux = jax.vmap(lambda o, m, a: network.strategy_auxiliary(o, m, a))(obs_batch, legal_batch, active_batch)
+        if command_source == PLAN_WORKER_COMMAND_SOURCE_TO_ID["belief-main-stack"]:
+            source_logits = jnp.zeros_like(aux.enemy_general_logits)
+            target_logits = aux.enemy_general_logits
+        else:
+            source_logits = aux.source_logits
+            target_logits = aux.target_logits
+        worker_obs = jax.vmap(strategy_plan_worker_obs, in_axes=(0, 0, 0, 0, 0, None))(
+            obs_batch,
+            legal_batch,
+            active_batch,
+            source_logits,
+            target_logits,
+            pad_size,
+        )
+        worker_logits = jax.vmap(lambda o, m, a: plan_worker_network.logits_value(o, m, a)[0])(
+            worker_obs,
+            legal_batch,
+            active_batch,
+        )
+        legal_worker_logits = jnp.where(logits > -1.0e8, worker_logits, -1.0e9)
+        current_indices = jnp.argmax(logits, axis=-1).astype(jnp.int32)
+        worker_indices = jnp.argmax(legal_worker_logits, axis=-1).astype(jnp.int32)
+        source_indices = (jnp.minimum(worker_indices, pass_index - 1) % (pad_size * pad_size)).astype(jnp.int32)
+        target_indices = jnp.argmax(jnp.where(active_batch, target_logits, -1.0e9).reshape(target_logits.shape[0], -1), axis=-1)
+        target_indices = target_indices.astype(jnp.int32)
+        features = jax.vmap(command_gate_features, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None))(
+            obs_batch,
+            logits,
+            aux.action_q_values,
+            aux.finish_logits,
+            source_logits,
+            target_logits,
+            source_indices,
+            target_indices,
+            worker_indices,
+            current_indices,
+            seat_batch,
+            pad_size,
+        )
+        feature_chunks.append(np.asarray(features))
+        current_chunks.append(np.asarray(current_indices))
+        worker_chunks.append(np.asarray(worker_indices))
+        target_chunks.append(np.asarray(target_indices))
+    return (
+        np.concatenate(feature_chunks, axis=0),
+        np.concatenate(current_chunks, axis=0),
+        np.concatenate(worker_chunks, axis=0),
+        np.concatenate(target_chunks, axis=0),
     )
 
 
@@ -206,6 +296,106 @@ def build_gate_examples(
     }
 
 
+def build_strategy_worker_gate_examples(
+    paths: list[Path],
+    network,
+    plan_worker_network,
+    feature_batch_size: int,
+    command_source: int,
+    require_search_win: bool,
+    include_finish250: bool,
+    max_examples: int | None,
+    seed: int,
+) -> dict[str, jnp.ndarray]:
+    """Construct gate examples for replacing the base action with Worker top-1.
+
+    This uses strategy shards as a fast proxy for online replacement scoring:
+    accept the Worker only when it reproduces the rollout-search teacher action
+    on a state whose best searched continuation is decisive. Everything else
+    where the Worker wants to change the base greedy action is treated as a
+    conservative negative.
+    """
+    rng = np.random.default_rng(seed)
+    feature_chunks: list[np.ndarray] = []
+    label_chunks: list[np.ndarray] = []
+    weight_chunks: list[np.ndarray] = []
+    stats = {
+        "rows": 0,
+        "changed": 0,
+        "positive": 0,
+        "teacher_match": 0,
+        "decisive": 0,
+    }
+    for path in paths:
+        shard = np.load(path)
+        obs = shard["obs"].astype(np.float32)
+        legal_mask = shard["legal_mask"].astype(np.bool_)
+        active = shard["active"].astype(np.bool_)
+        seats = shard["seat"].astype(np.float32)
+        features, current_indices, worker_indices, _ = _compute_strategy_worker_gate_outputs(
+            network,
+            plan_worker_network,
+            obs,
+            legal_mask,
+            active,
+            seats,
+            feature_batch_size,
+            command_source,
+        )
+        teacher_actions = shard["teacher_action_index"].astype(np.int32)
+        if "search_best_outcome" not in shard:
+            decisive = np.ones((obs.shape[0],), dtype=np.bool_)
+        else:
+            if require_search_win:
+                decisive = shard["search_best_outcome"].astype(np.int32) == OUTCOME_WIN
+                if include_finish250 and "finish_within_250" in shard:
+                    decisive |= shard["finish_within_250"].astype(np.float32) > 0.5
+            else:
+                decisive = np.ones((obs.shape[0],), dtype=np.bool_)
+        pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
+        changed = (worker_indices != current_indices) & (worker_indices != pass_index)
+        teacher_match = worker_indices == teacher_actions
+        labels = (changed & teacher_match & decisive).astype(np.float32)
+        keep = changed
+        if not np.any(keep):
+            continue
+        kept_features = features[keep].astype(np.float32)
+        kept_labels = labels[keep].astype(np.float32)
+        positive = kept_labels > 0.5
+        pos_count = max(int(np.sum(positive)), 1)
+        neg_count = max(int(np.sum(~positive)), 1)
+        weights = np.where(positive, 0.5 / pos_count, 0.5 / neg_count).astype(np.float32) * kept_labels.shape[0]
+        feature_chunks.append(kept_features)
+        label_chunks.append(kept_labels)
+        weight_chunks.append(weights)
+        stats["rows"] += int(obs.shape[0])
+        stats["changed"] += int(np.sum(changed))
+        stats["positive"] += int(np.sum(labels[keep] > 0.5))
+        stats["teacher_match"] += int(np.sum(changed & teacher_match))
+        stats["decisive"] += int(np.sum(decisive))
+
+    if not feature_chunks:
+        raise ValueError("No strategy-worker gate examples selected")
+    features = np.concatenate(feature_chunks, axis=0)
+    labels = np.concatenate(label_chunks, axis=0)
+    weights = np.concatenate(weight_chunks, axis=0)
+    if max_examples is not None and features.shape[0] > max_examples:
+        indices = np.sort(rng.choice(features.shape[0], size=max_examples, replace=False))
+        features = features[indices]
+        labels = labels[indices]
+        weights = weights[indices]
+    feature_mean = features.mean(axis=0).astype(np.float32)
+    feature_std = np.maximum(features.std(axis=0).astype(np.float32), 1.0e-6)
+    return {
+        "features": jnp.asarray(features),
+        "labels": jnp.asarray(labels),
+        "weights": jnp.asarray(weights),
+        "feature_mean": jnp.asarray(feature_mean),
+        "feature_std": jnp.asarray(feature_std),
+        "stats": stats,
+    }
+
+
 @eqx.filter_jit
 def train_step(gate, opt_state, batch, optimizer):
     features, labels, weights = batch
@@ -255,6 +445,7 @@ def train_epoch(gate, opt_state, dataset, optimizer, key, minibatch_size: int):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a command-acceptance gate from Plan-Q shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
+    parser.add_argument("--dataset-format", choices=("plan-q", "strategy-worker"), default="plan-q")
     parser.add_argument("--feature-model-path", required=True)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
@@ -267,6 +458,18 @@ def parse_args():
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--strategy-finish-outputs", type=int, default=2)
+    parser.add_argument("--plan-worker-path", default=None)
+    parser.add_argument("--plan-worker-network-arch", choices=("cnn", "unet"), default="cnn")
+    parser.add_argument("--plan-worker-channels", default=None)
+    parser.add_argument("--plan-worker-input-channels", type=int, default=None)
+    parser.add_argument(
+        "--plan-worker-command-source",
+        choices=PLAN_WORKER_COMMAND_SOURCE_NAMES,
+        default="belief-main-stack",
+    )
+    parser.add_argument("--allow-nondecisive-worker-positives", action="store_true")
+    parser.add_argument("--include-finish250-worker-positives", action="store_true")
     parser.add_argument("--model-path", default="runs/adaptive-command-gate/generals-adaptive-command-gate.eqx")
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--num-epochs", type=int, default=100)
@@ -289,8 +492,17 @@ def parse_args():
         parser.error("--input-channels must be positive")
     if args.value_loss == "hl-gauss" and args.value_bins <= 1:
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
-    if not (args.strategy_aux and args.strategy_spatial_aux):
+    if args.strategy_finish_outputs <= 0:
+        parser.error("--strategy-finish-outputs must be positive")
+    if args.dataset_format == "plan-q" and not (args.strategy_aux and args.strategy_spatial_aux):
         parser.error("command gate features require --strategy-aux --strategy-spatial-aux")
+    if args.dataset_format == "strategy-worker":
+        if not args.strategy_aux:
+            parser.error("--dataset-format strategy-worker requires --strategy-aux")
+        if args.plan_worker_path is None:
+            parser.error("--dataset-format strategy-worker requires --plan-worker-path")
+        if args.plan_worker_command_source == "spatial" and not args.strategy_spatial_aux:
+            parser.error("--plan-worker-command-source spatial requires --strategy-spatial-aux")
     if args.hidden_dim <= 0 or args.num_epochs <= 0 or args.minibatch_size <= 0 or args.feature_batch_size <= 0:
         parser.error("hidden dim, epochs, minibatch, and feature batch must be positive")
     if args.lr <= 0.0:
@@ -299,6 +511,12 @@ def parse_args():
         parser.error("--score-margin must be non-negative")
     if args.max_examples is not None and args.max_examples <= 0:
         parser.error("--max-examples must be positive")
+    try:
+        args.plan_worker_channels = parse_policy_channels(args.plan_worker_channels)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.plan_worker_input_channels is not None and args.plan_worker_input_channels <= 0:
+        parser.error("--plan-worker-input-channels must be positive")
     return args
 
 
@@ -325,27 +543,64 @@ def main():
         init_strategy_aux=args.strategy_aux,
         strategy_spatial_aux=args.strategy_spatial_aux,
         init_strategy_spatial_aux=args.strategy_spatial_aux,
+        strategy_finish_outputs=args.strategy_finish_outputs,
+        init_strategy_finish_outputs=args.strategy_finish_outputs,
         global_context=args.global_context,
         init_global_context=args.global_context,
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
     )
-    dataset = build_gate_examples(
-        paths,
-        network,
-        args.feature_batch_size,
-        args.score_margin,
-        args.include_noncomparable_negatives,
-        args.max_examples,
-        args.seed,
-    )
+    if args.dataset_format == "strategy-worker":
+        plan_worker_input_channels = args.plan_worker_input_channels or (args.input_channels + 3)
+        plan_worker_network = load_or_create_adaptive_network(
+            net_key,
+            pad_size=16,
+            init_model_path=args.plan_worker_path,
+            channels=args.plan_worker_channels,
+            input_channels=plan_worker_input_channels,
+            init_input_channels=plan_worker_input_channels,
+            network_arch=args.plan_worker_network_arch,
+            init_network_arch=args.plan_worker_network_arch,
+        )
+        dataset = build_strategy_worker_gate_examples(
+            paths,
+            network,
+            plan_worker_network,
+            args.feature_batch_size,
+            PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.plan_worker_command_source],
+            not args.allow_nondecisive_worker_positives,
+            args.include_finish250_worker_positives,
+            args.max_examples,
+            args.seed,
+        )
+    else:
+        dataset = build_gate_examples(
+            paths,
+            network,
+            args.feature_batch_size,
+            args.score_margin,
+            args.include_noncomparable_negatives,
+            args.max_examples,
+            args.seed,
+        )
     labels = np.asarray(dataset["labels"])
     print("Adaptive command-gate supervised training")
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
     print(f"Examples:      {dataset['features'].shape[0]}")
     print(f"Positive:      {float(np.mean(labels)) * 100:.2f}%")
+    print(f"Format:        {args.dataset_format}")
     print(f"Feature model: {args.feature_model_path}")
+    if args.dataset_format == "strategy-worker":
+        print(f"Plan worker:   {args.plan_worker_path}")
+        print(f"Command src:   {args.plan_worker_command_source}")
+        stats = dataset.get("stats", {})
+        if stats:
+            print(
+                "Worker stats:  "
+                f"rows={stats['rows']}, changed={stats['changed']}, "
+                f"teacher_match={stats['teacher_match']}, decisive={stats['decisive']}"
+            )
     print(f"Output:        {args.model_path}")
     print(f"Features:      {', '.join(COMMAND_GATE_FEATURE_NAMES)}")
     print()
@@ -382,9 +637,14 @@ def main():
         "score_margin": args.score_margin,
         "examples": int(dataset["features"].shape[0]),
         "positive_fraction": float(np.mean(labels)),
+        "dataset_format": args.dataset_format,
         "feature_model_path": args.feature_model_path,
+        "plan_worker_path": args.plan_worker_path,
+        "plan_worker_command_source": args.plan_worker_command_source,
         "datasets": [str(path) for path in paths],
     }
+    if "stats" in dataset:
+        sidecar["stats"] = dataset["stats"]
     model_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"\nModel saved to: {model_path}")
 

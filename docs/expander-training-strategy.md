@@ -8512,3 +8512,115 @@ rate.
 Do not continue scale/margin scans here. The useful next step is a learned gate
 or scorer trained on whether the Worker actually improves the base action in
 rollout, not more unconditional Worker logit bias.
+
+## 2026-06-19: Belief-Main-Stack Worker Gate Probe
+
+The next probe implemented a learned Plan-Worker gate rather than another
+logit-scale sweep.
+
+Code changes:
+
+```text
+adaptive_command_gate_supervised.py:
+  added --dataset-format strategy-worker
+  loads a feature U-Net and a learned Plan-Worker
+  builds the existing 12-feature command-gate vector for the Worker top-1 action
+  positive label:
+    Worker top-1 == rollout-search teacher action
+    and decisive row is search_best_outcome == win
+    optionally include finish_within_250 rows
+
+evaluate_adaptive_policy.py:
+  added --strategy-plan-worker-gate-path
+  added --strategy-plan-worker-gate-threshold
+  added --strategy-plan-worker-gate-hidden-dim
+  lets the gate replace the current primitive action with the Worker top-1
+  supports 3-output finish heads by using sigmoid(last finish logit)
+```
+
+GPU training command used the safe v3 feature model and the decisive strategy
+Worker:
+
+```text
+feature model:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+worker:
+  runs/adaptive-strategy-decisive-worker-v1/generals-adaptive-strategy-decisive-worker-v1.eqx
+datasets:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-v0/*.npz
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-v1/*.npz
+output:
+  runs/adaptive-strategy-worker-gate-v1/generals-adaptive-strategy-worker-gate-v1.eqx
+```
+
+Training distribution:
+
+```text
+device:
+  cuda:0
+rows:
+  44789
+worker changed base greedy action:
+  17311
+worker matched rollout-search teacher:
+  3756
+decisive rows:
+  10771
+training examples:
+  17311
+positive fraction:
+  5.52%
+```
+
+Training fit was weak but nonzero:
+
+```text
+epoch 40:
+  loss 0.6253
+  weighted accuracy 63.5%
+  P+ 0.561
+  P- 0.439
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `87060`, safe v3 policy:
+
+```text
+no gate:
+  p0 15/43/70, win 11.72%, draw 54.69%
+  p1 11/40/77, win  8.59%, draw 60.16%
+  min 8.59%
+
+Plan-Worker gate threshold 0.55:
+  p0 11/52/65, win  8.59%, draw 50.78%
+  p1  8/45/75, win  6.25%, draw 58.59%
+  min 6.25%
+
+Plan-Worker gate threshold 0.65:
+  p0 14/44/70, win 10.94%, draw 54.69%
+  p1 10/38/80, win  7.81%, draw 62.50%
+  min 7.81%
+```
+
+Conclusion:
+
+```text
+The learned gate is wired correctly and can train from strategy shards, but the
+offline proxy label is too weak for promotion. The 0.55 gate reduces p0 draw but
+also increases losses; the safer 0.65 gate still misses the no-gate p1 baseline.
+Do not continue threshold scans or proxy-gate training from these labels.
+```
+
+Next decision:
+
+```text
+Return to direct Midgame Decisive Trajectory Imitation. The repeated failure
+pattern is now consistent:
+  spatial rerank scale fails
+  worker logit bias fails
+  worker margin gate fails
+  offline proxy worker gate fails
+
+The strategy signal should be pushed into the U-Net main policy via decisive
+trajectory supervision, not inserted as an inference-time primitive action
+override.
+```
