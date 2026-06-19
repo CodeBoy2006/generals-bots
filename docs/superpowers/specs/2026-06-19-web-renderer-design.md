@@ -355,7 +355,7 @@ Backend tests:
 - `select` accepts valid sources and rejects invalid sources.
 - `move` maps source and target to a queued public action without advancing time until tick.
 - `set_split`, `pass`, `cancel`, and `restart` update session state correctly.
-- Auto tick consumes one queued human action when available, pauses while a source is selected and the queue is empty, and otherwise auto-passes.
+- Auto tick consumes one queued human action when available and otherwise auto-passes, keeping a selected source only while it remains movable.
 - Machine-vs-machine tick calls both agents.
 - Policy preview DTO preserves pass, move, probability, direction label, split flag, and value.
 

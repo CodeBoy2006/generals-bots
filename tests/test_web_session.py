@@ -135,19 +135,34 @@ def test_split_pass_cancel_and_restart_commands_update_session_state():
     assert restart_snapshot["last_message"] == "Restarted"
 
 
-def test_auto_tick_pauses_while_source_is_selected_and_passes_when_idle():
+def test_auto_tick_advances_while_source_is_selected_and_keeps_valid_selection():
     session = _human_session()
     session.last_tick = 0.0
 
     session.submit_client_command({"type": "select", "row": 0, "col": 0})
     selected_snapshot = session.tick(now=1.0)
-    assert selected_snapshot["time"] == 0
+    assert selected_snapshot["time"] == 1
     assert selected_snapshot["selected_cell"] == [0, 0]
+    assert selected_snapshot["last_message"] == "Auto pass"
 
     session.submit_client_command({"type": "cancel"})
-    idle_snapshot = session.tick(now=1.0)
-    assert idle_snapshot["time"] == 1
+    idle_snapshot = session.tick(now=2.0)
+    assert idle_snapshot["time"] == 2
     assert idle_snapshot["last_message"] == "Auto pass"
+
+
+def test_auto_tick_clears_selection_when_selected_source_becomes_invalid():
+    session = _human_session()
+    session.last_tick = 0.0
+    session.submit_client_command({"type": "select", "row": 0, "col": 0})
+    session.state = session.state._replace(armies=session.state.armies.at[0, 0].set(1))
+    session.info = game.get_info(session.state)
+
+    snapshot = session.tick(now=1.0)
+
+    assert snapshot["time"] == 1
+    assert snapshot["selected_cell"] is None
+    assert snapshot["last_message"] == "Auto pass"
 
 
 def test_default_web_session_does_not_finish_at_500_steps_without_winner():

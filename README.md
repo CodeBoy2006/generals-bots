@@ -258,7 +258,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 - 浏览器 UI 提供 `Split`、`Auto tick`、`Rate`、`Pass`、`Cancel`、`Undo`、`Clear` 和 `Restart` 控件。
 - 键盘操作与 generals.io 核心习惯一致：`W/A/S/D` 或方向键从当前选中格排队移动，`Space` 取消选中，`Z` 切换半兵，`E` 撤销最后一个队列动作，`Q` 在有队列时清空队列、无队列时排队 pass。
 - 选中的源格会显示黄色边框，可移动目标格会显示绿色边框；已排队移动会在棋盘上显示绿色箭头，并在右侧 `Move Queue` 列表中按顺序显示。
-- 自动 tick 默认开启，每个 tick 优先执行一个队列动作；没有队列且没有选中源格时会自动 pass。`--no-auto-tick` 可关闭，`--tick-rate` 控制每秒自动推进次数。
+- 自动 tick 默认开启，每个 tick 优先执行一个队列动作；没有队列时会自动 pass 并继续推进时间，选中格仍可移动时会保持选中，失效时自动清空。`--no-auto-tick` 可关闭，`--tick-rate` 控制每秒自动推进次数。
 - 浏览器对局默认没有步数上限；需要测试固定长度对局时可传 `--max-steps N`，传 `--max-steps 0` 等同于无限。
 - 默认会在棋盘和右侧面板展示 PPO 模型下一步 Top-K 候选动作、概率和 value。
 - `--preview-top-k` 可设置展示 1-5 个候选，`--no-ai-preview` 可关闭预览。

@@ -339,3 +339,9 @@
 - **Status:** Completed
 - **Next Steps:** Start `examples/play_web.py` normally for unlimited browser matches, or pass `--max-steps N` only for bounded smoke tests.
 - **Context:** The pygame play script and training/evaluation utilities keep their existing max-step defaults; this change is scoped to the browser session path.
+
+## [2026-06-19 22:39] Web Selected Auto Tick
+- **Changes:** Let browser auto tick continue while a source cell is selected, preserving the selection only while it remains a valid movable source and clearing it after state changes make it invalid.
+- **Status:** Completed
+- **Next Steps:** Playtest the browser queue flow at normal tick rates to confirm the new real-time selection behavior feels right.
+- **Context:** Queued moves still take priority over auto pass. The pygame play script keeps its existing selected-cell pause behavior.

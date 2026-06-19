@@ -372,10 +372,8 @@ class WebGameSession:
             self.last_message = "Queued pass executed" if is_pass else "Queued move executed"
             return self.snapshot()
 
-        if self.selected_cell is not None:
-            return self.snapshot()
-
         self._advance_human_turn(create_action(to_pass=True), now=now)
+        self._clear_invalid_selection()
         self.last_message = "Auto pass"
         return self.snapshot()
 
@@ -436,6 +434,10 @@ class WebGameSession:
         self.move_queue.clear()
         self.selected_cell = None
         self.last_message = "Move queue cleared"
+
+    def _clear_invalid_selection(self) -> None:
+        if self.selected_cell is not None and not self._is_valid_source(self.selected_cell):
+            self.selected_cell = None
 
     def _advance_human_turn(self, human_action: jnp.ndarray, now: float | None = None) -> None:
         if self.model_agent is None:
