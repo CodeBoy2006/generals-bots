@@ -9681,3 +9681,159 @@ selection, not a stronger executor: train a source/target or command gate on
 true winning-trajectory / Plan-Q counterfactuals, then use the Worker only when
 the command itself is high-confidence.
 ```
+
+## 2026-06-19 Winning-Trajectory Worker Gate v0-v1
+
+We then trained a learned gate for the true winning-trajectory Worker instead
+of continuing scale scans.
+
+First gate:
+
+```text
+run:
+  runs/adaptive-searchwin-trajectory-worker-gate-v0/
+data:
+  runs/adaptive-midgame-searchwin-trajectory-fixed-v5-safev3-v0/
+feature model:
+  adaptive-midgame-contact-searchwin-imitation-v3
+worker:
+  adaptive-searchwin-trajectory-worker-v0
+dataset format:
+  strategy-worker
+command source:
+  belief-main-stack
+examples:
+  5,872 changed Worker actions
+positive:
+  11.14%
+final:
+  acc 63.2%
+  P+ 0.541
+  P- 0.459
+```
+
+Gameplay, fixed-v5 max250, 128 games/seat, seed 89520:
+
+```text
+base off:
+  p0 11.72%
+  p1  7.81%
+  min  7.81%
+
+gate v0, threshold 0.5:
+  p0 15.62%
+  p1 10.94%
+  min 10.94%
+```
+
+Confirmation at 256 games/seat, seed 89620:
+
+```text
+base off:
+  p0  8.98%
+  p1  8.59%
+  min  8.59%
+
+gate v0, threshold 0.5:
+  p0  9.38%
+  p1 10.16%
+  min  9.38%
+```
+
+This is the first Worker-gate path with a confirmed positive fixed-v5 signal,
+but it was unsafe when applied to all sizes:
+
+```text
+Expander 8/12/16, 64 games/row, seed 89640:
+  gate v0 all sizes min 40.62%
+  weak row: 16p1 40.62%
+```
+
+Root cause: the Worker and gate were trained only on 8x8 fixed-v5
+winning-trajectory rows, so applying the same primitive replacement to 12/16
+created an out-of-domain inference-time override. Added:
+
+```text
+evaluate_adaptive_policy.py:
+  --strategy-plan-worker-max-grid-size
+```
+
+When positive, both Plan-Worker rerank bias and gated replacement are disabled
+for boards larger than the configured grid size.
+
+Expander protection with `--strategy-plan-worker-max-grid-size 8`:
+
+```text
+Expander 8/12/16, 64 games/row, seed 89640:
+  8p0 67.19%
+  8p1 67.19%
+  12p0 78.12%
+  12p1 78.12%
+  16p0 85.94%
+  16p1 71.88%
+  min 67.19%
+
+same-seed base:
+  min 65.62%
+```
+
+Second gate:
+
+```text
+run:
+  runs/adaptive-searchwin-trajectory-worker-gate-v1/
+change:
+  --allow-nondecisive-worker-positives
+reason:
+  the whole shard contains true search-controlled winning trajectories, so a
+  Worker action matching the search teacher is useful even when the local
+  search_best_outcome field is not win.
+positive:
+  32.48%
+final:
+  acc 56.3%
+  P+ 0.511
+  P- 0.496
+```
+
+Gameplay with `--strategy-plan-worker-max-grid-size 8`:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 89520:
+  gate v1 threshold 0.5:
+    p0 16.41%
+    p1 13.28%
+    min 13.28%
+
+fixed-v5 max250, 256 games/seat, seed 89620:
+  gate v1 threshold 0.5:
+    p0 11.72%
+    p1 11.33%
+    min 11.33%
+
+Expander 8/12/16, 64 games/row, seed 89640:
+  p0/p1 rows:
+    8x8  67.19% / 76.56%
+    12x12 78.12% / 78.12%
+    16x16 85.94% / 71.88%
+  min 67.19%
+```
+
+Operational note: in the current Codex sandbox, JAX evaluator commands can see
+`CUDA_ERROR_NO_DEVICE` and fall back to a very slow path. Running the evaluator
+with GPU access outside the sandbox reports `Device: cuda:0` and completes the
+same fixed-v5 128/256-row checks in seconds. Keep `UV_CACHE_DIR=/tmp/uv-cache`
+and store generated checkpoints under `runs/`.
+
+Conclusion:
+
+```text
+The winning-trajectory Worker gate has a real but still small fixed-v5 signal:
+256-row min improves from 8.59% to 11.33% on the checked seed, without harming
+12/16 Expander when max_grid_size=8 is enforced.
+
+Do not promote it as a general adaptive policy. The next useful iteration is
+to collect 12/16-compatible winning-trajectory Worker/gate data or train the
+gate on explicit replacement outcome/Q labels, then use max_grid_size guards
+until each size has in-domain evidence.
+```

@@ -1082,3 +1082,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop Worker scale scans with the current `belief-main-stack` command source. Use the true winning-trajectory data to train command/source-target selection or Plan-Q counterfactual gates, then invoke the Worker only when command confidence is high.
 - **Context:** Binary calibrator was weak (`56.7%` finish acc); aux-only trunk still regressed Expander 8p1 (`64.06%` min). Terminal Worker learned offline (`38.8%` action acc) but hurt fixed-v5 p1. New true winning trajectories kept `25,385` rows; the Worker was stable offline (`37.8%` action acc) and safe but no-op in gameplay: fixed-v5 max250 min stayed `7.81%` at scale `0.02` and `0.05`.
+
+## [2026-06-19 23:15] Winning-Trajectory Worker Gate Guard
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-plan-worker-max-grid-size` to disable Plan-Worker rerank/replacement on out-of-domain board sizes, updated README/zh manual/strategy docs, and trained/evaluated `runs/adaptive-searchwin-trajectory-worker-gate-v0/v1/`.
+- **Status:** Completed
+- **Next Steps:** Do not promote the gate yet. Collect 12/16-compatible winning-trajectory Worker/gate data or train explicit replacement outcome/Q labels before using the Worker beyond 8x8.
+- **Context:** Sandbox JAX evaluator could not reliably see CUDA and fell back slowly; GPU evaluator runs used elevated access and reported `Device: cuda:0`. Gate v1 with non-decisive positives improved fixed-v5 max250 256-row min from same-seed base `8.59%` to `11.33%`; `--strategy-plan-worker-max-grid-size 8` protected Expander 12/16 and gave 64-row Expander min `67.19%` vs same-seed base `65.62%`.
