@@ -1142,3 +1142,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v1. Keep safe v3 as active base; use v0 only as a controlled-PPO diagnostic. Next PPO should preserve strategy aux heads and include Expander protection in the rollout curriculum or stop after the first safe fixed-v5 probe.
 - **Context:** v0 used mixed-seat sparse terminal PPO vs fixed v5 with 256-step rollout, EMA, stratified top-advantage 0.25, and safe-v3 KL. It reached fixed-v5 max250 256-row seed `86640` min `11.33%` and Expander 128-row seed `86680` min `75.78%`, roughly safe-v3 level. v1 continued 60 iters but stayed fixed-v5 min `11.33%` and slipped Expander to min `75.00%`.
+
+## [2026-06-20 01:48] Mixed Opponent Adaptive PPO
+- **Changes:** Updated `examples/_experimental/ppo/train_adaptive.py` so multi-size adaptive PPO can mix a fixed-size policy opponent into matching-size rows while falling back to the configured heuristic opponent for other rows. Added `--opponent-policy-grid-size` and `--opponent-policy-mix-prob`; non-matching rows receive a benign fixed-size dummy observation before the frozen opponent is queried.
+- **Status:** Completed
+- **Next Steps:** Do not promote `runs/adaptive-ppo-mixed-opponent-smoke-v0` or `runs/adaptive-ppo-mixed-opponent-fixed8-v0`; both kept fixed-v5 max250 min at 11.33%. Use the mixed-opponent support for future richer curricula, but the next strength push should return to decisive trajectory/finish supervision rather than longer plain PPO.
+- **Context:** GPU smoke passed. p=0.5 Expander 128-row min was 75.78% and fixed-v5 max250 256-row min was 11.33%; p=1.0 Expander 128-row min was 75.00% and fixed-v5 max250 256-row min was 11.33%. `controlled-v0` checkpoint schema is U-Net + per-size HL-Gauss + outcome head, no strategy heads; `safe-v3` has older strategy-head schema incompatible with the current strategy head shape.

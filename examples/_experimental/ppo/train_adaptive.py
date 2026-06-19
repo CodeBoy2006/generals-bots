@@ -227,6 +227,47 @@ def crop_observation(obs, size: int):
     )
 
 
+def policy_sized_observation(obs, effective_size: jnp.ndarray, policy_grid_size: int):
+    """Return a legal fixed-size observation only for rows matching the policy size.
+
+    JAX evaluates both branches of a later action mix, so non-matching 12/16 rows
+    still need a benign 8x8 observation before querying an 8x8 frozen opponent.
+    """
+    cropped = crop_observation(obs, policy_grid_size)
+    shape = cropped.armies.shape
+    valid = effective_size == policy_grid_size
+
+    dummy_armies = jnp.zeros(shape, dtype=cropped.armies.dtype).at[0, 0].set(2)
+    dummy_bool = jnp.zeros(shape, dtype=bool)
+    dummy_owned = dummy_bool.at[0, 0].set(True)
+    dummy_generals = dummy_bool.at[0, 0].set(True)
+    dummy_neutral = ~dummy_owned
+
+    return cropped._replace(
+        armies=jnp.where(valid, cropped.armies, dummy_armies),
+        generals=jnp.where(valid, cropped.generals, dummy_generals),
+        cities=jnp.where(valid, cropped.cities, dummy_bool),
+        mountains=jnp.where(valid, cropped.mountains, dummy_bool),
+        neutral_cells=jnp.where(valid, cropped.neutral_cells, dummy_neutral),
+        owned_cells=jnp.where(valid, cropped.owned_cells, dummy_owned),
+        opponent_cells=jnp.where(valid, cropped.opponent_cells, dummy_bool),
+        fog_cells=jnp.where(valid, cropped.fog_cells, dummy_bool),
+        structures_in_fog=jnp.where(valid, cropped.structures_in_fog, dummy_bool),
+        owned_land_count=jnp.where(valid, cropped.owned_land_count, jnp.asarray(1, cropped.owned_land_count.dtype)),
+        owned_army_count=jnp.where(valid, cropped.owned_army_count, jnp.asarray(2, cropped.owned_army_count.dtype)),
+        opponent_land_count=jnp.where(
+            valid,
+            cropped.opponent_land_count,
+            jnp.asarray(0, cropped.opponent_land_count.dtype),
+        ),
+        opponent_army_count=jnp.where(
+            valid,
+            cropped.opponent_army_count,
+            jnp.asarray(0, cropped.opponent_army_count.dtype),
+        ),
+    )
+
+
 @eqx.filter_jit
 def rollout_step(
     states,
@@ -252,6 +293,7 @@ def rollout_step(
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
+    opponent_policy_mix_prob: float = 1.0,
 ):
     """Collect one vectorized adaptive PPO rollout step."""
     num_envs = states.armies.shape[0]
@@ -367,20 +409,26 @@ def rollout_step(
 
     key, opponent_key = jrandom.split(key)
     opponent_keys = jrandom.split(opponent_key, num_envs)
+    heuristic_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
+        opponent_keys,
+        opponent_obs_prior,
+    )
     if opponent_policy_network is not None:
-        opponent_actions = jax.vmap(
-            lambda k, obs: policy_network_action(
+        policy_actions = jax.vmap(
+            lambda k, obs, size: policy_network_action(
                 opponent_policy_network,
                 k,
-                crop_observation(obs, opponent_policy_grid_size),
+                policy_sized_observation(obs, size, opponent_policy_grid_size),
                 opponent_policy_mode,
             )
-        )(opponent_keys, opponent_obs_prior)
-    else:
-        opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent_id, k, obs, random_action))(
-            opponent_keys,
-            opponent_obs_prior,
+        )(opponent_keys, opponent_obs_prior, effective_sizes)
+        key, opponent_mix_key = jrandom.split(key)
+        use_policy = (effective_sizes == opponent_policy_grid_size) & (
+            jrandom.uniform(opponent_mix_key, (num_envs,)) < opponent_policy_mix_prob
         )
+        opponent_actions = jnp.where(use_policy[:, None], policy_actions, heuristic_actions)
+    else:
+        opponent_actions = heuristic_actions
 
     actions = stack_learner_actions(learner_actions, opponent_actions, learner_player)
     new_states, infos = jax.vmap(game.step)(states, actions)
@@ -447,6 +495,7 @@ def collect_rollout(
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
+    opponent_policy_mix_prob: float = 1.0,
 ):
     """Collect a Python-loop rollout, stacking step data on axis 0."""
     step_data = []
@@ -475,6 +524,7 @@ def collect_rollout(
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
+            opponent_policy_mix_prob,
         )
         step_data.append(data)
     rollout_data = jax.tree.map(lambda *xs: jnp.stack(xs), *step_data)
@@ -509,6 +559,7 @@ def collect_mixed_rollout(
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
+    opponent_policy_mix_prob: float = 1.0,
 ):
     """Collect P0 and P1 learner trajectories, then combine them for one PPO update."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -537,6 +588,7 @@ def collect_mixed_rollout(
         opponent_policy_network,
         opponent_policy_mode,
         opponent_policy_grid_size,
+        opponent_policy_mix_prob,
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_rollout(
         states_p1,
@@ -563,6 +615,7 @@ def collect_mixed_rollout(
         opponent_policy_network,
         opponent_policy_mode,
         opponent_policy_grid_size,
+        opponent_policy_mix_prob,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
@@ -882,6 +935,8 @@ def parse_args():
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="random")
     parser.add_argument("--opponent-policy-path", default=None)
     parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
+    parser.add_argument("--opponent-policy-grid-size", type=int, default=None)
+    parser.add_argument("--opponent-policy-mix-prob", type=float, default=1.0)
     parser.add_argument("--opponent-channels", default=None)
     parser.add_argument("--opponent-input-channels", type=int, default=9)
     parser.add_argument("--learner-player", choices=("0", "1", "alternate", "mixed"), default="0")
@@ -1013,8 +1068,21 @@ def parse_args():
         parser.error("--pool-size must be at least num_envs")
     if args.opponent_input_channels <= 0:
         parser.error("--opponent-input-channels must be positive")
-    if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
-        parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
+    if not (0.0 <= args.opponent_policy_mix_prob <= 1.0):
+        parser.error("--opponent-policy-mix-prob must be in [0, 1]")
+    if args.opponent_policy_grid_size is not None and args.opponent_policy_grid_size <= 0:
+        parser.error("--opponent-policy-grid-size must be positive")
+    if args.opponent_policy_path is not None:
+        if len(args.grid_sizes) > 1 and args.opponent_policy_grid_size is None:
+            parser.error("--opponent-policy-grid-size is required with multi-size --opponent-policy-path")
+        if args.opponent_policy_grid_size is None:
+            args.opponent_policy_grid_size = args.grid_sizes[0]
+        if args.opponent_policy_grid_size not in args.grid_sizes:
+            parser.error("--opponent-policy-grid-size must be one of --grid-sizes")
+        if args.opponent_policy_grid_size > args.pad_to:
+            parser.error("--opponent-policy-grid-size must be <= --pad-to")
+    elif args.opponent_policy_grid_size is not None:
+        parser.error("--opponent-policy-grid-size requires --opponent-policy-path")
     if args.truncation <= 0:
         parser.error("--truncation must be positive")
     if args.terminal_reward_scale < 0.0:
@@ -1099,6 +1167,9 @@ def main():
         print("Opponent:      policy checkpoint")
         print(f"Opp model:     {args.opponent_policy_path}")
         print(f"Opp mode:      {args.opponent_policy_mode}")
+        print(f"Opp size:      {args.opponent_policy_grid_size}")
+        if args.opponent_policy_mix_prob < 1.0 or len(args.grid_sizes) > 1:
+            print(f"Opp mix:       policy rows p={args.opponent_policy_mix_prob:g}, fallback={args.opponent}")
         print(f"Opp channels:  {args.opponent_channels}")
         print(f"Opp inputs:    {args.opponent_input_channels}")
     print(f"Reward mode:   {args.reward_mode}")
@@ -1272,7 +1343,7 @@ def main():
         teacher_input_channels = adaptive_network_input_channels(teacher_network)
     opponent_policy_network = None
     opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
-    opponent_policy_grid_size = args.grid_sizes[0]
+    opponent_policy_grid_size = args.opponent_policy_grid_size or args.grid_sizes[0]
     if args.opponent_policy_path is not None:
         opponent_policy_network = PolicyValueNetwork(
             net_key,
@@ -1350,6 +1421,7 @@ def main():
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
+            args.opponent_policy_mix_prob,
         )
         states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, _, _ = rollout_step(
             states_p1,
@@ -1375,6 +1447,7 @@ def main():
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
+            args.opponent_policy_mix_prob,
         )
         jax.block_until_ready(states_p0)
         jax.block_until_ready(states_p1)
@@ -1404,6 +1477,7 @@ def main():
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
+            args.opponent_policy_mix_prob,
         )
         jax.block_until_ready(states)
 
@@ -1451,6 +1525,7 @@ def main():
                 opponent_policy_network,
                 opponent_policy_mode,
                 opponent_policy_grid_size,
+                args.opponent_policy_mix_prob,
             )
             jax.block_until_ready(states_p0)
             jax.block_until_ready(states_p1)
@@ -1481,6 +1556,7 @@ def main():
                 opponent_policy_network,
                 opponent_policy_mode,
                 opponent_policy_grid_size,
+                args.opponent_policy_mix_prob,
             )
             jax.block_until_ready(states)
         obs, masks, active, actions, logprobs, values, rewards, dones, infos = rollout_data
