@@ -1124,3 +1124,9 @@
 - **Status:** Completed
 - **Next Steps:** Use draw/search-win contrast rows as frozen-policy auxiliary/gating data or as a small weighted slice inside larger successful-trajectory updates; do not continue all-trunk policy updates on this standalone objective.
 - **Context:** Oversampling retained contrast signal (`2,234` filtered rows -> `5,520` balanced samples) and improved finish/outcome training (`72.2%`/`77.7%`), but fixed-v5 max250 seed `86640` regressed to min `8.59%` vs base `10.94%`. Active base remains safe v3.
+
+## [2026-06-20 00:45] Policy Adapter Feature-Gate Split
+- **Changes:** Added optional policy-adapter feature model plumbing to gate training/evaluation, appended draw/win probabilities to adapter-gate features with sidecar-compatible slicing, documented the flags, and trained/evaluated ignored GPU run `runs/adaptive-policy-adapter-gate-feature-v0/`.
+- **Status:** Completed
+- **Next Steps:** Do not continue the p0mix adapter-gate branch unless a future adapter produces many more changed-action positives. The next useful route should train a better adapter/delta source or use contrast rows only for frozen auxiliary calibration.
+- **Context:** Feature-finish gating with draw/search model improved p0 but hurt p1 (`14.84%/9.38%`, min `9.38%`). Learned 14-feature gate had only ~`0.01%` positives (`187` changed actions out of `51,835` rows) and evaluated at fixed-v5 max250 seed `86640` with min `10.94%`, effectively base behavior.

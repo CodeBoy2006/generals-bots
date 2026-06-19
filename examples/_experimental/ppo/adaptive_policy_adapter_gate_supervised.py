@@ -36,6 +36,8 @@ POLICY_ADAPTER_GATE_FEATURE_NAMES = (
     "adapter_top_margin",
     "policy_top_margin",
     "adapter_finish_probability",
+    "adapter_draw_probability",
+    "adapter_win_probability",
     "visible_enemy_density",
     "visible_enemy_army_log_density",
     "owned_army_log_density",
@@ -61,6 +63,7 @@ def expand_dataset_paths(patterns: list[str]) -> list[Path]:
 def _compute_adapter_features(
     base_network,
     adapter_network,
+    feature_network,
     obs: np.ndarray,
     legal_mask: np.ndarray,
     active: np.ndarray,
@@ -88,19 +91,30 @@ def _compute_adapter_features(
             legal_batch,
             active_batch,
         )
-        adapter_aux = jax.vmap(lambda o, m, a: adapter_network.strategy_auxiliary(o, m, a))(
+        aux_network = feature_network if feature_network is not None else adapter_network
+        adapter_aux = jax.vmap(lambda o, m, a: aux_network.strategy_auxiliary(o, m, a))(
             obs_batch,
             legal_batch,
             active_batch,
         )
-        features = jax.vmap(policy_adapter_gate_features, in_axes=(0, 0, 0, 0, 0, 0, None))(
+        if aux_network.outcome_head:
+            outcome_logits = jax.vmap(lambda o, m, a: aux_network.logits_value_auxiliary(o, m, a)[3])(
+                obs_batch,
+                legal_batch,
+                active_batch,
+            )
+        else:
+            outcome_logits = jnp.zeros((obs_batch.shape[0], 3), dtype=obs_batch.dtype)
+        features = jax.vmap(policy_adapter_gate_features, in_axes=(0, 0, 0, 0, 0, 0, 0, None, None))(
             obs_batch,
             policy_logits,
             adapter_logits,
             adapter_aux.finish_logits,
+            outcome_logits,
             active_batch,
             seat_batch,
             pad_size,
+            len(POLICY_ADAPTER_GATE_FEATURE_NAMES),
         )
         legal = policy_logits > -1.0e8
         policy_indices = jnp.argmax(jnp.where(legal, policy_logits, -1.0e9), axis=-1).astype(jnp.int32)
@@ -119,6 +133,7 @@ def build_gate_examples(
     paths: list[Path],
     base_network,
     adapter_network,
+    feature_network,
     feature_batch_size: int,
     positive_path_contains: tuple[str, ...],
     require_search_best_win: bool,
@@ -149,6 +164,7 @@ def build_gate_examples(
         features, policy_indices, adapter_indices = _compute_adapter_features(
             base_network,
             adapter_network,
+            feature_network,
             obs,
             legal_mask,
             active,
@@ -266,6 +282,11 @@ def parse_args():
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
     parser.add_argument("--base-model-path", required=True)
     parser.add_argument("--adapter-model-path", required=True)
+    parser.add_argument(
+        "--feature-model-path",
+        default=None,
+        help="Optional strategy-aux model used only for gate features; adapter-model still supplies policy deltas.",
+    )
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
     parser.add_argument("--input-channels", type=int, default=35)
@@ -373,10 +394,37 @@ def main():
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
     )
+    feature_network = None
+    if args.feature_model_path is not None:
+        feature_network = load_or_create_adaptive_network(
+            adapter_key,
+            pad_size=16,
+            init_model_path=args.feature_model_path,
+            channels=args.channels,
+            input_channels=args.input_channels,
+            init_input_channels=args.input_channels,
+            value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+            init_value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+            value_bins=value_bins,
+            init_value_bins=value_bins,
+            outcome_head=args.outcome_head,
+            init_outcome_head=args.outcome_head,
+            strategy_aux=args.strategy_aux,
+            init_strategy_aux=args.strategy_aux,
+            strategy_spatial_aux=args.strategy_spatial_aux,
+            init_strategy_spatial_aux=args.strategy_spatial_aux,
+            strategy_finish_outputs=args.strategy_finish_outputs,
+            init_strategy_finish_outputs=args.strategy_finish_outputs,
+            global_context=args.global_context,
+            init_global_context=args.global_context,
+            network_arch=args.network_arch,
+            init_network_arch=args.network_arch,
+        )
     dataset = build_gate_examples(
         paths,
         base_network,
         adapter_network,
+        feature_network,
         args.feature_batch_size,
         tuple(args.positive_path_contains),
         not args.allow_nondecisive_positives,
@@ -397,6 +445,8 @@ def main():
     print(f"Decisive:      {stats['decisive']}")
     print(f"Base:          {args.base_model_path}")
     print(f"Adapter:       {args.adapter_model_path}")
+    if args.feature_model_path is not None:
+        print(f"Feature model: {args.feature_model_path}")
     print(f"Output:        {args.model_path}")
     print(f"Features:      {', '.join(POLICY_ADAPTER_GATE_FEATURE_NAMES)}")
     print()
@@ -440,6 +490,7 @@ def main():
         "keep_unchanged_negatives": args.keep_unchanged_negatives,
         "base_model_path": args.base_model_path,
         "adapter_model_path": args.adapter_model_path,
+        "feature_model_path": args.feature_model_path,
         "datasets": [str(path) for path in paths],
     }
     model_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2, sort_keys=True) + "\n", encoding="utf-8")

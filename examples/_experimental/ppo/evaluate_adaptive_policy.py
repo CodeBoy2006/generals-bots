@@ -84,6 +84,7 @@ class AdaptiveEvalRow:
 def _policy_action(
     network,
     policy_adapter_network,
+    policy_adapter_feature_network,
     plan_worker_network,
     command_gate_network,
     obs_arr,
@@ -131,20 +132,32 @@ def _policy_action(
         adapter_logits, _ = policy_adapter_network.logits_value(obs_arr, mask, active)
         adapter_gate = jnp.asarray(1.0, dtype=logits.dtype)
         if policy_adapter_gate_threshold >= 0.0:
-            adapter_aux = policy_adapter_network.strategy_auxiliary(obs_arr, mask, active)
+            adapter_feature_network = (
+                policy_adapter_feature_network if policy_adapter_feature_network is not None else policy_adapter_network
+            )
+            adapter_aux = adapter_feature_network.strategy_auxiliary(obs_arr, mask, active)
+            if adapter_feature_network.outcome_head:
+                _, _, _, adapter_outcome_logits = adapter_feature_network.logits_value_auxiliary(obs_arr, mask, active)
+            else:
+                adapter_outcome_logits = jnp.zeros((3,), dtype=logits.dtype)
             adapter_features = policy_adapter_gate_features(
                 obs_arr,
                 logits,
                 adapter_logits,
                 adapter_aux.finish_logits,
+                adapter_outcome_logits,
                 active,
                 policy_player,
                 network.pad_size,
+                command_gate_feature_dim,
             )
             gate_probability = jax.nn.sigmoid(command_gate_network(adapter_features))
             adapter_gate = jnp.where(gate_probability >= policy_adapter_gate_threshold, 1.0, 0.0)
         elif policy_adapter_finish_threshold >= 0.0:
-            adapter_aux = policy_adapter_network.strategy_auxiliary(obs_arr, mask, active)
+            adapter_feature_network = (
+                policy_adapter_feature_network if policy_adapter_feature_network is not None else policy_adapter_network
+            )
+            adapter_aux = adapter_feature_network.strategy_auxiliary(obs_arr, mask, active)
             finish_probability = strategy_finish_probability(adapter_aux.finish_logits)
             adapter_gate = jnp.where(finish_probability >= policy_adapter_finish_threshold, 1.0, 0.0)
         logits = policy_adapter_delta_logits(logits, adapter_logits, policy_adapter_scale * adapter_gate)
@@ -340,9 +353,11 @@ def policy_adapter_gate_features(
     policy_logits: jnp.ndarray,
     adapter_logits: jnp.ndarray,
     finish_logits: jnp.ndarray,
+    outcome_logits: jnp.ndarray,
     active: jnp.ndarray,
     policy_player: int,
     pad_size: int,
+    feature_dim: int = 12,
 ) -> jnp.ndarray:
     """Build the adapter-gate feature vector used by offline training."""
     legal = policy_logits > -1.0e8
@@ -356,7 +371,8 @@ def policy_adapter_gate_features(
     owned = obs_arr[5] * active.astype(jnp.float32)
     army_log = obs_arr[0]
     finish_probability = strategy_finish_probability(finish_logits)
-    return jnp.stack(
+    outcome_probabilities = jax.nn.softmax(outcome_logits, axis=-1)
+    features = jnp.stack(
         [
             raw_delta[adapter_index],
             raw_delta[policy_index],
@@ -364,6 +380,8 @@ def policy_adapter_gate_features(
             adapter_values[0] - adapter_values[1],
             policy_values[0] - policy_values[1],
             finish_probability,
+            outcome_probabilities[1],
+            outcome_probabilities[2],
             jnp.sum(visible_enemy) / active_count,
             jnp.sum(army_log * visible_enemy) / active_count,
             jnp.sum(army_log * owned) / active_count,
@@ -372,6 +390,7 @@ def policy_adapter_gate_features(
             jnp.asarray(policy_player, dtype=jnp.float32),
         ]
     )
+    return features[:feature_dim]
 
 
 def strategy_worker_action(
@@ -733,6 +752,7 @@ def summarize_row(info, grid_size: int, policy_player: int, num_games: int) -> A
 def evaluate_batch(
     network,
     policy_adapter_network,
+    policy_adapter_feature_network,
     plan_worker_network,
     command_gate_network,
     states,
@@ -872,6 +892,7 @@ def evaluate_batch(
             lambda o, m, a, k: _policy_action(
                 network,
                 policy_adapter_network,
+                policy_adapter_feature_network,
                 plan_worker_network,
                 command_gate_network,
                 o,
@@ -932,6 +953,7 @@ def evaluate_batch(
 def evaluate_policy_opponent_batch(
     network,
     policy_adapter_network,
+    policy_adapter_feature_network,
     plan_worker_network,
     command_gate_network,
     opponent_network,
@@ -1073,6 +1095,7 @@ def evaluate_policy_opponent_batch(
             lambda o, m, a, k: _policy_action(
                 network,
                 policy_adapter_network,
+                policy_adapter_feature_network,
                 plan_worker_network,
                 command_gate_network,
                 o,
@@ -1208,6 +1231,11 @@ def parse_args():
     parser.add_argument("--strategy-command-gate-source-count", type=int, default=1)
     parser.add_argument("--strategy-command-gate-target-count", type=int, default=1)
     parser.add_argument("--policy-adapter-path", default=None)
+    parser.add_argument(
+        "--policy-adapter-feature-model-path",
+        default=None,
+        help="Optional strategy-aux model used only for policy-adapter gate/finish features.",
+    )
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
     parser.add_argument("--policy-adapter-finish-threshold", type=float, default=-1.0)
     parser.add_argument("--policy-adapter-gate-path", default=None)
@@ -1352,6 +1380,8 @@ def parse_args():
         parser.error("--policy-adapter-scale requires --policy-adapter-path")
     if args.policy_adapter_path is not None and args.policy_adapter_scale <= 0.0:
         parser.error("--policy-adapter-path requires --policy-adapter-scale > 0")
+    if args.policy_adapter_feature_model_path is not None and args.policy_adapter_path is None:
+        parser.error("--policy-adapter-feature-model-path requires --policy-adapter-path")
     if args.policy_adapter_finish_threshold < 0.0 and args.policy_adapter_finish_threshold != -1.0:
         parser.error("--policy-adapter-finish-threshold must be between 0 and 1, or -1 to disable")
     if args.policy_adapter_finish_threshold > 1.0:
@@ -1431,6 +1461,7 @@ def main():
         init_network_arch=args.network_arch,
     )
     policy_adapter_network = None
+    policy_adapter_feature_network = None
     if args.policy_adapter_path is not None:
         policy_adapter_network = load_or_create_adaptive_network(
             net_key,
@@ -1458,6 +1489,33 @@ def main():
             network_arch=args.network_arch,
             init_network_arch=args.network_arch,
         )
+        if args.policy_adapter_feature_model_path is not None:
+            policy_adapter_feature_network = load_or_create_adaptive_network(
+                net_key,
+                pad_size=args.pad_to,
+                init_model_path=args.policy_adapter_feature_model_path,
+                channels=args.channels,
+                input_channels=input_channels,
+                init_input_channels=input_channels,
+                value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+                value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
+                value_min=args.value_min,
+                value_max=args.value_max,
+                value_sigma=args.value_sigma,
+                outcome_head=args.outcome_head,
+                strategy_aux=args.strategy_aux,
+                strategy_spatial_aux=args.strategy_spatial_aux,
+                strategy_finish_outputs=args.strategy_finish_outputs,
+                init_strategy_finish_outputs=args.strategy_finish_outputs,
+                global_context=network_global_context,
+                init_global_context=network_global_context,
+                context_residual=args.context_residual,
+                init_context_residual=args.context_residual,
+                pyramid_context=args.pyramid_context,
+                init_pyramid_context=args.pyramid_context,
+                network_arch=args.network_arch,
+                init_network_arch=args.network_arch,
+            )
     plan_worker_network = None
     if args.strategy_plan_worker_path is not None:
         plan_worker_input_channels = input_channels + 3
@@ -1598,6 +1656,8 @@ def main():
             gate_label = ""
         print(f"Policy adapter: {args.policy_adapter_path}")
         print(f"Policy adapter: scale={args.policy_adapter_scale:g}{gate_label}")
+        if args.policy_adapter_feature_model_path is not None:
+            print(f"Policy adapter features: {args.policy_adapter_feature_model_path}")
         if args.policy_adapter_gate_threshold >= 0.0:
             print(f"Policy adapter gate: {args.policy_adapter_gate_path}")
             print(f"Policy adapter gate: feature_dim={command_gate_feature_dim}")
@@ -1633,6 +1693,7 @@ def main():
                 info = evaluate_batch(
                     network,
                     policy_adapter_network,
+                    policy_adapter_feature_network,
                     plan_worker_network,
                     command_gate_network,
                     states,
@@ -1674,6 +1735,7 @@ def main():
                 info = evaluate_policy_opponent_batch(
                     network,
                     policy_adapter_network,
+                    policy_adapter_feature_network,
                     plan_worker_network,
                     command_gate_network,
                     opponent_network,
@@ -1775,6 +1837,7 @@ def main():
         "strategy_command_gate_source_count": args.strategy_command_gate_source_count,
         "strategy_command_gate_target_count": args.strategy_command_gate_target_count,
         "policy_adapter_path": args.policy_adapter_path,
+        "policy_adapter_feature_model_path": args.policy_adapter_feature_model_path,
         "policy_adapter_scale": args.policy_adapter_scale,
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,
         "policy_adapter_gate_path": args.policy_adapter_gate_path,

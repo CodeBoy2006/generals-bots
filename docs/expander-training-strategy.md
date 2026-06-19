@@ -10548,3 +10548,112 @@ as auxiliary/gating data with policy logits frozen, or as a small weighted slice
 inside a much larger successful-trajectory policy update rather than as the main
 policy-imitation objective.
 ```
+
+## 2026-06-20 Policy Adapter Feature-Gate Split
+
+The draw/search-win contrast model learned finish/outcome labels, but its policy
+was harmful. Added an adapter-gate split so the harmful policy does not have to
+be used:
+
+```text
+adaptive_policy_adapter_gate_supervised.py:
+  --feature-model-path
+
+evaluate_adaptive_policy.py:
+  --policy-adapter-feature-model-path
+```
+
+The base policy and adapter policy remain separate:
+
+```text
+base policy:
+  safe v3
+
+adapter delta:
+  adaptive-midgame-contact-searchwin-safev3-policyhead-p0mix-v0
+
+feature model:
+  adaptive-midgame-drawsearch-oversample-repr-v0
+```
+
+Adapter-gate features now append outcome probabilities:
+
+```text
+old 12-feature gate:
+  finish probability only
+
+new 14-feature gate:
+  finish probability
+  draw probability
+  win probability
+```
+
+Evaluator compatibility is preserved by slicing the feature vector to the
+feature count saved in the gate sidecar.
+
+Hard finish gate, fixed-v5 max250, 128 games/seat, seed 86640:
+
+```text
+base v3:
+  p0 11.72%
+  p1 10.94%
+  min 10.94%
+
+p0mix adapter, adapter's own finish head threshold 0.5:
+  p0 12.50%
+  p1 10.16%
+  min 10.16%
+
+p0mix adapter, draw/search feature model threshold 0.5:
+  p0 14.84%
+  p1  9.38%
+  min  9.38%
+```
+
+Learned gate with the 14-feature split:
+
+```text
+run:
+  runs/adaptive-policy-adapter-gate-feature-v0/
+
+datasets:
+  fixed-v5 v1
+  Expander safev3
+
+labels:
+  positive path contains fixed-v5-v1
+  adapter greedy top1 matches teacher action
+  search_best_outcome == win
+  unchanged actions kept as negatives
+
+examples:
+  rows 51,835
+  changed 187
+  teacher_match 61
+  positives ~0.01%
+
+final:
+  P+ 0.040
+  P- 0.002
+```
+
+Gameplay with learned gate threshold 0.5, fixed-v5 max250, 128 games/seat,
+seed 86640:
+
+```text
+p0 12.50%
+p1 10.94%
+min 10.94%
+```
+
+Conclusion:
+
+```text
+Do not promote `adaptive-policy-adapter-gate-feature-v0`.
+
+The feature-model split is useful infrastructure, but the p0mix adapter changes
+too few greedy actions to train a meaningful replacement-outcome gate. The
+contrast-calibrated finish/outcome features do not fix the sparse-positive
+problem. Close this p0mix adapter-gate branch unless a future adapter produces
+many more candidate changes with clear positive labels.
+```
