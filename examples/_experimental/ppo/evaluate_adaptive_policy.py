@@ -111,6 +111,7 @@ def _policy_action(
     strategy_command_gate_target_count: int,
     policy_adapter_scale: float,
     policy_adapter_finish_threshold: float,
+    policy_adapter_gate_threshold: float,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     needs_aux = (
@@ -128,7 +129,20 @@ def _policy_action(
     if policy_adapter_scale > 0.0:
         adapter_logits, _ = policy_adapter_network.logits_value(obs_arr, mask, active)
         adapter_gate = jnp.asarray(1.0, dtype=logits.dtype)
-        if policy_adapter_finish_threshold >= 0.0:
+        if policy_adapter_gate_threshold >= 0.0:
+            adapter_aux = policy_adapter_network.strategy_auxiliary(obs_arr, mask, active)
+            adapter_features = policy_adapter_gate_features(
+                obs_arr,
+                logits,
+                adapter_logits,
+                adapter_aux.finish_logits,
+                active,
+                policy_player,
+                network.pad_size,
+            )
+            gate_probability = jax.nn.sigmoid(command_gate_network(adapter_features))
+            adapter_gate = jnp.where(gate_probability >= policy_adapter_gate_threshold, 1.0, 0.0)
+        elif policy_adapter_finish_threshold >= 0.0:
             adapter_aux = policy_adapter_network.strategy_auxiliary(obs_arr, mask, active)
             finish_probability = strategy_finish_probability(adapter_aux.finish_logits)
             adapter_gate = jnp.where(finish_probability >= policy_adapter_finish_threshold, 1.0, 0.0)
@@ -315,6 +329,45 @@ def policy_adapter_delta_logits(
     legal_mean = jnp.sum(jnp.where(legal, raw_delta, 0.0)) / legal_count
     centered_delta = jnp.where(legal, raw_delta - legal_mean, 0.0)
     return policy_logits + scale * centered_delta
+
+
+def policy_adapter_gate_features(
+    obs_arr: jnp.ndarray,
+    policy_logits: jnp.ndarray,
+    adapter_logits: jnp.ndarray,
+    finish_logits: jnp.ndarray,
+    active: jnp.ndarray,
+    policy_player: int,
+    pad_size: int,
+) -> jnp.ndarray:
+    """Build the adapter-gate feature vector used by offline training."""
+    legal = policy_logits > -1.0e8
+    policy_values, policy_indices = jax.lax.top_k(jnp.where(legal, policy_logits, -1.0e9), 2)
+    adapter_values, adapter_indices = jax.lax.top_k(jnp.where(legal, adapter_logits, -1.0e9), 2)
+    policy_index = policy_indices[0]
+    adapter_index = adapter_indices[0]
+    raw_delta = adapter_logits - policy_logits
+    active_count = jnp.maximum(jnp.sum(active.astype(jnp.float32)), 1.0)
+    visible_enemy = obs_arr[6] * active.astype(jnp.float32)
+    owned = obs_arr[5] * active.astype(jnp.float32)
+    army_log = obs_arr[0]
+    finish_probability = strategy_finish_probability(finish_logits)
+    return jnp.stack(
+        [
+            raw_delta[adapter_index],
+            raw_delta[policy_index],
+            policy_logits[adapter_index] - policy_values[0],
+            adapter_values[0] - adapter_values[1],
+            policy_values[0] - policy_values[1],
+            finish_probability,
+            jnp.sum(visible_enemy) / active_count,
+            jnp.sum(army_log * visible_enemy) / active_count,
+            jnp.sum(army_log * owned) / active_count,
+            active_count / jnp.asarray(pad_size * pad_size, dtype=jnp.float32),
+            (adapter_index != policy_index).astype(jnp.float32),
+            jnp.asarray(policy_player, dtype=jnp.float32),
+        ]
+    )
 
 
 def strategy_worker_action(
@@ -700,6 +753,7 @@ def evaluate_batch(
     strategy_command_gate_target_count=1,
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
+    policy_adapter_gate_threshold=-1.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -820,6 +874,7 @@ def evaluate_batch(
                 strategy_command_gate_target_count,
                 policy_adapter_scale,
                 policy_adapter_finish_threshold,
+                policy_adapter_gate_threshold,
             )
         )(
             obs_arr,
@@ -884,6 +939,7 @@ def evaluate_policy_opponent_batch(
     strategy_command_gate_target_count=1,
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
+    policy_adapter_gate_threshold=-1.0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1005,6 +1061,7 @@ def evaluate_policy_opponent_batch(
                 strategy_command_gate_target_count,
                 policy_adapter_scale,
                 policy_adapter_finish_threshold,
+                policy_adapter_gate_threshold,
             )
         )(
             obs_arr,
@@ -1101,6 +1158,9 @@ def parse_args():
     parser.add_argument("--policy-adapter-path", default=None)
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
     parser.add_argument("--policy-adapter-finish-threshold", type=float, default=-1.0)
+    parser.add_argument("--policy-adapter-gate-path", default=None)
+    parser.add_argument("--policy-adapter-gate-threshold", type=float, default=-1.0)
+    parser.add_argument("--policy-adapter-gate-hidden-dim", type=int, default=32)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -1244,6 +1304,26 @@ def parse_args():
         parser.error("--policy-adapter-finish-threshold requires --strategy-aux")
     if args.policy_adapter_finish_threshold >= 0.0 and args.policy_adapter_scale <= 0.0:
         parser.error("--policy-adapter-finish-threshold requires --policy-adapter-scale > 0")
+    if args.policy_adapter_gate_threshold < 0.0 and args.policy_adapter_gate_threshold != -1.0:
+        parser.error("--policy-adapter-gate-threshold must be between 0 and 1, or -1 to disable")
+    if args.policy_adapter_gate_threshold > 1.0:
+        parser.error("--policy-adapter-gate-threshold must be between 0 and 1")
+    if args.policy_adapter_gate_threshold >= 0.0 and args.policy_adapter_gate_path is None:
+        parser.error("--policy-adapter-gate-threshold requires --policy-adapter-gate-path")
+    if args.policy_adapter_gate_threshold >= 0.0 and args.policy_adapter_scale <= 0.0:
+        parser.error("--policy-adapter-gate-threshold requires --policy-adapter-scale > 0")
+    if args.policy_adapter_gate_threshold >= 0.0 and not args.strategy_aux:
+        parser.error("--policy-adapter-gate-threshold requires --strategy-aux")
+    if args.policy_adapter_gate_threshold >= 0.0 and args.policy_adapter_finish_threshold >= 0.0:
+        parser.error("Use either --policy-adapter-gate-threshold or --policy-adapter-finish-threshold")
+    if args.policy_adapter_gate_threshold >= 0.0 and (
+        args.strategy_command_gate_threshold >= 0.0 or args.strategy_plan_worker_gate_threshold >= 0.0
+    ):
+        parser.error("Use only one learned gate type per evaluation command")
+    if args.policy_adapter_gate_path is not None and args.policy_adapter_gate_threshold < 0.0:
+        parser.error("--policy-adapter-gate-path requires --policy-adapter-gate-threshold")
+    if args.policy_adapter_gate_hidden_dim <= 0:
+        parser.error("--policy-adapter-gate-hidden-dim must be positive")
     try:
         args.strategy_plan_worker_channels = parse_policy_channels(args.strategy_plan_worker_channels)
     except ValueError as exc:
@@ -1336,13 +1416,14 @@ def main():
             init_network_arch=args.strategy_plan_worker_network_arch,
         )
     command_gate_network = None
-    gate_path = args.strategy_command_gate_path or args.strategy_plan_worker_gate_path
+    gate_path = args.strategy_command_gate_path or args.strategy_plan_worker_gate_path or args.policy_adapter_gate_path
     if gate_path is not None:
-        gate_hidden_dim = (
-            args.strategy_plan_worker_gate_hidden_dim
-            if args.strategy_plan_worker_gate_path is not None
-            else args.strategy_command_gate_hidden_dim
-        )
+        if args.strategy_plan_worker_gate_path is not None:
+            gate_hidden_dim = args.strategy_plan_worker_gate_hidden_dim
+        elif args.policy_adapter_gate_path is not None:
+            gate_hidden_dim = args.policy_adapter_gate_hidden_dim
+        else:
+            gate_hidden_dim = args.strategy_command_gate_hidden_dim
         command_gate_network = CommandGateNetwork(net_key, hidden_dim=gate_hidden_dim)
         command_gate_network = eqx.tree_deserialise_leaves(gate_path, command_gate_network)
     opponent_network = None
@@ -1436,13 +1517,16 @@ def main():
             f"candidates={args.strategy_command_gate_source_count}x{args.strategy_command_gate_target_count}"
         )
     if args.policy_adapter_path is not None:
-        gate_label = (
-            f", finish-threshold={args.policy_adapter_finish_threshold:g}"
-            if args.policy_adapter_finish_threshold >= 0.0
-            else ""
-        )
+        if args.policy_adapter_gate_threshold >= 0.0:
+            gate_label = f", learned-gate={args.policy_adapter_gate_threshold:g}"
+        elif args.policy_adapter_finish_threshold >= 0.0:
+            gate_label = f", finish-threshold={args.policy_adapter_finish_threshold:g}"
+        else:
+            gate_label = ""
         print(f"Policy adapter: {args.policy_adapter_path}")
         print(f"Policy adapter: scale={args.policy_adapter_scale:g}{gate_label}")
+        if args.policy_adapter_gate_threshold >= 0.0:
+            print(f"Policy adapter gate: {args.policy_adapter_gate_path}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -1507,6 +1591,7 @@ def main():
                     args.strategy_command_gate_target_count,
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
+                    args.policy_adapter_gate_threshold,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -1545,6 +1630,7 @@ def main():
                     args.strategy_command_gate_target_count,
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
+                    args.policy_adapter_gate_threshold,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -1609,6 +1695,9 @@ def main():
         "policy_adapter_path": args.policy_adapter_path,
         "policy_adapter_scale": args.policy_adapter_scale,
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,
+        "policy_adapter_gate_path": args.policy_adapter_gate_path,
+        "policy_adapter_gate_threshold": args.policy_adapter_gate_threshold,
+        "policy_adapter_gate_hidden_dim": args.policy_adapter_gate_hidden_dim,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

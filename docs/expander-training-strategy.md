@@ -9198,3 +9198,113 @@ Next step:
     contact/visible enemy features
   This should replace threshold sweeps.
 ```
+
+## 2026-06-19: Learned Policy Adapter Gate Probe
+
+Implemented a learned gate for the same policy-head adapter delta:
+
+```text
+adaptive_policy_adapter_gate_supervised.py
+  inputs:
+    base policy logits
+    adapter policy logits
+    adapter finish probability
+    visible enemy density
+    owned/enemy army log density
+    active fraction
+    adapter-changes-action flag
+    seat
+
+evaluate_adaptive_policy.py
+  --policy-adapter-gate-path <gate.eqx>
+  --policy-adapter-gate-threshold <p>
+```
+
+Training setup:
+
+```text
+base:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+
+adapter:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-p0mix-v0/generals-adaptive-midgame-contact-searchwin-safev3-policyhead-p0mix-v0.eqx
+
+positive data:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-safev3-p0-v0/*.npz
+  positive rows require:
+    path contains fixed-v5-safev3-p0
+    adapter greedy top1 equals rollout-search teacher action
+    search_best_outcome == win
+
+negative/protection data:
+  runs/adaptive-midgame-contact-searchwin-expander-safev3-v0/*.npz
+```
+
+Probe v0 trained only on rows where the adapter changed the base greedy top1:
+
+```text
+rows:       53,922
+changed:       175
+positives:       4
+positive rate among examples: 2.29%
+```
+
+This fit the tiny offline label set but overgeneralized at evaluation time,
+because most states where the adapter changes the stochastic distribution but
+not greedy top1 were unseen by the gate.
+
+Results:
+
+```text
+v0 learned gate, threshold 0.5
+
+fixed-v5 max250, 256 games/seat, seed 88420:
+  p0: 13.28%
+  p1: 12.11%
+  min: 12.11%
+
+Expander 8/12/16, 128 games/row, seed 88440:
+  8p0: 75.00%
+  8p1: 69.53%
+  12p0: 85.16%
+  12p1: 81.25%
+  16p0: 74.22%
+  16p1: 75.78%
+  min: 69.53%
+```
+
+Probe v1 added `--keep-unchanged-negatives` so states where base and adapter
+share greedy top1 are explicitly negative:
+
+```text
+examples:   53,922
+changed:       175
+positives:       4
+positive rate: 0.01%
+final P+: ~0.154
+final P-: ~0.001
+```
+
+Single calibrated evaluation at threshold `0.1`:
+
+```text
+fixed-v5 max250, 256 games/seat, seed 88480:
+  p0: 11.33%
+  p1:  9.38%
+  min:  9.38%
+```
+
+Conclusion:
+
+```text
+Learned adapter gating is wired and GPU-trainable, but the current p0mix
+adapter is too weak/sparse as a delta source:
+  it changes greedy top1 on only 175 / 53,922 saved rows
+  decisive positive gate labels are only 4 rows
+  v0 keeps fixed-v5 signal but hurts Expander
+  v1 learns to suppress the adapter but loses fixed-v5 gain
+
+Do not sweep learned-gate thresholds. The next useful step is stronger adapter
+data or a policy delta trained to expose more decisive state-conditioned
+differences, then re-use this gate machinery.
+```

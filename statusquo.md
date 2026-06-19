@@ -1064,3 +1064,9 @@
 - **Status:** Completed
 - **Next Steps:** Train a learned adapter gate from rollout replacement outcomes using finish/outcome, policy-delta, seat, and contact features. Do not sweep static thresholds as the main path.
 - **Context:** `scale=1.0` no-gate reproduced p0mix fixed-v5 behavior (`12.50%` min), validating the delta implementation. Hard finish-gated p0mix adapter reached fixed-v5 max250 256-row min `12.11%` and Expander 128-row min `72.66%`, recovering most Expander loss from full p0mix (`70.31%`) but still below promotion.
+
+## [2026-06-19 22:03] Learned Policy Adapter Gate Probe
+- **Changes:** Added `adaptive_policy_adapter_gate_supervised.py` and evaluator support for `--policy-adapter-gate-path/--policy-adapter-gate-threshold`; documented the learned-gate usage and GPU probe results.
+- **Status:** Completed
+- **Next Steps:** Do not sweep learned gate thresholds. Train a stronger policy-delta adapter or collect richer decisive adapter data before reusing the gate machinery.
+- **Context:** v0 trained on only 175 changed-action examples with 4 positives; fixed-v5 max250 256-row held `12.11%` min but Expander 128-row fell to `69.53%`. v1 added unchanged-action negatives (`53,922` examples, still only 4 positives); threshold `0.1` fell to fixed-v5 min `9.38%`. The current p0mix adapter is too sparse a delta source for learned gating.
