@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from examples.play_web import args_to_config, parse_args
 from generals.web.server import create_app
@@ -71,3 +72,16 @@ def test_parse_web_args_accepts_human_model_path_and_server_options(monkeypatch)
     assert config.human_player == 1
     assert config.auto_tick is False
     assert config.preview_top_k == 5
+
+
+def test_static_browser_assets_and_real_asset_mounts_exist():
+    app = create_app(default_config=WebSessionConfig(model_path="model.eqx"))
+    paths = {getattr(route, "path", None) for route in app.routes}
+    static_root = Path("generals/web/static")
+
+    assert (static_root / "index.html").is_file()
+    assert (static_root / "styles.css").is_file()
+    assert (static_root / "app.js").is_file()
+    assert "/static" in paths
+    assert "/assets/images" in paths
+    assert "/assets/fonts" in paths

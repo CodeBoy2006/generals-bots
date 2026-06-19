@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .session import WebGameSession, WebSessionConfig
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+ASSET_ROOT = Path(__file__).resolve().parents[1] / "assets"
 
 
 def create_app(default_config: WebSessionConfig) -> FastAPI:
@@ -22,6 +23,8 @@ def create_app(default_config: WebSessionConfig) -> FastAPI:
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/assets/images", StaticFiles(directory=ASSET_ROOT / "images"), name="asset-images")
+    app.mount("/assets/fonts", StaticFiles(directory=ASSET_ROOT / "fonts"), name="asset-fonts")
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -54,7 +57,7 @@ def create_app(default_config: WebSessionConfig) -> FastAPI:
                 else:
                     try:
                         command = await asyncio.wait_for(websocket.receive_json(), timeout=timeout)
-                    except TimeoutError:
+                    except asyncio.TimeoutError:
                         snapshot = session.tick(time.monotonic())
                     else:
                         snapshot = session.submit_client_command(command)

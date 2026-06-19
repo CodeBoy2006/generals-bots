@@ -309,3 +309,9 @@
 - **Status:** Completed
 - **Next Steps:** Build the static Canvas browser UI and wire it to the `/ws/game` snapshot and command protocol.
 - **Context:** The server creates game sessions only after WebSocket connection, so importing the CLI or creating the app does not start pygame rendering or load checkpoints.
+
+## [2026-06-19 20:35] Web Renderer Browser UI
+- **Changes:** Added the static browser Canvas UI, WebSocket client, responsive HUD/control layout, real asset mounts for existing Generals images/fonts, and static asset coverage in tests.
+- **Status:** Completed
+- **Next Steps:** Update README and the Chinese manual with the new browser entry point, then run full regression and browser smoke verification.
+- **Context:** The page uses the `/ws/game` snapshot protocol directly, hides fogged cells on the client, and sends semantic commands for select, move, pass, cancel, split, auto tick, and restart.
