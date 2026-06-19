@@ -1106,3 +1106,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop this inference-time source/target replacement route. Use midgame decisive trajectories to update the U-Net main policy/representation, or train a plan-conditioned executor only after command proposal quality is stronger.
 - **Context:** Source/target Q proposal stayed weak offline (`pair top1 7.0%`, pair corr `+0.021`). The gate fit replacement labels moderately (`23,753` examples, `8.42%` positives, final weighted acc `69.2%`), but fixed-v5 max250 seed `86640` collapsed from gate-off min `10.94%` to gate-on min `0.00%`.
+
+## [2026-06-20 00:24] Midgame Decisive Representation Probe
+- **Changes:** Trained/evaluated ignored GPU run `runs/adaptive-midgame-decisive-repr-v0/` and documented the result in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not sweep LR/epochs on this mixed filtered data. Next useful step is stronger data selection: isolate base-draw/search-win or true search-controlled winning windows with clearer finish labels before another main-policy update.
+- **Context:** `repr-v0` used `update_scope=all`, KL `10.0`, CE `0.05`, finish/outcome/belief/intent losses, and high-gap midgame/contact rows. It regressed fixed-v5 max250 128-row seed `86640` from base min `10.94%` to `7.81%`; Expander smoke 64-row seed `86680` min was `71.88%`.

@@ -10275,3 +10275,99 @@ useful route should train the U-Net main policy/representation from midgame
 decisive trajectories or train a plan-conditioned executor only after command
 quality is independently stronger.
 ```
+
+## 2026-06-20 Midgame Decisive Representation Probe v0
+
+After the command-gate collapse, tested the fastest direct alternative: update
+the U-Net main representation from midgame/contact/high-gap decisive rows while
+keeping the safe v3 policy close with a strong KL anchor.
+
+```text
+run:
+  runs/adaptive-midgame-decisive-repr-v0/
+
+init:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+
+data:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-v1/
+  runs/adaptive-midgame-draw-fixed-v5-v0/
+  runs/adaptive-midgame-contact-searchwin-expander-12-16-v0/
+  runs/adaptive-midgame-contact-searchwin-expander-safev3-v0/
+
+filters:
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+  search_gap >= 0.25
+
+sampling:
+  max_samples_per_shard = 2000
+  balance_strata = size-seat-domain
+  samples = 8,712 after balancing
+
+training:
+  update_scope = all
+  policy_kl = 10.0
+  action_ce = 0.05
+  action_ce_weight_mode = search-best-win
+  finish = 0.50, balanced, multi-horizon
+  outcome = 0.40, balanced, label_source=search-best
+  belief = 0.25
+  intent = 0.20
+  lr = 3e-6
+  epochs = 4
+```
+
+Training moved intent/outcome but not finish:
+
+```text
+epoch 1 -> 4:
+  loss     1.3018 -> 1.2199
+  intent   52.1%  -> 59.5%
+  finish   46.5%  -> 46.6%
+  outcome  48.2%  -> 52.9%
+  belief   0.0740 -> 0.0733
+  KL       0.0143 -> 0.0107
+  ActCE    2.7298 -> 2.7974
+  ActAcc   29.3%  -> 29.2%
+```
+
+Gameplay:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 86640:
+  base v3 / feature-control:
+    p0 11.72%
+    p1 10.94%
+    min 10.94%
+
+  repr-v0:
+    p0  7.81%
+    p1  9.38%
+    min  7.81%
+
+Expander 8/12/16, 64 games/row, seed 86680:
+  repr-v0:
+    8p0  71.88%
+    8p1  82.81%
+    12p0 75.00%
+    12p1 85.94%
+    16p0 81.25%
+    16p1 73.44%
+    min 71.88%
+```
+
+Conclusion:
+
+```text
+Do not promote `adaptive-midgame-decisive-repr-v0`.
+
+This result rules out the conservative low-LR all-trunk version of midgame
+decisive imitation on the current mixed filtered data. Even with low action CE
+and high KL, the model does not improve finishability and loses fixed-v5 p0.
+The useful next step is data-quality, not a LR/epoch sweep: collect or isolate
+true search-controlled winning windows with stronger finish labels, especially
+states where the base draws but the teacher/search wins, then train the main
+policy on that contrast.
+```
