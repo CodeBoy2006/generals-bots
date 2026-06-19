@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 import jax.numpy as jnp
@@ -40,6 +42,29 @@ class WebSessionConfig:
     seed: int = 43
     preview_top_k: int = 3
     ai_preview: bool = True
+    policy_input: str = "auto"
+    model_0_policy_input: str = "auto"
+    model_1_policy_input: str = "auto"
+    input_channels: int | None = None
+    model_0_input_channels: int | None = None
+    model_1_input_channels: int | None = None
+    search_policy: bool = False
+    opponent_search_policy: bool = False
+    search_rollout_policy_mode: str = "sample"
+    search_top_k: int = 4
+    search_rollout_steps: int = 16
+    search_rollouts_per_action: int = 4
+    search_army_weight: float = 12.0
+    search_land_weight: float = 8.0
+    search_prior_weight: float = 0.01
+    mountain_density_min: float = 0.12
+    mountain_density_max: float = 0.22
+    num_cities_min: int = 4
+    num_cities_max: int = 8
+    min_generals_distance: int | None = None
+    max_generals_distance: int | None = None
+    city_army_min: int = 40
+    city_army_max: int = 51
 
 
 class WebGameSession:
@@ -48,7 +73,8 @@ class WebGameSession:
     def __init__(
         self,
         *,
-        initial_grid: jnp.ndarray,
+        initial_grid: jnp.ndarray | None = None,
+        grid_factory: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         names: list[str],
         colors: list[str],
         key: jnp.ndarray,
@@ -64,7 +90,10 @@ class WebGameSession:
         preview_top_k: int = 3,
         ai_preview: bool = False,
     ):
+        if initial_grid is None and grid_factory is None:
+            raise ValueError("initial_grid or grid_factory is required")
         self.initial_grid = initial_grid
+        self.grid_factory = grid_factory
         self.names = names
         self.colors = colors
         self.key = key
@@ -88,6 +117,97 @@ class WebGameSession:
         self.last_tick = 0.0
         self.policy_preview: PolicyPreview | None = None
         self.new_game(message="Ready")
+
+    @classmethod
+    def from_config(cls, config: WebSessionConfig) -> "WebGameSession":
+        """Build a session from CLI/server configuration."""
+        from examples.play_against_model import make_grid, make_gui_agent, make_player_names, make_search_config
+
+        args = _config_namespace(config)
+        key = jrandom.PRNGKey(config.seed)
+        names = make_player_names(config.human_player, machine_vs_machine=config.machine_vs_machine)
+        colors = ["#dc3737", "#285adc"]
+        search_config = make_search_config(args)
+
+        def grid_factory(map_key: jnp.ndarray) -> jnp.ndarray:
+            return make_grid(args, map_key)
+
+        if config.machine_vs_machine:
+            model_path = config.model_0_path or config.model_path
+            opponent_model_path = config.model_1_path or model_path
+            if model_path is None:
+                raise ValueError("model_path or model_0_path is required")
+            if opponent_model_path is None:
+                raise ValueError("model_1_path or opponent_model_path is required")
+            opponent_policy_mode = config.opponent_policy_mode or config.policy_mode
+            machine_agents = (
+                make_gui_agent(
+                    model_path,
+                    config.grid_size,
+                    config.policy_mode,
+                    names[0],
+                    config.model_0_policy_input,
+                    config.model_0_input_channels,
+                    config.search_policy,
+                    search_config,
+                ),
+                make_gui_agent(
+                    opponent_model_path,
+                    config.grid_size,
+                    opponent_policy_mode,
+                    names[1],
+                    config.model_1_policy_input,
+                    config.model_1_input_channels,
+                    config.opponent_search_policy,
+                    search_config,
+                ),
+            )
+            return cls(
+                grid_factory=grid_factory,
+                names=names,
+                colors=colors,
+                key=key,
+                human_player=config.human_player,
+                machine_vs_machine=True,
+                machine_agents=machine_agents,
+                policy_agent=machine_agents[0],
+                preview_player=0,
+                auto_tick=config.auto_tick,
+                tick_rate=config.tick_rate,
+                max_steps=config.max_steps,
+                preview_top_k=config.preview_top_k,
+                ai_preview=config.ai_preview,
+            )
+
+        model_path = config.model_path or config.model_0_path
+        if model_path is None:
+            raise ValueError("model_path or model_0_path is required")
+        model_agent = make_gui_agent(
+            model_path,
+            config.grid_size,
+            config.policy_mode,
+            "PPO Model",
+            config.model_0_policy_input,
+            config.model_0_input_channels,
+            config.search_policy,
+            search_config,
+        )
+        return cls(
+            grid_factory=grid_factory,
+            names=names,
+            colors=colors,
+            key=key,
+            human_player=config.human_player,
+            machine_vs_machine=False,
+            model_agent=model_agent,
+            policy_agent=model_agent,
+            preview_player=1 - config.human_player,
+            auto_tick=config.auto_tick,
+            tick_rate=config.tick_rate,
+            max_steps=config.max_steps,
+            preview_top_k=config.preview_top_k,
+            ai_preview=config.ai_preview,
+        )
 
     @classmethod
     def for_testing(
@@ -137,7 +257,12 @@ class WebGameSession:
 
     def new_game(self, message: str = "Restarted") -> dict[str, Any]:
         """Reset this session to its initial grid."""
-        self.state = create_initial_state(self.initial_grid)
+        if self.grid_factory is None:
+            grid = self.initial_grid
+        else:
+            self.key, map_key = jrandom.split(self.key)
+            grid = self.grid_factory(map_key)
+        self.state = create_initial_state(grid)
         self.info = game.get_info(self.state)
         self.selected_cell = None
         self.split_enabled = False
@@ -344,3 +469,28 @@ class WebGameSession:
             (0, -1): 2,
             (0, 1): 3,
         }.get((target_row - row, target_col - col))
+
+
+def _config_namespace(config: WebSessionConfig) -> SimpleNamespace:
+    effective_min_generals_distance = config.min_generals_distance
+    if effective_min_generals_distance is None:
+        effective_min_generals_distance = max(3, config.grid_size // 2)
+    return SimpleNamespace(
+        grid_size=config.grid_size,
+        map_generator=config.map_generator,
+        mountain_density_min=config.mountain_density_min,
+        mountain_density_max=config.mountain_density_max,
+        num_cities_min=config.num_cities_min,
+        num_cities_max=config.num_cities_max,
+        effective_min_generals_distance=effective_min_generals_distance,
+        max_generals_distance=config.max_generals_distance,
+        city_army_min=config.city_army_min,
+        city_army_max=config.city_army_max,
+        search_rollout_policy_mode=config.search_rollout_policy_mode,
+        search_top_k=config.search_top_k,
+        search_rollout_steps=config.search_rollout_steps,
+        search_rollouts_per_action=config.search_rollouts_per_action,
+        search_army_weight=config.search_army_weight,
+        search_land_weight=config.search_land_weight,
+        search_prior_weight=config.search_prior_weight,
+    )

@@ -303,3 +303,9 @@
 - **Status:** Completed
 - **Next Steps:** Execute Task 1 first: write failing protocol tests for JSON-safe snapshots, then implement `generals/web/schemas.py`.
 - **Context:** The plan keeps pygame compatibility as an explicit verification gate and treats Python/JAX as authoritative for game state, move validation, PPO inference, and rollout search.
+
+## [2026-06-19 20:30] Web Renderer Server Entry
+- **Changes:** Added the FastAPI/Uvicorn web server entry point, browser CLI argument parsing, expanded web session configuration, and server/CLI protocol tests.
+- **Status:** Completed
+- **Next Steps:** Build the static Canvas browser UI and wire it to the `/ws/game` snapshot and command protocol.
+- **Context:** The server creates game sessions only after WebSocket connection, so importing the CLI or creating the app does not start pygame rendering or load checkpoints.
