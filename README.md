@@ -687,6 +687,8 @@ Use `adaptive_strategy_supervised.py --balance-strata size-seat` when a filtered
 
 `adaptive_strategy_supervised.py --update-scope strategy-value-heads` is the middle setting between frozen-head probes and full policy coupling. It keeps trunk/policy/action logits frozen, but lets the strategy auxiliary heads, optional outcome head, and shared pooled value bottleneck (`value_linear1`) update. Use it for search-best finish/outcome representation work where the last-layer heads alone underfit, but a full `--update-scope all` policy update would risk seat/size regressions.
 
+`adaptive_strategy_supervised.py --update-scope policy-heads` is a narrower policy-coupled mode for decisive imitation probes. It freezes the U-Net/CNN trunk and value heads, but updates the primitive policy output head (`policy_conv`/`pass_linear`) plus the strategy auxiliary heads and optional outcome head. This is useful when full-trunk imitation shows fixed-opponent signal but causes Expander forgetting; keep a positive `--policy-kl-weight` so the output head stays anchored to the warm-start policy.
+
 This is a representation-learning step, not a gameplay promotion step. For ordinary trajectory labels, use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head. Search-best labels are a separate probe because they supervise local search outcome, not the final rollout winner.
 
 For a cautious policy-coupled follow-up, start from a checkpoint that already has trained strategy heads, cap each shard to avoid long fixed-v5 rollouts dominating the batch, and require a positive policy KL anchor:

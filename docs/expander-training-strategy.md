@@ -8825,3 +8825,136 @@ the supervised update aware of fixed-v5 p0 as the weak target:
   4. consider a small policy-head-only adapter or LoRA-style delta instead of
      updating the whole U-Net trunk.
 ```
+
+## 2026-06-19: Policy-Head-Only Decisive Imitation Probe
+
+The previous safe-v3 search-win runs showed a real fixed-v5 signal, but full
+U-Net updates moved Expander rows too much. I added:
+
+```text
+adaptive_strategy_supervised.py --update-scope policy-heads
+```
+
+This freezes the shared trunk and value heads, while allowing only
+`policy_conv`, `pass_linear`, the strategy auxiliary heads, and the optional
+outcome head to update. The goal was to test whether decisive midgame imitation
+can enter the primitive policy without rewriting the U-Net representation.
+
+Mixed-domain policy-head run:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-v0/
+data:
+  fixed-v5-safev3-v0 + expander-safev3-v0
+balance:
+  size-seat-domain
+lr:
+  2e-6
+final:
+  KL 0.0001
+  action CE 2.8122 -> 2.7898
+  finish acc 46.6% -> 52.3%
+  outcome acc 43.9% -> 46.3%
+```
+
+128-row smoke:
+
+```text
+fixed-v5 max250 seed88240:
+  p0 win  7.81%, draw 54.69%
+  p1 win 10.94%, draw 50.00%
+  min 7.81%
+
+Expander seed88260:
+  8p0 74.22%, 8p1 71.88%
+  12p0 78.91%, 12p1 87.50%
+  16p0 79.69%, 16p1 75.00%
+  min 71.88%
+```
+
+This did not beat the safe-v3 baseline strongly enough. Domain-balanced
+Expander protection preserved more rows than full mixed update, but fixed-v5
+gain was too small.
+
+Fixed-v5-only policy-head run:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-fixed-v0/
+data:
+  fixed-v5-safev3-v0 only
+balance:
+  size-seat
+lr:
+  2e-6
+final:
+  KL 0.0003
+  action CE 2.9029 -> 2.8532
+  outcome acc 39.7% -> 50.6%
+```
+
+128-row smoke:
+
+```text
+fixed-v5 max250 seed88240:
+  p0 win  8.59%, draw 52.34%
+  p1 win 15.62%, draw 47.66%
+  min 8.59%
+
+Expander seed88260:
+  8p0 75.00%, 8p1 72.66%
+  12p0 85.16%, 12p1 85.94%
+  16p0 76.56%, 16p1 73.44%
+  min 72.66%
+```
+
+256-row fixed-v5 same-seed triage:
+
+```text
+safe-v3 baseline, seed88340:
+  p0 win 10.55%, draw 50.00%
+  p1 win 11.33%, draw 50.39%
+  min 10.55%
+
+policyhead-fixed-v0, seed88340:
+  p0 win 12.11%, draw 48.83%
+  p1 win 12.50%, draw 48.05%
+  min 12.11%
+```
+
+This is a real but modest positive signal: fixed-v5 improves by about 1.6pp on
+the matched 256-row gate, while 128-row Expander only drops from the recent
+safe-v3 smoke baseline `73.44%` to `72.66%`. It is not a promotion candidate,
+but it is the cleanest evidence so far that fixed-v5 decisive imitation can be
+inserted with much less Expander forgetting when the trunk is frozen.
+
+A stronger output-head single point was negative:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-fixed-v1/
+change:
+  lr 1e-5, same data/loss
+final:
+  KL 0.0023
+  action CE 2.8945 -> 2.7552
+
+fixed-v5 max250 256-row seed88340:
+  p0 win 10.16%, draw 54.69%
+  p1 win  8.98%, draw 48.44%
+  min 8.98%
+```
+
+Conclusion:
+
+```text
+policy-head-only fixed-v5 imitation is useful only as a small adapter.
+Pushing the output head harder improves offline CE but breaks seat balance.
+Do not promote v0/v1. Keep safe-v3 as active base.
+
+Next useful step:
+  train a small gated/adapter delta or LoRA-style policy head that activates
+  only in fixed-v5-like midgame/contact states, or collect cleaner p0 decisive
+  trajectories. Avoid more global CE/KL sweeps.
+```

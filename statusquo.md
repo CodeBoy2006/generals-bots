@@ -1046,3 +1046,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v0/v1/v2 or blindly sweep CE/KL/domain ratio. Next iteration should target fixed-v5 p0 specifically while keeping domain-balanced Expander protection, or test a smaller policy-head/delta update instead of full U-Net trunk updates.
 - **Context:** Fixed-v5-only v0 improved fixed-v5 128-row min `7.03% -> 9.38%` but regressed Expander min `73.44% -> 66.41%`. Mixed v1 recovered Expander to `69.53%` but fixed-v5 min was only `7.81%`. Domain-balanced v2 recovered Expander further to `71.09%` but fixed-v5 p0 fell, min `6.25%`. Current safe checkpoint remains v3.
+
+## [2026-06-19 21:28] Policy-Head Decisive Imitation Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --update-scope policy-heads`, which freezes the trunk/value heads while updating `policy_conv`, `pass_linear`, strategy auxiliary heads, and optional outcome head. Documented the mode in README/manual and logged GPU policy-head runs.
+- **Status:** Completed
+- **Next Steps:** Keep safe-v3 as the active base. Treat `policyhead-fixed-v0` as a diagnostic only; next useful direction is a gated/adapter-style policy delta for fixed-v5-like midgame/contact states or cleaner p0 decisive trajectories, not stronger global CE/KL sweeps.
+- **Context:** Mixed-domain policy-head v0 reached fixed-v5 max250 128-row min `7.81%` and Expander min `71.88%`. Fixed-v5-only policyhead v0 reached matched 256-row fixed-v5 min `12.11%` vs safe-v3 `10.55%`, with 128-row Expander min `72.66%`. Stronger lr `1e-5` policyhead-fixed-v1 regressed fixed-v5 256-row min to `8.98%`, so pushing the output head harder is not reliable.
