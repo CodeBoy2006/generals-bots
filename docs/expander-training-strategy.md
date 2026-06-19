@@ -9837,3 +9837,221 @@ to collect 12/16-compatible winning-trajectory Worker/gate data or train the
 gate on explicit replacement outcome/Q labels, then use max_grid_size guards
 until each size has in-domain evidence.
 ```
+
+## 2026-06-19 - Strategy-worker row filters and grid-range gates
+
+Code changes:
+
+```text
+adaptive_plan_worker_supervised.py:
+  added strategy-row filters:
+    --require-outcome-win
+    --require-search-best-win
+    --require-finish-within-250
+  prints kept / total rows and stores the counts in dataset stats.
+
+adaptive_command_gate_supervised.py:
+  added strategy-worker filters:
+    --filter-outcome-win
+    --filter-search-best-win
+    --filter-finish-within-250
+
+adaptive_command_gate.py / evaluate_adaptive_policy.py:
+  added active_area_fraction to command-gate features.
+  evaluator reads sidecar feature_names, so old 12-feature gates and new
+  13-feature gates both load.
+
+evaluate_adaptive_policy.py:
+  added --strategy-plan-worker-min-grid-size.
+  min/max grid guards now define a size range for both Plan-Worker rerank bias
+  and gated replacement.
+```
+
+Mixed 8/12/16 Worker/gate:
+
+```text
+worker:
+  runs/adaptive-searchwin-trajectory-worker-mixed-v1/
+  data:
+    fixed-v5 winning trajectories
+    Expander 12/16 winning trajectories
+  filters:
+    outcome_win + finish_within_250
+  kept:
+    53,422 / 61,522 rows
+  final:
+    Act 34.7%
+    Src 67.5%
+    Dir 48.7%
+
+gate v1:
+  runs/adaptive-searchwin-trajectory-worker-gate-mixed-v1/
+  changed examples 17,044
+  positive 32.01%
+  final acc 53.5%
+
+gate v2:
+  runs/adaptive-searchwin-trajectory-worker-gate-mixed-v2/
+  same data, plus active_area_fraction feature
+  final acc 54.2%
+```
+
+Mixed gameplay:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 89520:
+  mixed v1 max12:
+    p0 14.84%
+    p1 11.72%
+    min 11.72%
+  mixed v2 max12:
+    p0 19.53%
+    p1 11.72%
+    min 11.72%
+
+Expander 8/12/16, 128 games/row, seed 89900:
+  mixed v2 max12:
+    min 71.09%
+  same-seed base:
+    min 72.66%
+```
+
+The active-area feature slightly improves the offline gate and some fixed-v5
+p0 behavior, but it does not solve seat/size transfer. Mixed v1/v2 should not
+be promoted.
+
+8x8-only gate recheck:
+
+```text
+gate:
+  runs/adaptive-searchwin-trajectory-worker-gate-v1/
+
+Expander 8/12/16, max_grid_size=8:
+  128 games/row, seed 89900:
+    min 74.22%
+    same-seed base 72.66%
+
+  256 games/row, seed 90000:
+    8p0 74.61%
+    8p1 69.14%
+    12p0 80.08%
+    12p1 79.30%
+    16p0 77.34%
+    16p1 75.00%
+    min 69.14%
+
+same 256 seed base:
+  8p0 72.27%
+  8p1 73.05%
+  12p0 80.08%
+  12p1 79.30%
+  16p0 77.34%
+  16p1 75.00%
+  min 72.27%
+```
+
+The 8x8-only gate is a fixed-v5 diagnostic, not an Expander promotion. It can
+flip 8p0/8p1 under larger evaluation and should stay behind a size guard.
+
+Protect Worker/gate with Expander rows:
+
+```text
+worker:
+  runs/adaptive-searchwin-trajectory-worker-protect-v2/
+  data:
+    fixed-v5 winning trajectories
+    Expander all-size protection trajectories
+    Expander 12/16 trajectories
+  filters:
+    outcome_win + finish_within_250
+  kept before sampling:
+    73,624 / 84,883 rows
+  trained examples:
+    60,000
+  final:
+    Act 33.7%
+    Src 67.2%
+    Dir 47.7%
+
+gate:
+  runs/adaptive-searchwin-trajectory-worker-gate-protect-v3/
+  kept:
+    73,657 / 84,883 rows
+  changed examples:
+    25,317
+  positive:
+    30.63%
+  final acc:
+    53.7%
+  feature_dim:
+    13
+```
+
+Protect gameplay without min-grid guard:
+
+```text
+Expander 8/12/16, 128 games/row, seed 89900, max_grid_size=16:
+  8p0 78.12%
+  8p1 71.09%
+  12p0 82.81%
+  12p1 82.81%
+  16p0 82.03%
+  16p1 73.44%
+  min 71.09%
+
+same-seed base:
+  min 72.66%
+```
+
+Protect gameplay with grid-range guard:
+
+```text
+Expander 8/12/16, 128 games/row, seed 89900:
+  --strategy-plan-worker-min-grid-size 12
+  --strategy-plan-worker-max-grid-size 16
+
+  8p0 72.66%
+  8p1 75.00%
+  12p0 82.81%
+  12p1 82.81%
+  16p0 82.03%
+  16p1 73.44%
+  min 72.66%
+
+Expander 8/12/16, 256 games/row, seed 90000:
+  --strategy-plan-worker-min-grid-size 12
+  --strategy-plan-worker-max-grid-size 16
+
+  8p0 72.27%
+  8p1 73.05%
+  12p0 80.08%
+  12p1 80.08%
+  16p0 77.73%
+  16p1 76.17%
+  min 72.27%
+
+same 256 seed base:
+  8p0 72.27%
+  8p1 73.05%
+  12p0 80.08%
+  12p1 79.30%
+  16p0 77.34%
+  16p1 75.00%
+  min 72.27%
+```
+
+Conclusion:
+
+```text
+The protect Worker/gate learns useful 12/16 replacements, but still perturbs
+8x8 enough to lose the six-row minimum unless a min-grid guard disables it on
+8x8. With min=12,max=16, 8x8 exactly returns to base and the larger rows gain
+small same-seed improvements, but the overall minimum is still base-limited by
+8p0.
+
+This is not a promotion. It is evidence that Plan-Worker inference needs
+explicit domain guards and better outcome/Q labels. The next useful step is
+not another static threshold sweep; collect high-gap midgame decisive rows and
+train source/target outcome-Q or trajectory imitation so the main U-Net policy
+learns the decisive behavior directly.
+```

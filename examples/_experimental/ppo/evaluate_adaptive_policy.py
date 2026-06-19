@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
-from adaptive_command_gate import CommandGateNetwork
+from adaptive_command_gate import COMMAND_GATE_FEATURE_DIM, CommandGateNetwork
 from adaptive_common import (
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
@@ -109,6 +109,7 @@ def _policy_action(
     strategy_command_gate_threshold: float,
     strategy_command_gate_source_count: int,
     strategy_command_gate_target_count: int,
+    command_gate_feature_dim: int,
     policy_adapter_scale: float,
     policy_adapter_finish_threshold: float,
     policy_adapter_gate_threshold: float,
@@ -213,6 +214,7 @@ def _policy_action(
             index,
             policy_player,
             network.pad_size,
+            command_gate_feature_dim,
             strategy_command_gate_source_count,
             strategy_command_gate_target_count,
         )
@@ -228,6 +230,7 @@ def _policy_action(
         worker_target_index = jnp.argmax(worker_target_scores.reshape(-1))
         worker_features = command_gate_features(
             obs_arr,
+            active,
             plan_worker_policy_logits,
             aux.action_q_values,
             aux.finish_logits,
@@ -239,6 +242,7 @@ def _policy_action(
             index,
             policy_player,
             network.pad_size,
+            command_gate_feature_dim,
         )
         worker_probability = jax.nn.sigmoid(command_gate_network(worker_features))
         worker_legal = plan_worker_policy_logits[worker_index] > -1.0e8
@@ -475,6 +479,7 @@ def strategy_command_gate_index(
     current_index: jnp.ndarray,
     policy_player: int,
     pad_size: int,
+    command_gate_feature_dim: int,
     source_count: int,
     target_count: int,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -492,6 +497,7 @@ def strategy_command_gate_index(
         action_index = adaptive_action_to_index(action, pad_size)
         features = command_gate_features(
             obs_arr,
+            active,
             policy_logits,
             action_q_values,
             finish_logits,
@@ -503,6 +509,7 @@ def strategy_command_gate_index(
             current_index,
             policy_player,
             pad_size,
+            command_gate_feature_dim,
         )
         probability = jax.nn.sigmoid(command_gate_network(features))
         legal = policy_logits[action_index] > -1.0e8
@@ -516,6 +523,7 @@ def strategy_command_gate_index(
 
 def command_gate_features(
     obs_arr: jnp.ndarray,
+    active: jnp.ndarray,
     policy_logits: jnp.ndarray,
     action_q_values: jnp.ndarray,
     finish_logits: jnp.ndarray,
@@ -527,6 +535,7 @@ def command_gate_features(
     current_index: jnp.ndarray,
     policy_player: int,
     pad_size: int,
+    feature_dim: int = COMMAND_GATE_FEATURE_DIM,
 ) -> jnp.ndarray:
     """Build the same command-gate feature vector used by offline training."""
     source_row = source_index // pad_size
@@ -546,9 +555,10 @@ def command_gate_features(
         finish_probability = jax.nn.softmax(finish_logits, axis=-1)[1]
     else:
         finish_probability = jax.nn.sigmoid(finish_logits[-1])
+    active_area_fraction = jnp.sum(active.astype(jnp.float32)) / jnp.asarray(pad_size * pad_size, dtype=jnp.float32)
     flat_source_logits = source_logits.reshape(-1)
     flat_target_logits = target_logits.reshape(-1)
-    return jnp.stack(
+    features = jnp.stack(
         [
             candidate_policy - current_policy,
             candidate_q - current_q,
@@ -562,8 +572,10 @@ def command_gate_features(
             candidate_q,
             current_q,
             jnp.asarray(policy_player, dtype=jnp.float32),
+            active_area_fraction,
         ]
     )
+    return features[:feature_dim]
 
 
 def strategy_plan_worker_obs(
@@ -748,10 +760,12 @@ def evaluate_batch(
     strategy_plan_worker_min_margin=-1.0,
     strategy_plan_worker_command_source=0,
     strategy_plan_worker_gate_threshold=-1.0,
+    strategy_plan_worker_min_grid_size=0,
     strategy_plan_worker_max_grid_size=0,
     strategy_command_gate_threshold=-1.0,
     strategy_command_gate_source_count=1,
     strategy_command_gate_target_count=1,
+    command_gate_feature_dim=COMMAND_GATE_FEATURE_DIM,
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
@@ -762,7 +776,8 @@ def evaluate_batch(
     initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
     initial_fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
     plan_worker_size_allowed = (
-        strategy_plan_worker_max_grid_size <= 0 or effective_size <= strategy_plan_worker_max_grid_size
+        (strategy_plan_worker_min_grid_size <= 0 or effective_size >= strategy_plan_worker_min_grid_size)
+        and (strategy_plan_worker_max_grid_size <= 0 or effective_size <= strategy_plan_worker_max_grid_size)
     )
     effective_plan_worker_rerank_scale = (
         strategy_plan_worker_rerank_scale if plan_worker_size_allowed else 0.0
@@ -882,6 +897,7 @@ def evaluate_batch(
                 strategy_command_gate_threshold,
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
+                command_gate_feature_dim,
                 policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
@@ -944,10 +960,12 @@ def evaluate_policy_opponent_batch(
     strategy_plan_worker_min_margin=-1.0,
     strategy_plan_worker_command_source=0,
     strategy_plan_worker_gate_threshold=-1.0,
+    strategy_plan_worker_min_grid_size=0,
     strategy_plan_worker_max_grid_size=0,
     strategy_command_gate_threshold=-1.0,
     strategy_command_gate_source_count=1,
     strategy_command_gate_target_count=1,
+    command_gate_feature_dim=COMMAND_GATE_FEATURE_DIM,
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
@@ -958,7 +976,8 @@ def evaluate_policy_opponent_batch(
     initial_history = jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
     initial_fog_memory = empty_adaptive_fog_memory(num_envs, pad_size)
     plan_worker_size_allowed = (
-        strategy_plan_worker_max_grid_size <= 0 or effective_size <= strategy_plan_worker_max_grid_size
+        (strategy_plan_worker_min_grid_size <= 0 or effective_size >= strategy_plan_worker_min_grid_size)
+        and (strategy_plan_worker_max_grid_size <= 0 or effective_size <= strategy_plan_worker_max_grid_size)
     )
     effective_plan_worker_rerank_scale = (
         strategy_plan_worker_rerank_scale if plan_worker_size_allowed else 0.0
@@ -1079,6 +1098,7 @@ def evaluate_policy_opponent_batch(
                 strategy_command_gate_threshold,
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
+                command_gate_feature_dim,
                 policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
@@ -1161,6 +1181,12 @@ def parse_args():
     parser.add_argument("--strategy-plan-worker-network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--strategy-plan-worker-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-plan-worker-min-margin", type=float, default=-1.0)
+    parser.add_argument(
+        "--strategy-plan-worker-min-grid-size",
+        type=int,
+        default=0,
+        help="If positive, only enable Plan-Worker inference on grid sizes at least this value.",
+    )
     parser.add_argument(
         "--strategy-plan-worker-max-grid-size",
         type=int,
@@ -1290,6 +1316,8 @@ def parse_args():
         parser.error("--strategy-plan-worker-min-margin must be non-negative, or -1 to disable")
     if args.strategy_plan_worker_min_margin >= 0.0 and args.strategy_plan_worker_rerank_scale <= 0.0:
         parser.error("--strategy-plan-worker-min-margin requires --strategy-plan-worker-rerank-scale")
+    if args.strategy_plan_worker_min_grid_size < 0:
+        parser.error("--strategy-plan-worker-min-grid-size must be non-negative")
     if args.strategy_plan_worker_max_grid_size < 0:
         parser.error("--strategy-plan-worker-max-grid-size must be non-negative")
     if args.strategy_plan_worker_gate_threshold >= 0.0 and args.strategy_plan_worker_gate_path is None:
@@ -1444,6 +1472,7 @@ def main():
             init_network_arch=args.strategy_plan_worker_network_arch,
         )
     command_gate_network = None
+    command_gate_feature_dim = COMMAND_GATE_FEATURE_DIM
     gate_path = args.strategy_command_gate_path or args.strategy_plan_worker_gate_path or args.policy_adapter_gate_path
     if gate_path is not None:
         if args.strategy_plan_worker_gate_path is not None:
@@ -1452,7 +1481,13 @@ def main():
             gate_hidden_dim = args.policy_adapter_gate_hidden_dim
         else:
             gate_hidden_dim = args.strategy_command_gate_hidden_dim
-        command_gate_network = CommandGateNetwork(net_key, hidden_dim=gate_hidden_dim)
+        gate_sidecar = Path(gate_path).with_suffix(".json")
+        if gate_sidecar.exists():
+            gate_metadata = json.loads(gate_sidecar.read_text(encoding="utf-8"))
+            feature_names = gate_metadata.get("feature_names")
+            if isinstance(feature_names, list) and feature_names:
+                command_gate_feature_dim = len(feature_names)
+        command_gate_network = CommandGateNetwork(net_key, input_dim=command_gate_feature_dim, hidden_dim=gate_hidden_dim)
         command_gate_network = eqx.tree_deserialise_leaves(gate_path, command_gate_network)
     opponent_network = None
     if args.opponent_policy_path is not None:
@@ -1526,6 +1561,8 @@ def main():
         )
         if args.strategy_plan_worker_min_margin >= 0.0:
             print(f"Plan worker: min_margin={args.strategy_plan_worker_min_margin:g}")
+        if args.strategy_plan_worker_min_grid_size > 0:
+            print(f"Plan worker: min_grid_size={args.strategy_plan_worker_min_grid_size}")
         if args.strategy_plan_worker_max_grid_size > 0:
             print(f"Plan worker: max_grid_size={args.strategy_plan_worker_max_grid_size}")
     if args.strategy_plan_worker_gate_threshold >= 0.0:
@@ -1536,8 +1573,11 @@ def main():
             f"hidden={args.strategy_plan_worker_gate_hidden_dim}, "
             f"command={args.strategy_plan_worker_command_source}"
         )
+        if args.strategy_plan_worker_min_grid_size > 0:
+            print(f"Plan worker gate: min_grid_size={args.strategy_plan_worker_min_grid_size}")
         if args.strategy_plan_worker_max_grid_size > 0:
             print(f"Plan worker gate: max_grid_size={args.strategy_plan_worker_max_grid_size}")
+        print(f"Plan worker gate: feature_dim={command_gate_feature_dim}")
     if args.strategy_command_gate_threshold >= 0.0:
         print(f"Command gate: {args.strategy_command_gate_path}")
         print(
@@ -1548,6 +1588,7 @@ def main():
             "Command gate: "
             f"candidates={args.strategy_command_gate_source_count}x{args.strategy_command_gate_target_count}"
         )
+        print(f"Command gate: feature_dim={command_gate_feature_dim}")
     if args.policy_adapter_path is not None:
         if args.policy_adapter_gate_threshold >= 0.0:
             gate_label = f", learned-gate={args.policy_adapter_gate_threshold:g}"
@@ -1559,6 +1600,7 @@ def main():
         print(f"Policy adapter: scale={args.policy_adapter_scale:g}{gate_label}")
         if args.policy_adapter_gate_threshold >= 0.0:
             print(f"Policy adapter gate: {args.policy_adapter_gate_path}")
+            print(f"Policy adapter gate: feature_dim={command_gate_feature_dim}")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -1618,10 +1660,12 @@ def main():
                     args.strategy_plan_worker_min_margin,
                     PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
                     args.strategy_plan_worker_gate_threshold,
+                    args.strategy_plan_worker_min_grid_size,
                     args.strategy_plan_worker_max_grid_size,
                     args.strategy_command_gate_threshold,
                     args.strategy_command_gate_source_count,
                     args.strategy_command_gate_target_count,
+                    command_gate_feature_dim,
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
                     args.policy_adapter_gate_threshold,
@@ -1658,10 +1702,12 @@ def main():
                     args.strategy_plan_worker_min_margin,
                     PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
                     args.strategy_plan_worker_gate_threshold,
+                    args.strategy_plan_worker_min_grid_size,
                     args.strategy_plan_worker_max_grid_size,
                     args.strategy_command_gate_threshold,
                     args.strategy_command_gate_source_count,
                     args.strategy_command_gate_target_count,
+                    command_gate_feature_dim,
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
                     args.policy_adapter_gate_threshold,
@@ -1717,6 +1763,7 @@ def main():
         "strategy_plan_worker_network_arch": args.strategy_plan_worker_network_arch,
         "strategy_plan_worker_rerank_scale": args.strategy_plan_worker_rerank_scale,
         "strategy_plan_worker_min_margin": args.strategy_plan_worker_min_margin,
+        "strategy_plan_worker_min_grid_size": args.strategy_plan_worker_min_grid_size,
         "strategy_plan_worker_max_grid_size": args.strategy_plan_worker_max_grid_size,
         "strategy_plan_worker_command_source": args.strategy_plan_worker_command_source,
         "strategy_plan_worker_gate_path": args.strategy_plan_worker_gate_path,

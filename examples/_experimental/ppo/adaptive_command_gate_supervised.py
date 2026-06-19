@@ -138,8 +138,9 @@ def _compute_strategy_worker_gate_outputs(
         source_indices = (jnp.minimum(worker_indices, pass_index - 1) % (pad_size * pad_size)).astype(jnp.int32)
         target_indices = jnp.argmax(jnp.where(active_batch, target_logits, -1.0e9).reshape(target_logits.shape[0], -1), axis=-1)
         target_indices = target_indices.astype(jnp.int32)
-        features = jax.vmap(command_gate_features, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None))(
+        features = jax.vmap(command_gate_features, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None))(
             obs_batch,
+            active_batch,
             logits,
             aux.action_q_values,
             aux.finish_logits,
@@ -248,6 +249,8 @@ def build_gate_examples(
         current_q = action_q[candidate_rows, current_actions]
         source_values = source_logits.reshape(num_rows, -1)[candidate_rows, candidate_sources]
         target_values = target_logits.reshape(num_rows, -1)[candidate_rows, candidate_targets]
+        active_area = np.sum(active[candidate_rows].reshape(candidate_rows.shape[0], -1), axis=1).astype(np.float32)
+        active_area = active_area / float(active.shape[-1] * active.shape[-1])
         features = np.stack(
             [
                 candidate_policy - current_policy,
@@ -262,6 +265,7 @@ def build_gate_examples(
                 candidate_q,
                 current_q,
                 seats[candidate_rows],
+                active_area,
             ],
             axis=1,
         ).astype(np.float32)
@@ -302,6 +306,9 @@ def build_strategy_worker_gate_examples(
     plan_worker_network,
     feature_batch_size: int,
     command_source: int,
+    filter_outcome_win: bool,
+    filter_search_best_win: bool,
+    filter_finish_within_250: bool,
     require_search_win: bool,
     include_finish250: bool,
     max_examples: int | None,
@@ -325,6 +332,7 @@ def build_strategy_worker_gate_examples(
         "positive": 0,
         "teacher_match": 0,
         "decisive": 0,
+        "kept": 0,
     }
     for path in paths:
         shard = np.load(path)
@@ -332,6 +340,27 @@ def build_strategy_worker_gate_examples(
         legal_mask = shard["legal_mask"].astype(np.bool_)
         active = shard["active"].astype(np.bool_)
         seats = shard["seat"].astype(np.float32)
+        keep_rows = np.ones((obs.shape[0],), dtype=np.bool_)
+        if filter_outcome_win:
+            if "outcome" not in shard:
+                raise KeyError(f"{path} is missing outcome for --filter-outcome-win")
+            keep_rows &= shard["outcome"].astype(np.int32) == OUTCOME_WIN
+        if filter_search_best_win:
+            if "search_best_outcome" not in shard:
+                raise KeyError(f"{path} is missing search_best_outcome for --filter-search-best-win")
+            keep_rows &= shard["search_best_outcome"].astype(np.int32) == OUTCOME_WIN
+        if filter_finish_within_250:
+            if "finish_within_250" not in shard:
+                raise KeyError(f"{path} is missing finish_within_250 for --filter-finish-within-250")
+            keep_rows &= shard["finish_within_250"].astype(np.float32) > 0.5
+        stats["rows"] += int(obs.shape[0])
+        stats["kept"] += int(np.sum(keep_rows))
+        if not np.any(keep_rows):
+            continue
+        obs = obs[keep_rows]
+        legal_mask = legal_mask[keep_rows]
+        active = active[keep_rows]
+        seats = seats[keep_rows]
         features, current_indices, worker_indices, _ = _compute_strategy_worker_gate_outputs(
             network,
             plan_worker_network,
@@ -342,14 +371,14 @@ def build_strategy_worker_gate_examples(
             feature_batch_size,
             command_source,
         )
-        teacher_actions = shard["teacher_action_index"].astype(np.int32)
+        teacher_actions = shard["teacher_action_index"].astype(np.int32)[keep_rows]
         if "search_best_outcome" not in shard:
             decisive = np.ones((obs.shape[0],), dtype=np.bool_)
         else:
             if require_search_win:
-                decisive = shard["search_best_outcome"].astype(np.int32) == OUTCOME_WIN
+                decisive = shard["search_best_outcome"].astype(np.int32)[keep_rows] == OUTCOME_WIN
                 if include_finish250 and "finish_within_250" in shard:
-                    decisive |= shard["finish_within_250"].astype(np.float32) > 0.5
+                    decisive |= shard["finish_within_250"].astype(np.float32)[keep_rows] > 0.5
             else:
                 decisive = np.ones((obs.shape[0],), dtype=np.bool_)
         pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
@@ -368,7 +397,6 @@ def build_strategy_worker_gate_examples(
         feature_chunks.append(kept_features)
         label_chunks.append(kept_labels)
         weight_chunks.append(weights)
-        stats["rows"] += int(obs.shape[0])
         stats["changed"] += int(np.sum(changed))
         stats["positive"] += int(np.sum(labels[keep] > 0.5))
         stats["teacher_match"] += int(np.sum(changed & teacher_match))
@@ -468,6 +496,9 @@ def parse_args():
         choices=PLAN_WORKER_COMMAND_SOURCE_NAMES,
         default="belief-main-stack",
     )
+    parser.add_argument("--filter-outcome-win", action="store_true")
+    parser.add_argument("--filter-search-best-win", action="store_true")
+    parser.add_argument("--filter-finish-within-250", action="store_true")
     parser.add_argument("--allow-nondecisive-worker-positives", action="store_true")
     parser.add_argument("--include-finish250-worker-positives", action="store_true")
     parser.add_argument("--model-path", default="runs/adaptive-command-gate/generals-adaptive-command-gate.eqx")
@@ -568,6 +599,9 @@ def main():
             plan_worker_network,
             args.feature_batch_size,
             PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.plan_worker_command_source],
+            args.filter_outcome_win,
+            args.filter_search_best_win,
+            args.filter_finish_within_250,
             not args.allow_nondecisive_worker_positives,
             args.include_finish250_worker_positives,
             args.max_examples,
@@ -598,9 +632,18 @@ def main():
         if stats:
             print(
                 "Worker stats:  "
-                f"rows={stats['rows']}, changed={stats['changed']}, "
+                f"rows={stats['rows']}, kept={stats.get('kept', stats['rows'])}, changed={stats['changed']}, "
                 f"teacher_match={stats['teacher_match']}, decisive={stats['decisive']}"
             )
+        filters = []
+        if args.filter_outcome_win:
+            filters.append("outcome=win")
+        if args.filter_search_best_win:
+            filters.append("search_best=win")
+        if args.filter_finish_within_250:
+            filters.append("finish<=250")
+        if filters:
+            print(f"Filters:      {', '.join(filters)}")
     print(f"Output:        {args.model_path}")
     print(f"Features:      {', '.join(COMMAND_GATE_FEATURE_NAMES)}")
     print()
@@ -641,6 +684,9 @@ def main():
         "feature_model_path": args.feature_model_path,
         "plan_worker_path": args.plan_worker_path,
         "plan_worker_command_source": args.plan_worker_command_source,
+        "filter_outcome_win": args.filter_outcome_win,
+        "filter_search_best_win": args.filter_search_best_win,
+        "filter_finish_within_250": args.filter_finish_within_250,
         "datasets": [str(path) for path in paths],
     }
     if "stats" in dataset:

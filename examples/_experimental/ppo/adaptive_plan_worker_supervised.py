@@ -25,6 +25,7 @@ from adaptive_common import ADAPTIVE_MOVE_PLANES, adaptive_action_space_size
 from adaptive_network import load_or_create_adaptive_network
 from adaptive_worker_pretrain import worker_source_direction_logits, worker_source_direction_targets
 from generals.agents.ppo_policy_agent import parse_policy_channels
+from train_adaptive import OUTCOME_WIN
 
 PLAN_WORKER_EXTRA_CHANNELS = 3
 
@@ -240,6 +241,9 @@ def _heatmap_argmax_indices(heatmap: np.ndarray, active: np.ndarray) -> np.ndarr
 def load_strategy_worker_dataset(
     paths: list[Path],
     drop_pass_labels: bool,
+    require_outcome_win: bool,
+    require_search_best_win: bool,
+    require_finish_within_250: bool,
     max_examples: int | None,
     seed: int,
 ) -> dict[str, jnp.ndarray]:
@@ -256,6 +260,7 @@ def load_strategy_worker_dataset(
         "labels": [],
         "weights": [],
     }
+    stats = {"rows": 0, "kept": 0}
     for path in paths:
         shard = np.load(path)
         base_obs = shard["obs"].astype(np.float32)
@@ -263,6 +268,18 @@ def load_strategy_worker_dataset(
         labels = shard["teacher_action_index"].astype(np.int32)
         pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
         keep = np.ones((base_obs.shape[0],), dtype=np.bool_)
+        if require_outcome_win:
+            if "outcome" not in shard:
+                raise KeyError(f"{path} is missing outcome for --require-outcome-win")
+            keep &= shard["outcome"].astype(np.int32) == OUTCOME_WIN
+        if require_search_best_win:
+            if "search_best_outcome" not in shard:
+                raise KeyError(f"{path} is missing search_best_outcome for --require-search-best-win")
+            keep &= shard["search_best_outcome"].astype(np.int32) == OUTCOME_WIN
+        if require_finish_within_250:
+            if "finish_within_250" not in shard:
+                raise KeyError(f"{path} is missing finish_within_250 for --require-finish-within-250")
+            keep &= shard["finish_within_250"].astype(np.float32) > 0.5
         if drop_pass_labels:
             keep &= labels != pass_index
         if "legal_mask" in shard:
@@ -271,6 +288,8 @@ def load_strategy_worker_dataset(
             pass_legal = np.ones((base_obs.shape[0], 1), dtype=np.bool_)
             flat_legal = np.concatenate([move_legal, pass_legal], axis=1)
             keep &= flat_legal[np.arange(base_obs.shape[0]), np.clip(labels, 0, flat_legal.shape[1] - 1)]
+        stats["rows"] += int(base_obs.shape[0])
+        stats["kept"] += int(np.sum(keep))
         if not np.any(keep):
             continue
         base_obs = base_obs[keep]
@@ -292,7 +311,9 @@ def load_strategy_worker_dataset(
         rng = np.random.default_rng(seed)
         indices = np.sort(rng.choice(arrays["obs"].shape[0], size=max_examples, replace=False))
         arrays = {name: value[indices] for name, value in arrays.items()}
-    return {name: jnp.asarray(value) for name, value in arrays.items()}
+    dataset = {name: jnp.asarray(value) for name, value in arrays.items()}
+    dataset["stats"] = stats
+    return dataset
 
 
 @eqx.filter_jit
@@ -393,6 +414,9 @@ def parse_args():
     parser.add_argument("--mixed-best-weight", type=float, default=0.5)
     parser.add_argument("--accepted-weight", type=float, default=1.0)
     parser.add_argument("--keep-pass-labels", action="store_true")
+    parser.add_argument("--require-outcome-win", action="store_true")
+    parser.add_argument("--require-search-best-win", action="store_true")
+    parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="cnn")
@@ -449,6 +473,9 @@ def main():
         dataset = load_strategy_worker_dataset(
             paths,
             not args.keep_pass_labels,
+            args.require_outcome_win,
+            args.require_search_best_win,
+            args.require_finish_within_250,
             args.max_examples,
             args.seed,
         )
@@ -473,6 +500,19 @@ def main():
     print(f"Datasets:     {len(paths)} shard(s)")
     print(f"Examples:     {dataset['obs'].shape[0]}")
     print(f"Format:       {args.dataset_format}")
+    if args.dataset_format == "strategy":
+        stats = dataset.get("stats", {})
+        if stats:
+            print(f"Rows kept:    {stats['kept']} / {stats['rows']}")
+        filters = []
+        if args.require_outcome_win:
+            filters.append("outcome=win")
+        if args.require_search_best_win:
+            filters.append("search_best=win")
+        if args.require_finish_within_250:
+            filters.append("finish<=250")
+        if filters:
+            print(f"Filters:      {', '.join(filters)}")
     if args.dataset_format == "plan-q":
         print(f"Selection:    {args.selection}")
         if args.selection in ("accepted", "mixed"):

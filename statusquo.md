@@ -1088,3 +1088,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the gate yet. Collect 12/16-compatible winning-trajectory Worker/gate data or train explicit replacement outcome/Q labels before using the Worker beyond 8x8.
 - **Context:** Sandbox JAX evaluator could not reliably see CUDA and fell back slowly; GPU evaluator runs used elevated access and reported `Device: cuda:0`. Gate v1 with non-decisive positives improved fixed-v5 max250 256-row min from same-seed base `8.59%` to `11.33%`; `--strategy-plan-worker-max-grid-size 8` protected Expander 12/16 and gave 64-row Expander min `67.19%` vs same-seed base `65.62%`.
+
+## [2026-06-19 23:57] Grid-Range Worker Gate Filters
+- **Changes:** Added decisive-row filters to `adaptive_plan_worker_supervised.py` and `adaptive_command_gate_supervised.py`, added active-area gate features with sidecar feature-dim compatibility, and added `evaluate_adaptive_policy.py --strategy-plan-worker-min-grid-size` so Plan-Worker rerank/replacement can be enabled only on a board-size range. Updated README, Chinese manual, and strategy logs with GPU results.
+- **Status:** Completed
+- **Next Steps:** Do not promote the protect gate as a general policy. Use grid-range guards for diagnostics, then move to high-gap midgame decisive trajectory imitation or source/target outcome-Q supervision.
+- **Context:** Protect-v3 with `min_grid_size=12,max_grid_size=16` preserved 8x8 base behavior and gave small 12/16 same-seed Expander gains: 256-row seed `90000` stayed at base min `72.27%` while 12p1 improved `79.30% -> 80.08%`, 16p0 `77.34% -> 77.73%`, and 16p1 `75.00% -> 76.17%`. The six-row min is still 8p0-limited, so this is a control-surface improvement rather than a promotion.

@@ -20,6 +20,7 @@ COMMAND_GATE_FEATURE_NAMES = (
     "candidate_q",
     "current_q",
     "seat",
+    "active_area_fraction",
 )
 COMMAND_GATE_FEATURE_DIM = len(COMMAND_GATE_FEATURE_NAMES)
 
@@ -62,4 +63,3 @@ class CommandGateNetwork(eqx.Module):
         x = (features - self.feature_mean) / jnp.maximum(self.feature_std, 1.0e-6)
         x = jax.nn.relu(self.linear1(x))
         return self.linear2(x)[0]
-
