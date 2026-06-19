@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import sys
 import time
 from pathlib import Path
@@ -30,7 +31,7 @@ OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
 ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win")
-BALANCE_STRATA_MODES = ("none", "size-seat")
+BALANCE_STRATA_MODES = ("none", "size-seat", "size-seat-domain")
 LABEL_SOURCE_MODES = ("trajectory", "search-best")
 
 
@@ -48,6 +49,28 @@ def expand_dataset_paths(patterns: list[str]) -> list[Path]:
     if missing:
         raise FileNotFoundError(f"Dataset shard not found: {missing[0]}")
     return unique
+
+
+def dataset_domain_name(path: Path) -> str:
+    """Return a coarse data-domain label for balancing mixed offline shards."""
+    sidecar = path.with_suffix(".json")
+    if sidecar.exists():
+        try:
+            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            metadata = {}
+        opponent_policy_path = metadata.get("opponent_policy_path")
+        if opponent_policy_path:
+            return f"policy:{Path(opponent_policy_path).name}"
+        opponent = metadata.get("opponent")
+        if opponent:
+            return f"opponent:{opponent}"
+    name = path.parent.name
+    if "fixed-v5" in name:
+        return "policy:fixed-v5"
+    if "expander" in name:
+        return "opponent:expander"
+    return f"path:{name}"
 
 
 def load_strategy_dataset(
@@ -83,14 +106,18 @@ def load_strategy_dataset(
         "action_weight": [],
         "grid_size": [],
         "seat": [],
+        "domain": [],
         "search_candidate_indices": [],
         "search_prior_scores": [],
         "search_scores": [],
         "search_outcomes": [],
         "search_score_gap": [],
     }
+    domain_to_id: dict[str, int] = {}
     for path in paths:
         shard = np.load(path)
+        domain_name = dataset_domain_name(path)
+        domain_id = domain_to_id.setdefault(domain_name, len(domain_to_id))
         shard_samples = shard["obs"].shape[0]
         shard_indices = np.arange(shard_samples)
         if max_samples_per_shard is not None and shard_samples > max_samples_per_shard:
@@ -147,6 +174,7 @@ def load_strategy_dataset(
         chunks["teacher_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
         chunks["grid_size"].append(shard["grid_size"][shard_indices].astype(np.int32))
         chunks["seat"].append(shard["seat"][shard_indices].astype(np.int32))
+        chunks["domain"].append(np.full((shard_indices.shape[0],), domain_id, dtype=np.int32))
         shard_count = shard_indices.shape[0]
         if "search_candidate_indices" in shard:
             candidate_indices = shard["search_candidate_indices"][shard_indices].astype(np.int32)
@@ -197,17 +225,24 @@ def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: i
     """Downsample strategy rows to equal task strata before JAX training."""
     if mode == "none":
         return dataset
-    if mode != "size-seat":
+    if mode not in ("size-seat", "size-seat-domain"):
         raise ValueError(f"unknown balance mode: {mode}")
     grid_size = np.asarray(dataset["grid_size"])
     seat = np.asarray(dataset["seat"])
+    domain = np.asarray(dataset["domain"])
     rng = np.random.default_rng(seed)
     groups: list[np.ndarray] = []
     for size in sorted(np.unique(grid_size)):
         for player in sorted(np.unique(seat)):
-            indices = np.flatnonzero((grid_size == size) & (seat == player))
-            if indices.size > 0:
-                groups.append(indices)
+            if mode == "size-seat-domain":
+                for domain_id in sorted(np.unique(domain)):
+                    indices = np.flatnonzero((grid_size == size) & (seat == player) & (domain == domain_id))
+                    if indices.size > 0:
+                        groups.append(indices)
+            else:
+                indices = np.flatnonzero((grid_size == size) & (seat == player))
+                if indices.size > 0:
+                    groups.append(indices)
     if not groups:
         return dataset
     target_count = min(group.size for group in groups)

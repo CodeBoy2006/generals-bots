@@ -8624,3 +8624,204 @@ The strategy signal should be pushed into the U-Net main policy via decisive
 trajectory supervision, not inserted as an inference-time primitive action
 override.
 ```
+
+## 2026-06-19: Safe-v3 Search-Win Data Refresh and Domain Balance
+
+The previous fixed-v5 search-win shards were useful, but their search prior was
+not the current safe v3 checkpoint. This round recollected midgame contact rows
+with safe v3 as the rollout-search prior, then tested whether the signal should
+enter the main U-Net policy.
+
+New fixed-v5 data:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-safev3-v0/
+teacher/search prior:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+opponent:
+  /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+search:
+  top_k=4
+  rollout_steps=32
+  rollouts/action=1
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  outcome_known
+  search_gap >= 0.25
+rows:
+  62024
+trajectory outcome:
+  loss 20157
+  draw 31659
+  win  10208
+search_best_outcome:
+  loss 19
+  draw 53815
+  win  8190
+groups:
+  8p0 30561, search-win 4170, trajectory-win 5485
+  8p1 31463, search-win 4020, trajectory-win 4723
+```
+
+Fixed-v5-only policy-coupled training:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-imitation-v0/
+init:
+  adaptive-midgame-contact-searchwin-imitation-v3
+data:
+  fixed-v5-safev3-v0 only
+balance:
+  size-seat
+loss:
+  policy_kl=3.0
+  action_ce=0.15
+  action_ce_weight_mode=search-best-win
+  finish=0.50 balanced
+  outcome=0.40 balanced
+  belief=0.25
+  intent=0.20
+lr:
+  2e-6
+final:
+  KL 0.0036
+  action CE 2.8650 -> 2.7161
+  outcome acc 47.9% -> 52.3%
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `88240`:
+
+```text
+safe v3:
+  p0  9/50/69, win  7.03%, draw 53.91%
+  p1 18/52/58, win 14.06%, draw 45.31%
+  min 7.03%
+
+v0 fixed-v5-only:
+  p0 12/47/69, win  9.38%, draw 53.91%
+  p1 17/47/64, win 13.28%, draw 50.00%
+  min 9.38%
+```
+
+Expander 8/12/16, 128 games/row, seed `88260`:
+
+```text
+safe v3:
+  8p0 73.44%, 8p1 74.22%
+  12p0 78.12%, 12p1 80.47%
+  16p0 77.34%, 16p1 85.94%
+  min 73.44%
+
+v0 fixed-v5-only:
+  8p0 68.75%, 8p1 66.41%
+  12p0 81.25%, 12p1 81.25%
+  16p0 72.66%, 16p1 75.78%
+  min 66.41%
+```
+
+Conclusion from v0:
+
+```text
+Safe-v3 fixed-v5 data has a real fixed-v5 signal, but using it alone causes
+8x Expander forgetting. The issue is data-domain balance, not another CE weight.
+```
+
+New Expander protection data:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-expander-safev3-v0/
+teacher/search prior:
+  safe v3
+opponent:
+  Expander
+grid sizes:
+  8,12,16
+rows:
+  23361
+trajectory outcome:
+  loss 2573
+  draw 582
+  win  20206
+search_best_outcome:
+  loss 3
+  draw 15709
+  win  7649
+groups:
+  8p0 3035, search-win 907, trajectory-win 2254
+  8p1 2943, search-win 852, trajectory-win 2432
+  12p0 3838, search-win 1337, trajectory-win 2969
+  12p1 3783, search-win 1302, trajectory-win 3456
+  16p0 4257, search-win 1535, trajectory-win 4002
+  16p1 5505, search-win 1716, trajectory-win 5093
+```
+
+Added trainer support:
+
+```text
+adaptive_strategy_supervised.py --balance-strata size-seat-domain
+```
+
+This reads each shard's JSON sidecar and creates a coarse data-domain label
+from `opponent_policy_path` or `opponent`. It then balances by
+`(grid_size, seat, domain)`, which prevents fixed-v5 8x rows from drowning
+Expander 8x protection rows.
+
+Mixed probes:
+
+```text
+v1:
+  data: fixed-v5-safev3-v0 + expander-safev3-v0
+  balance: size-seat
+  samples after balance: 22698
+  final KL: 0.0033
+  fixed-v5 max250 seed88240:
+    p0 win  7.81%, draw 57.03%
+    p1 win 11.72%, draw 50.78%
+    min 7.81%
+  Expander seed88260:
+    8p0 69.53%, 8p1 69.53%
+    12p0 87.50%, 12p1 84.38%
+    16p0 76.56%, 16p1 75.78%
+    min 69.53%
+
+v2:
+  data: fixed-v5-safev3-v0 + expander-safev3-v0
+  balance: size-seat-domain
+  samples after balance: 23544
+  final KL: 0.0030
+  fixed-v5 max250 seed88240:
+    p0 win  6.25%, draw 60.16%
+    p1 win 14.84%, draw 49.22%
+    min 6.25%
+  Expander seed88260:
+    8p0 71.09%, 8p1 73.44%
+    12p0 83.59%, 12p1 81.25%
+    16p0 78.91%, 16p1 72.66%
+    min 71.09%
+```
+
+Conclusion:
+
+```text
+v0 proves safe-v3 fixed-v5 search-win data can improve fixed-v5 smoke, but it
+forgets Expander. v1/v2 prove Expander protection data helps recover the
+Expander rows, especially 8x, but current equal-domain mixing gives back too
+much fixed-v5 p0. None of v0/v1/v2 is a promotion candidate.
+```
+
+Next decision:
+
+```text
+Do not sweep CE/KL or domain ratio blindly. The next useful step is to make
+the supervised update aware of fixed-v5 p0 as the weak target:
+  1. keep domain-balanced Expander protection,
+  2. upweight fixed-v5 p0 search-win rows explicitly or collect more p0 wins,
+  3. keep fixed-v5 p1 and Expander rows as anchors,
+  4. consider a small policy-head-only adapter or LoRA-style delta instead of
+     updating the whole U-Net trunk.
+```

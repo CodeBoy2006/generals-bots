@@ -1040,3 +1040,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop proxy worker-gate and threshold scans; return to direct Midgame Decisive Trajectory Imitation so decisive search/win signals update the U-Net main policy instead of acting as inference-time overrides.
 - **Context:** GPU training used safe v3 + decisive Worker on fixed-v5 v0/v1 shards: 44,789 rows, 17,311 worker-change examples, 5.52% positives, final gate P+/P- `0.561/0.439`. Fixed-v5 max250 seed `87060`: no gate min `8.59%`, gate `0.55` min `6.25%`, gate `0.65` min `7.81%`; not promotion-worthy.
+
+## [2026-06-19 21:11] Safe-v3 Domain-Balanced Imitation
+- **Changes:** Collected safe-v3 rollout-search fixed-v5 rows under `runs/adaptive-midgame-contact-searchwin-fixed-v5-safev3-v0/`, collected safe-v3 Expander protection rows under `runs/adaptive-midgame-contact-searchwin-expander-safev3-v0/`, added `adaptive_strategy_supervised.py --balance-strata size-seat-domain`, trained/evaluated v0/v1/v2, and updated README/manual/strategy docs.
+- **Status:** Completed
+- **Next Steps:** Do not promote v0/v1/v2 or blindly sweep CE/KL/domain ratio. Next iteration should target fixed-v5 p0 specifically while keeping domain-balanced Expander protection, or test a smaller policy-head/delta update instead of full U-Net trunk updates.
+- **Context:** Fixed-v5-only v0 improved fixed-v5 128-row min `7.03% -> 9.38%` but regressed Expander min `73.44% -> 66.41%`. Mixed v1 recovered Expander to `69.53%` but fixed-v5 min was only `7.81%`. Domain-balanced v2 recovered Expander further to `71.09%` but fixed-v5 p0 fell, min `6.25%`. Current safe checkpoint remains v3.
