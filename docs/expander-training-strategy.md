@@ -7539,10 +7539,10 @@ continues to use the real trajectory outcome. The same change adds
 `--balance-finish-labels` and `--balance-outcome-labels` to avoid the rare
 search-win labels being swamped by search-draw rows.
 
-CPU probes were used because the current continuation environment had no CUDA
-device (`nvidia-smi` could not communicate with the driver and JAX reported
-`CUDA_ERROR_NO_DEVICE`). These runs are path/label diagnostics, not GPU training
-records.
+The first probes ran in the default sandbox, which did not expose `/dev/nvidia*`
+and made JAX report `CUDA_ERROR_NO_DEVICE`. An escalated host check then
+confirmed the machine has an RTX 5070 Ti and JAX can use `cuda:0`; the balanced
+run was repeated on GPU.
 
 ```text
 run: runs/adaptive-search-best-outcome-head-v0/
@@ -7563,12 +7563,24 @@ run: runs/adaptive-search-best-outcome-head-v1/
 labels: search-best
 losses: finish=0.5, outcome=0.5
 balance: finish labels + outcome labels
+device: default sandbox CPU
 result:
   finish loss: 0.9918 -> 0.6982
   finish accuracy: 26.2% -> 44.7%
   outcome loss: 1.9116 -> 1.0781
   outcome accuracy: 28.8% -> 39.6%
   evaluator load smoke: passed with --strategy-finish-outputs 2
+
+run: runs/adaptive-search-best-outcome-head-gpu-v0/
+labels: search-best
+losses: finish=0.5, outcome=0.5
+balance: finish labels + outcome labels
+device: cuda:0
+result:
+  finish loss: 0.9930 -> 0.7009
+  finish accuracy: 27.3% -> 44.3%
+  outcome loss: 1.9216 -> 1.1157
+  outcome accuracy: 29.5% -> 38.3%
 ```
 
 Conclusion: the data path is now correct and the outcome head learns some
