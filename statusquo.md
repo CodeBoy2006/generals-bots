@@ -1010,3 +1010,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop Q-rerank/Q-replace threshold scans; collect and train Midgame Decisive Trajectory Imitation windows with contact/high-gap/win-or-finish filters.
 - **Context:** Q-value loss dropped strongly (`14.0065 -> 0.3222`), but q-replace underperformed baseline at 128 games/seat (`min 9.38%` off vs `5.47%` at threshold `0.25` and `7.81%` at threshold `1.0`). The issue is action-level replacement, not trainability of the head.
+
+## [2026-06-19 19:36] Midgame Decisive Imitation Probe
+- **Changes:** Collected GPU fixed-v5 max250 decisive trajectory windows and draw-heavy contrast windows under `runs/`, trained `adaptive-midgame-decisive-imitation-v0/v1/v2`, and documented the results.
+- **Status:** Completed
+- **Next Steps:** Do not tune v0-v2 loss weights further. Collect larger first-contact-to-terminal/search-success trajectories and restrict primitive action CE to rows where the search rollout actually wins over multiple steps.
+- **Context:** Strict decisive shard kept 683 rows; draw-heavy contrast kept 3753 rows. Against fixed-v5 max250 at 128 games/seat seed `86360`, base min was `11.72%`; v0 `10.94%`, v1 `7.81%`, v2 `10.16%`. The wiring is fast on GPU, but one-step terminal-window imitation is not yet enough to encode the gather/attack/finish chain.

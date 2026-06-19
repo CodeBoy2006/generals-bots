@@ -7911,3 +7911,172 @@ train:
 
 This should train the policy on the whole gather/attack/finish chain rather than
 asking an undercalibrated action-Q head to override individual primitive moves.
+
+## 2026-06-19 Midgame decisive trajectory imitation v0-v2
+
+We then moved directly into Midgame Decisive Trajectory Imitation on GPU. The
+first shard used strict fixed-v5 `max250` filters:
+
+```text
+run:
+  runs/adaptive-midgame-decisive-fixed-v5-v0/
+teacher/search prior:
+  runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx
+opponent:
+  /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+search:
+  top_k=4
+  rollout_steps=32
+  rollouts/action=1
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  trajectory win or finish_within_250
+  terminal_window <= 120
+  search_gap >= 0.25
+  search_best_outcome == win
+kept rows:
+  104, 75, 98, 210, 89, 107 = 683 raw
+  656 after size-seat balancing
+```
+
+This is the cleanest fixed-v5 decisive window shard so far: all saved samples
+are contact-window wins/finishes, and all have a high-gap search-best winning
+candidate. A direct policy-coupled imitation run:
+
+```text
+run:
+  runs/adaptive-midgame-decisive-imitation-v0/
+init:
+  runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx
+update:
+  all weights
+loss:
+  policy_kl=1.0
+  action_ce=0.30
+  finish=0.50
+  outcome=0.40
+  belief=0.25
+  intent=0.20
+lr:
+  1e-5
+result:
+  KL: 0.0004 -> 0.0547
+  action CE: 3.0670 -> 2.3711
+  finish accuracy: 73.0% -> 94.2%
+  outcome accuracy: 100.0% positive-only, not meaningful
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `86360`:
+
+```text
+init adaptive-midgame-search-imitation-v1:
+  p0 15/40/73, win 11.72%, draw 57.03%
+  p1 20/44/64, win 15.62%, draw 50.00%
+  min 11.72%
+
+v0 decisive-only imitation:
+  p0 14/40/74, win 10.94%, draw 57.81%
+  p1 18/55/55, win 14.06%, draw 42.97%
+  min 10.94%
+```
+
+Interpretation: v0 did alter finish behavior, especially p1 draw rate, but it
+converted too many draws into losses.
+
+Next we collected explicit draw-heavy contrast rows:
+
+```text
+run:
+  runs/adaptive-midgame-draw-fixed-v5-v0/
+same teacher/opponent/search settings
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  draw_only
+  terminal_window <= 120
+  search_gap >= 0.25
+kept rows:
+  650, 480, 584, 941, 666, 432 = 3753 draw rows
+```
+
+Training v1 mixed decisive and draw-heavy rows, using action CE only on winning
+rows while balancing finish/outcome labels:
+
+```text
+run:
+  runs/adaptive-midgame-decisive-imitation-v1/
+datasets:
+  decisive rows + draw-heavy rows
+action_ce_mode:
+  wins
+loss:
+  policy_kl=1.0
+  action_ce=0.30
+  finish=0.50 balanced
+  outcome=0.40 balanced
+  belief=0.25
+  intent=0.20
+result:
+  KL: 0.0003 -> 0.0458
+  action CE on winning rows: 3.1413 -> 2.4479
+  outcome accuracy: 15.3% -> 75.0%
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `86360`:
+
+```text
+v1 mixed decisive/draw:
+  p0 14/55/59, win 10.94%, draw 46.09%
+  p1 10/45/73, win  7.81%, draw 57.03%
+  min 7.81%
+```
+
+The draw contrast did teach outcome classification, but the policy update still
+translated anti-draw pressure into extra losses.
+
+Finally we tried a conservative v2 to test whether v1 was simply too aggressive:
+
+```text
+run:
+  runs/adaptive-midgame-decisive-imitation-v2/
+same data as v1
+loss:
+  policy_kl=5.0
+  action_ce=0.10 on wins only
+  finish/outcome/belief/intent same as v1
+lr:
+  3e-6
+result:
+  KL: 0.0000 -> 0.0018
+  outcome accuracy: 15.1% -> 61.3%
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `86360`:
+
+```text
+v2 conservative:
+  p0 14/46/68, win 10.94%, draw 53.12%
+  p1 13/40/75, win 10.16%, draw 58.59%
+  min 10.16%
+```
+
+Conclusion: the midgame decisive path is correctly wired and GPU-fast, but this
+first data slice is not sufficient for promotion. The decisive shard is too
+small and too win-only; the draw-heavy shard gives useful negatives but does not
+identify safe winning actions. Do not tune v0-v2 loss weights further. The next
+useful iteration is data quality:
+
+```text
+1. collect larger A1/A2 winning trajectories, not just terminal-window states
+2. save first_contact->terminal and turn 80->180 gather/attack transitions
+3. include search-success rollout actions for several steps after the chosen action
+4. keep draw-heavy rows for outcome/finish heads only
+5. keep primitive policy CE restricted to rows where search rollout actually wins
+```
+
+The key failure mode is no longer infrastructure or GPU availability; it is that
+one-step terminal-window imitation does not yet encode the full
+gather-attack-finish chain.
