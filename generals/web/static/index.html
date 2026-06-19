@@ -47,6 +47,8 @@
           <section class="command-row" aria-label="Commands">
             <button id="pass-button" type="button">Pass</button>
             <button id="cancel-button" type="button">Cancel</button>
+            <button id="undo-button" type="button">Undo</button>
+            <button id="clear-queue-button" type="button">Clear</button>
           </section>
 
           <section class="metric-grid">
@@ -69,6 +71,11 @@
             <div id="players-list" class="players-list"></div>
           </section>
 
+          <section class="queue-panel">
+            <h2>Move Queue <span id="queue-count" class="queue-count">0</span></h2>
+            <ol id="queue-list" class="queue-list"></ol>
+          </section>
+
           <section class="preview-panel">
             <h2>Policy Preview</h2>
             <div id="preview-value" class="preview-value">-</div>
@@ -77,6 +84,7 @@
         </aside>
       </main>
     </div>
+    <script src="/static/keyboard.js" defer></script>
     <script src="/static/app.js" defer></script>
   </body>
 </html>

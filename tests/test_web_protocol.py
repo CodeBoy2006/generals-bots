@@ -34,6 +34,7 @@ def test_snapshot_serializes_grid_players_and_human_visibility():
         tick_rate=2.0,
         policy_preview=None,
         valid_targets=[(0, 1), (1, 0)],
+        queued_moves=[{"source": [0, 0], "target": [0, 1], "split": True, "is_pass": False}],
         reached_limit=False,
     )
 
@@ -57,6 +58,7 @@ def test_snapshot_serializes_grid_players_and_human_visibility():
     assert snapshot["game_done"] is False
     assert snapshot["selected_cell"] == [0, 0]
     assert snapshot["valid_targets"] == [[0, 1], [1, 0]]
+    assert snapshot["queued_moves"] == [{"source": [0, 0], "target": [0, 1], "split": True, "is_pass": False}]
     assert snapshot["split_enabled"] is False
     assert snapshot["last_message"] == "Selected: (0, 0)"
     assert snapshot["auto_tick"] == {"enabled": True, "tick_rate": 2.0}
@@ -83,12 +85,14 @@ def test_snapshot_full_visibility_shows_entire_machine_watch_board():
         tick_rate=4.0,
         policy_preview=None,
         valid_targets=[],
+        queued_moves=[],
         reached_limit=False,
     )
 
     assert all(all(row) for row in snapshot["grid"]["visible"])
     assert snapshot["selected_cell"] is None
     assert snapshot["valid_targets"] == []
+    assert snapshot["queued_moves"] == []
     assert snapshot["split_enabled"] is True
     assert snapshot["auto_tick"]["tick_rate"] == 4.0
 

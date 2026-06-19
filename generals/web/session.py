@@ -67,6 +67,16 @@ class WebSessionConfig:
     city_army_max: int = 51
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedMove:
+    """One pending human action in the browser move queue."""
+
+    source: tuple[int, int] | None
+    target: tuple[int, int] | None
+    split: bool = False
+    is_pass: bool = False
+
+
 class WebGameSession:
     """Mutable, single-match session used by the WebSocket server."""
 
@@ -111,6 +121,7 @@ class WebGameSession:
         self.ai_preview = ai_preview
 
         self.selected_cell: tuple[int, int] | None = None
+        self.move_queue: list[QueuedMove] = []
         self.split_enabled = False
         self.last_message = "Ready"
         self.step_count = 0
@@ -265,6 +276,7 @@ class WebGameSession:
         self.state = create_initial_state(grid)
         self.info = game.get_info(self.state)
         self.selected_cell = None
+        self.move_queue.clear()
         self.split_enabled = False
         self.last_message = message
         self.step_count = 0
@@ -291,6 +303,7 @@ class WebGameSession:
             policy_preview=self.policy_preview,
             valid_targets=self._valid_targets(self.selected_cell),
             reached_limit=self._reached_limit(),
+            queued_moves=self._serialized_queue(),
         )
 
     def submit_client_command(self, command: dict[str, Any]) -> dict[str, Any]:
@@ -302,12 +315,18 @@ class WebGameSession:
         if command_type == "move":
             source = tuple(command["source"])
             target = tuple(command["target"])
-            self._move((int(source[0]), int(source[1])), (int(target[0]), int(target[1])), bool(command["split"]))
+            self._queue_move((int(source[0]), int(source[1])), (int(target[0]), int(target[1])), bool(command["split"]))
             return self.snapshot()
         if command_type == "pass":
             self.selected_cell = None
-            self._advance_human_turn(create_action(to_pass=True))
+            self.move_queue.append(QueuedMove(source=None, target=None, is_pass=True))
             self.last_message = "Pass queued"
+            return self.snapshot()
+        if command_type == "undo_queue":
+            self._undo_queue()
+            return self.snapshot()
+        if command_type == "clear_queue":
+            self._clear_queue()
             return self.snapshot()
         if command_type == "cancel":
             self.selected_cell = None
@@ -343,6 +362,16 @@ class WebGameSession:
             self.last_message = "Tick"
             return self.snapshot()
 
+        queued_action = self._pop_next_queued_action()
+        if queued_action is not None:
+            action, is_pass = queued_action
+            self._advance_human_turn(action, now=now)
+            self.last_message = "Queued pass executed" if is_pass else "Queued move executed"
+            return self.snapshot()
+
+        if self.selected_cell is not None:
+            return self.snapshot()
+
         self._advance_human_turn(create_action(to_pass=True), now=now)
         self.last_message = "Auto pass"
         return self.snapshot()
@@ -371,21 +400,39 @@ class WebGameSession:
         self.selected_cell = None
         self.last_message = "Invalid source"
 
-    def _move(self, source: tuple[int, int], target: tuple[int, int], split: bool) -> None:
-        if not self._is_valid_source(source):
+    def _queue_move(self, source: tuple[int, int], target: tuple[int, int], split: bool) -> None:
+        projected_state = self._projected_queue_state()
+        if not self._is_valid_source_in_state(projected_state, source):
             self.selected_cell = None
             self.last_message = "Invalid source"
             return
 
         direction = self._direction(source, target)
-        if direction is None or target not in self._valid_targets(source):
+        if direction is None or target not in self._valid_targets_in_state(projected_state, source):
             self.selected_cell = source
             self.last_message = "Invalid target"
             return
 
-        self.selected_cell = None
-        self._advance_human_turn(create_action(row=source[0], col=source[1], direction=direction, to_split=split))
+        self.move_queue.append(QueuedMove(source=source, target=target, split=split))
+        self.selected_cell = target
         self.last_message = "Move queued"
+
+    def _undo_queue(self) -> None:
+        if not self.move_queue:
+            self.last_message = "Move queue empty"
+            return
+        move = self.move_queue.pop()
+        self.selected_cell = move.source
+        self.last_message = "Queued pass undone" if move.is_pass else "Queued move undone"
+
+    def _clear_queue(self) -> None:
+        if not self.move_queue:
+            self.selected_cell = None
+            self.last_message = "Move queue empty"
+            return
+        self.move_queue.clear()
+        self.selected_cell = None
+        self.last_message = "Move queue cleared"
 
     def _advance_human_turn(self, human_action: jnp.ndarray, now: float | None = None) -> None:
         if self.model_agent is None:
@@ -393,11 +440,7 @@ class WebGameSession:
             return
         self.key, action_key = jrandom.split(self.key)
         model_action = self._choose_agent_action(self.model_agent, self.model_player, action_key)
-        actions = (
-            jnp.stack((human_action, model_action))
-            if self.human_player == 0
-            else jnp.stack((model_action, human_action))
-        )
+        actions = self._stack_human_and_model_actions(human_action, model_action)
         self._advance(actions, now)
 
     def _advance(self, actions: jnp.ndarray, now: float | None) -> None:
@@ -405,6 +448,13 @@ class WebGameSession:
         self.step_count += 1
         if now is not None:
             self.last_tick = now
+
+    def _stack_human_and_model_actions(self, human_action: jnp.ndarray, model_action: jnp.ndarray) -> jnp.ndarray:
+        return (
+            jnp.stack((human_action, model_action))
+            if self.human_player == 0
+            else jnp.stack((model_action, human_action))
+        )
 
     def _choose_machine_actions(self, key: jnp.ndarray) -> jnp.ndarray:
         if self.machine_agents is None:
@@ -423,17 +473,23 @@ class WebGameSession:
         return agent.act(game.get_observation(self.state, player), key)
 
     def _is_valid_source(self, cell: tuple[int, int]) -> bool:
+        return self._is_valid_source_in_state(self._projected_queue_state(), cell)
+
+    def _is_valid_source_in_state(self, state: game.GameState, cell: tuple[int, int]) -> bool:
         row, col = cell
-        height, width = self.state.armies.shape
+        height, width = state.armies.shape
         if row < 0 or row >= height or col < 0 or col >= width:
             return False
-        return bool(self.state.ownership[self.human_player, row, col]) and int(self.state.armies[row, col]) > 1
+        return bool(state.ownership[self.human_player, row, col]) and int(state.armies[row, col]) > 1
 
     def _valid_targets(self, selected_cell: tuple[int, int] | None) -> list[tuple[int, int]]:
+        return self._valid_targets_in_state(self._projected_queue_state(), selected_cell)
+
+    def _valid_targets_in_state(self, state: game.GameState, selected_cell: tuple[int, int] | None) -> list[tuple[int, int]]:
         if selected_cell is None:
             return []
         row, col = selected_cell
-        height, width = self.state.armies.shape
+        height, width = state.armies.shape
         targets = []
         for row_delta, col_delta in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             target_row = row + row_delta
@@ -441,15 +497,60 @@ class WebGameSession:
             if (
                 0 <= target_row < height
                 and 0 <= target_col < width
-                and not bool(self.state.mountains[target_row, target_col])
+                and not bool(state.mountains[target_row, target_col])
             ):
                 targets.append((target_row, target_col))
         return targets
 
+    def _projected_queue_state(self) -> game.GameState:
+        projected = self.state
+        model_pass = create_action(to_pass=True)
+        for move in self.move_queue:
+            action = self._action_for_queued_move(move, projected)
+            if action is None:
+                continue
+            actions = self._stack_human_and_model_actions(action, model_pass)
+            projected, _ = game.step(projected, actions)
+        return projected
+
+    def _action_for_queued_move(self, move: QueuedMove, state: game.GameState) -> jnp.ndarray | None:
+        if move.is_pass:
+            return create_action(to_pass=True)
+        if move.source is None or move.target is None:
+            return None
+        if not self._is_valid_source_in_state(state, move.source):
+            return None
+        direction = self._direction(move.source, move.target)
+        if direction is None or move.target not in self._valid_targets_in_state(state, move.source):
+            return None
+        return create_action(
+            row=move.source[0],
+            col=move.source[1],
+            direction=direction,
+            to_split=move.split,
+        )
+
+    def _pop_next_queued_action(self) -> tuple[jnp.ndarray, bool] | None:
+        while self.move_queue:
+            move = self.move_queue.pop(0)
+            action = self._action_for_queued_move(move, self.state)
+            if action is not None:
+                return action, move.is_pass
+        return None
+
+    def _serialized_queue(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "source": _cell_payload(move.source),
+                "target": _cell_payload(move.target),
+                "split": bool(move.split),
+                "is_pass": bool(move.is_pass),
+            }
+            for move in self.move_queue
+        ]
+
     def _auto_tick_due(self, now: float) -> bool:
         if not self.auto_tick_enabled or self.tick_rate <= 0:
-            return False
-        if not self.machine_vs_machine and self.selected_cell is not None:
             return False
         return now - self.last_tick >= 1.0 / self.tick_rate
 
@@ -469,6 +570,12 @@ class WebGameSession:
             (0, -1): 2,
             (0, 1): 3,
         }.get((target_row - row, target_col - col))
+
+
+def _cell_payload(cell: tuple[int, int] | None) -> list[int] | None:
+    if cell is None:
+        return None
+    return [int(cell[0]), int(cell[1])]
 
 
 def _config_namespace(config: WebSessionConfig) -> SimpleNamespace:

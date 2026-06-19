@@ -241,8 +241,11 @@ The web UI should preserve the current gameplay affordances:
 - Legal adjacent targets use a green highlight.
 - AI preview primary candidate uses a stronger blue arrow and border.
 - Secondary preview candidates use lighter blue arrows.
+- Queued human moves use green arrows with sequence badges.
+- Right-side HUD lists queued moves and exposes undo/clear controls.
 - Right-side HUD lists player stats and top policy candidates.
 - Sample mode explicitly indicates that the displayed distribution is not necessarily the sampled action.
+- Keyboard input follows generals.io core bindings: WASD/arrows move, Space deselects, Z toggles split, E undoes the last queued move, and Q clears a non-empty queue or queues pass when empty.
 
 The layout should be functional and dense:
 
@@ -321,9 +324,11 @@ Add browser commands for select, move, pass, split, cancel, restart, and auto ti
 Behavior should match the existing playable input tests:
 
 - Source click selects only owned cells with more than one army.
-- Adjacent target click creates the correct direction.
+- Adjacent target click appends the correct direction to the move queue.
+- Queued moves can chain from projected targets before earlier moves execute.
 - Split toggle applies to the next move.
-- Pass does not require a selection.
+- Pass does not require a selection and is queued like a move.
+- Undo and clear operate on the pending queue without advancing game time.
 - Invalid target keeps the source selected.
 
 ### Phase 5: AI Preview Overlay
@@ -348,9 +353,9 @@ Backend tests:
 - Ownership encoding is `-1`, `0`, `1`.
 - Visibility differs between human mode and full watch mode.
 - `select` accepts valid sources and rejects invalid sources.
-- `move` maps source and target to the correct public action.
+- `move` maps source and target to a queued public action without advancing time until tick.
 - `set_split`, `pass`, `cancel`, and `restart` update session state correctly.
-- Auto tick pauses while a source is selected.
+- Auto tick consumes one queued human action when available, pauses while a source is selected and the queue is empty, and otherwise auto-passes.
 - Machine-vs-machine tick calls both agents.
 - Policy preview DTO preserves pass, move, probability, direction label, split flag, and value.
 

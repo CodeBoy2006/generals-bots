@@ -33,7 +33,7 @@ def _human_session() -> WebGameSession:
     return session
 
 
-def test_select_and_move_command_updates_state_time_and_message():
+def test_select_and_move_command_queues_until_tick_executes_it():
     session = _human_session()
 
     select_snapshot = session.submit_client_command({"type": "select", "row": 0, "col": 0})
@@ -41,11 +41,22 @@ def test_select_and_move_command_updates_state_time_and_message():
     assert select_snapshot["last_message"] == "Selected: (0, 0)"
 
     move_snapshot = session.submit_client_command({"type": "move", "source": [0, 0], "target": [0, 1], "split": False})
-    assert move_snapshot["time"] == 1
-    assert move_snapshot["step_count"] == 1
-    assert move_snapshot["selected_cell"] is None
+    assert move_snapshot["time"] == 0
+    assert move_snapshot["step_count"] == 0
+    assert move_snapshot["selected_cell"] == [0, 1]
     assert move_snapshot["last_message"] == "Move queued"
-    assert move_snapshot["grid"]["ownership"][0][1] == 0
+    assert move_snapshot["queued_moves"] == [
+        {"source": [0, 0], "target": [0, 1], "split": False, "is_pass": False}
+    ]
+    assert move_snapshot["grid"]["ownership"][0][1] == -1
+
+    session.last_tick = 0.0
+    executed_snapshot = session.tick(now=1.0)
+    assert executed_snapshot["time"] == 1
+    assert executed_snapshot["step_count"] == 1
+    assert executed_snapshot["queued_moves"] == []
+    assert executed_snapshot["last_message"] == "Queued move executed"
+    assert executed_snapshot["grid"]["ownership"][0][1] == 0
 
 
 def test_invalid_source_and_invalid_target_preserve_selection_state():
@@ -64,6 +75,35 @@ def test_invalid_source_and_invalid_target_preserve_selection_state():
     assert invalid_target["time"] == 0
 
 
+def test_queued_moves_can_chain_from_projected_targets_and_be_edited():
+    session = _human_session()
+    session.submit_client_command({"type": "select", "row": 0, "col": 0})
+
+    first = session.submit_client_command({"type": "move", "source": [0, 0], "target": [0, 1], "split": False})
+    assert first["selected_cell"] == [0, 1]
+    assert [0, 2] in first["valid_targets"]
+
+    second = session.submit_client_command({"type": "move", "source": [0, 1], "target": [0, 2], "split": True})
+    assert second["time"] == 0
+    assert second["selected_cell"] == [0, 2]
+    assert second["queued_moves"] == [
+        {"source": [0, 0], "target": [0, 1], "split": False, "is_pass": False},
+        {"source": [0, 1], "target": [0, 2], "split": True, "is_pass": False},
+    ]
+
+    undone = session.submit_client_command({"type": "undo_queue"})
+    assert undone["selected_cell"] == [0, 1]
+    assert undone["queued_moves"] == [
+        {"source": [0, 0], "target": [0, 1], "split": False, "is_pass": False}
+    ]
+    assert undone["last_message"] == "Queued move undone"
+
+    cleared = session.submit_client_command({"type": "clear_queue"})
+    assert cleared["selected_cell"] is None
+    assert cleared["queued_moves"] == []
+    assert cleared["last_message"] == "Move queue cleared"
+
+
 def test_split_pass_cancel_and_restart_commands_update_session_state():
     session = _human_session()
 
@@ -72,9 +112,16 @@ def test_split_pass_cancel_and_restart_commands_update_session_state():
     assert split_snapshot["last_message"] == "Split: On"
 
     pass_snapshot = session.submit_client_command({"type": "pass"})
-    assert pass_snapshot["time"] == 1
+    assert pass_snapshot["time"] == 0
     assert pass_snapshot["selected_cell"] is None
     assert pass_snapshot["last_message"] == "Pass queued"
+    assert pass_snapshot["queued_moves"] == [{"source": None, "target": None, "split": False, "is_pass": True}]
+
+    session.last_tick = 0.0
+    executed_pass = session.tick(now=1.0)
+    assert executed_pass["time"] == 1
+    assert executed_pass["queued_moves"] == []
+    assert executed_pass["last_message"] == "Queued pass executed"
 
     session.submit_client_command({"type": "select", "row": 0, "col": 0})
     cancel_snapshot = session.submit_client_command({"type": "cancel"})
@@ -84,6 +131,7 @@ def test_split_pass_cancel_and_restart_commands_update_session_state():
     restart_snapshot = session.submit_client_command({"type": "restart"})
     assert restart_snapshot["time"] == 0
     assert restart_snapshot["step_count"] == 0
+    assert restart_snapshot["queued_moves"] == []
     assert restart_snapshot["last_message"] == "Restarted"
 
 

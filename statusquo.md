@@ -327,3 +327,9 @@
 - **Status:** Completed
 - **Next Steps:** Run final verification, merge the `web-renderer` worktree branch back to master, and push.
 - **Context:** Browser WebSocket sessions now load PPO agents without importing `generals.gui` or emitting pygame startup logs; pygame remains available through `examples/play_against_model.py`.
+
+## [2026-06-19 21:20] Web Move Queue
+- **Changes:** Added server-authoritative browser move queues, queued pass/undo/clear commands, projected target validation for chained moves, generals.io-style keyboard bindings, queue HUD/canvas rendering, and updated web controls documentation.
+- **Status:** Completed
+- **Next Steps:** Use `examples/play_web.py` to continue playtesting longer games and tune any queue affordances that feel unclear.
+- **Context:** Auto tick now consumes one queued human action per due tick, pauses only when the human has a selection and the queue is empty, and otherwise auto-passes as before.

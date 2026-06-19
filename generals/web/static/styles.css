@@ -281,6 +281,11 @@ h2 {
   line-height: 1.25;
 }
 
+.queue-count {
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+}
+
 .players-list {
   display: grid;
   gap: 10px;
@@ -340,6 +345,7 @@ h2 {
   min-height: 20px;
 }
 
+.queue-list,
 .preview-list {
   display: grid;
   gap: 8px;
@@ -348,6 +354,7 @@ h2 {
   list-style: none;
 }
 
+.queue-item,
 .preview-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -358,6 +365,35 @@ h2 {
   border-radius: 6px;
   padding: 8px;
   background: #141820;
+}
+
+.queue-item {
+  grid-template-columns: 26px minmax(0, 1fr);
+}
+
+.queue-item.is-empty {
+  display: block;
+  color: var(--muted);
+}
+
+.queue-index {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--green);
+  color: #07130b;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-action {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preview-action {

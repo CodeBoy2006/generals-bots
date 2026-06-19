@@ -8,6 +8,8 @@ const ui = {
   restartButton: document.getElementById("restart-button"),
   passButton: document.getElementById("pass-button"),
   cancelButton: document.getElementById("cancel-button"),
+  undoButton: document.getElementById("undo-button"),
+  clearQueueButton: document.getElementById("clear-queue-button"),
   splitToggle: document.getElementById("split-toggle"),
   autoTickToggle: document.getElementById("auto-tick-toggle"),
   tickRateInput: document.getElementById("tick-rate-input"),
@@ -16,6 +18,8 @@ const ui = {
   stepValue: document.getElementById("step-value"),
   winnerValue: document.getElementById("winner-value"),
   playersList: document.getElementById("players-list"),
+  queueCount: document.getElementById("queue-count"),
+  queueList: document.getElementById("queue-list"),
   previewValue: document.getElementById("preview-value"),
   previewList: document.getElementById("preview-list"),
 };
@@ -114,8 +118,11 @@ function syncControls(snapshot) {
 
   const isWatchMode = snapshot.mode === "machine-vs-machine";
   const disabled = isWatchMode || snapshot.game_done;
+  const hasQueue = Array.isArray(snapshot.queued_moves) && snapshot.queued_moves.length > 0;
   ui.passButton.disabled = disabled;
   ui.cancelButton.disabled = isWatchMode;
+  ui.undoButton.disabled = disabled || !hasQueue;
+  ui.clearQueueButton.disabled = disabled || !hasQueue;
   ui.splitToggle.disabled = disabled;
   ui.restartButton.disabled = false;
 }
@@ -127,6 +134,7 @@ function renderHud(snapshot) {
   ui.stepValue.textContent = String(snapshot.step_count);
   ui.winnerValue.textContent = snapshot.winner === null ? "-" : playerName(snapshot, snapshot.winner);
   renderPlayers(snapshot);
+  renderQueue(snapshot);
   renderPreview(snapshot);
 }
 
@@ -174,6 +182,36 @@ function metricBar(color, ratio) {
   return track;
 }
 
+function renderQueue(snapshot) {
+  ui.queueList.replaceChildren();
+  const moves = Array.isArray(snapshot.queued_moves) ? snapshot.queued_moves : [];
+  ui.queueCount.textContent = String(moves.length);
+
+  if (!moves.length) {
+    const empty = document.createElement("li");
+    empty.className = "queue-item is-empty";
+    empty.textContent = "Empty";
+    ui.queueList.appendChild(empty);
+    return;
+  }
+
+  moves.forEach((move, index) => {
+    const item = document.createElement("li");
+    item.className = "queue-item";
+
+    const number = document.createElement("span");
+    number.className = "queue-index";
+    number.textContent = String(index + 1);
+
+    const action = document.createElement("span");
+    action.className = "queue-action";
+    action.textContent = queueLabel(move);
+
+    item.append(number, action);
+    ui.queueList.appendChild(item);
+  });
+}
+
 function renderPreview(snapshot) {
   ui.previewList.replaceChildren();
   const preview = snapshot.policy_preview;
@@ -198,6 +236,16 @@ function renderPreview(snapshot) {
     item.append(action, probability);
     ui.previewList.appendChild(item);
   }
+}
+
+function queueLabel(move) {
+  if (move.is_pass) {
+    return "Pass";
+  }
+  const source = move.source ? move.source.join(",") : "?";
+  const target = move.target ? move.target.join(",") : "?";
+  const split = move.split ? " split" : "";
+  return `${source} -> ${target}${split}`;
 }
 
 function previewLabel(candidate) {
@@ -259,6 +307,7 @@ function render() {
   state.boardRect = { x: (width - boardSize) / 2, y: (height - boardSize) / 2, size: boardSize, cell: cellSize };
 
   drawCells(snapshot, state.boardRect);
+  drawQueuedMoves(snapshot, state.boardRect);
   drawPolicyOverlay(snapshot, state.boardRect);
   drawBoardBorder(state.boardRect);
 }
@@ -397,13 +446,46 @@ function drawPolicyOverlay(snapshot, board) {
   });
 }
 
-function drawArrow(x1, y1, x2, y2, color) {
+function drawQueuedMoves(snapshot, board) {
+  const moves = Array.isArray(snapshot.queued_moves) ? snapshot.queued_moves : [];
+  moves.forEach((move, index) => {
+    if (!move.source || !move.target) {
+      return;
+    }
+    const source = cellCenter(board, move.source[0], move.source[1]);
+    const target = cellCenter(board, move.target[0], move.target[1]);
+    const alpha = Math.max(0.36, 0.9 - index * 0.08);
+    drawArrow(source.x, source.y, target.x, target.y, `rgba(63, 181, 106, ${alpha})`, 5);
+    drawQueueBadge(target.x, target.y, board.cell, index + 1);
+  });
+}
+
+function drawQueueBadge(x, y, cellSize, number) {
+  const radius = Math.max(8, Math.min(14, cellSize * 0.22));
+  const offset = cellSize * 0.24;
+  ctx.save();
+  ctx.fillStyle = "#3fb56a";
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.66)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x + offset, y - offset, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#07130b";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `${Math.max(10, Math.floor(radius * 1.08))}px Quicksand, sans-serif`;
+  ctx.fillText(String(number), x + offset, y - offset + 0.5);
+  ctx.restore();
+}
+
+function drawArrow(x1, y1, x2, y2, color, lineWidth = 4) {
   const angle = Math.atan2(y2 - y1, x2 - x1);
-  const head = 10;
+  const head = Math.max(8, lineWidth * 2.5);
   ctx.save();
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
-  ctx.lineWidth = 4;
+  ctx.lineWidth = lineWidth;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(x1, y1);
@@ -545,12 +627,28 @@ ui.reconnectButton.addEventListener("click", connect);
 ui.restartButton.addEventListener("click", () => sendCommand({ type: "restart" }));
 ui.passButton.addEventListener("click", () => sendCommand({ type: "pass" }));
 ui.cancelButton.addEventListener("click", () => sendCommand({ type: "cancel" }));
+ui.undoButton.addEventListener("click", () => sendCommand({ type: "undo_queue" }));
+ui.clearQueueButton.addEventListener("click", () => sendCommand({ type: "clear_queue" }));
 ui.splitToggle.addEventListener("change", () => sendCommand({ type: "set_split", enabled: ui.splitToggle.checked }));
 ui.autoTickToggle.addEventListener("change", sendAutoTick);
 ui.tickRateInput.addEventListener("change", sendAutoTick);
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    sendCommand({ type: "cancel" });
+  const resolver = window.GeneralsKeyboard && window.GeneralsKeyboard.resolveKeyboardCommand;
+  if (!resolver) {
+    return;
+  }
+  const result = resolver(event, state.snapshot, { splitEnabled: ui.splitToggle.checked });
+  if (!result) {
+    return;
+  }
+  if (result.preventDefault) {
+    event.preventDefault();
+  }
+  if (result.message) {
+    ui.statusMessage.textContent = result.message;
+  }
+  if (result.command) {
+    sendCommand(result.command);
   }
 });
 

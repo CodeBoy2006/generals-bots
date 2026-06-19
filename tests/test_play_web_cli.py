@@ -82,6 +82,7 @@ def test_static_browser_assets_and_real_asset_mounts_exist():
 
     assert (static_root / "index.html").is_file()
     assert (static_root / "styles.css").is_file()
+    assert (static_root / "keyboard.js").is_file()
     assert (static_root / "app.js").is_file()
     assert "/static" in paths
     assert "/assets/images" in paths

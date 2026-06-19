@@ -31,6 +31,20 @@ def _cells(cells: list[tuple[int, int]] | tuple[tuple[int, int], ...]) -> list[l
     return [[int(row), int(col)] for row, col in cells]
 
 
+def _queued_moves(moves: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> list[dict[str, Any]]:
+    serialized = []
+    for move in moves or []:
+        serialized.append(
+            {
+                "source": move.get("source"),
+                "target": move.get("target"),
+                "split": bool(move.get("split", False)),
+                "is_pass": bool(move.get("is_pass", False)),
+            }
+        )
+    return serialized
+
+
 def encode_ownership(state: game.GameState) -> list[list[int]]:
     """Return one ownership grid using -1 for neutral/unowned cells."""
     ownership = np.full(np.asarray(state.armies).shape, -1, dtype=int)
@@ -95,6 +109,7 @@ def build_snapshot(
     policy_preview: Any | None,
     valid_targets: list[tuple[int, int]],
     reached_limit: bool,
+    queued_moves: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> dict[str, Any]:
     """Build one complete browser snapshot from authoritative game state."""
     armies = np.asarray(state.armies)
@@ -132,6 +147,7 @@ def build_snapshot(
         "game_done": game_done,
         "selected_cell": _cell_or_none(selected_cell),
         "valid_targets": _cells(valid_targets),
+        "queued_moves": _queued_moves(queued_moves),
         "split_enabled": bool(split_enabled),
         "last_message": str(last_message),
         "auto_tick": {"enabled": bool(auto_tick_enabled), "tick_rate": float(tick_rate)},
