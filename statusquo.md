@@ -1016,3 +1016,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not tune v0-v2 loss weights further. Collect larger first-contact-to-terminal/search-success trajectories and restrict primitive action CE to rows where the search rollout actually wins over multiple steps.
 - **Context:** Strict decisive shard kept 683 rows; draw-heavy contrast kept 3753 rows. Against fixed-v5 max250 at 128 games/seat seed `86360`, base min was `11.72%`; v0 `10.94%`, v1 `7.81%`, v2 `10.16%`. The wiring is fast on GPU, but one-step terminal-window imitation is not yet enough to encode the gather/attack/finish chain.
+
+## [2026-06-19 19:48] Search-Best-Win Action Gate
+- **Changes:** Added `adaptive_strategy_supervised.py --action-ce-weight-mode search-best-win`, which trains primitive action CE only on rows where local rollout-search best outcome is win while retaining all rows for KL and auxiliary losses. Collected `adaptive-midgame-contact-searchwin-fixed-v5-v0`, trained `adaptive-midgame-contact-searchwin-imitation-v3`, and documented GPU results.
+- **Status:** Completed
+- **Next Steps:** Scale the same midgame/contact/high-gap data recipe 3-5x and mix 12/16 Expander contact rows before another full-policy update; do not return to terminal-window-only imitation.
+- **Context:** New dataset kept 16315 rows with trajectory loss/draw/win `5365/8347/2603` and search-best win rows `2151` (`13.18%`). Fixed-v5 max250 256-row min improved from `9.77%` to `11.33%`; Expander 8/12/16 128-row min moved from `75.00%` to `75.78%`.

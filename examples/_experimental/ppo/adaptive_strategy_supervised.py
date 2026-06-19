@@ -29,7 +29,7 @@ from generals.agents.ppo_policy_agent import parse_policy_channels
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
-ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins")
+ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win")
 BALANCE_STRATA_MODES = ("none", "size-seat")
 LABEL_SOURCE_MODES = ("trajectory", "search-best")
 
@@ -101,9 +101,12 @@ def load_strategy_dataset(
         chunks["intent"].append(shard["intent"][shard_indices].astype(np.int32))
         trajectory_outcome = shard["outcome"][shard_indices].astype(np.int32)
         trajectory_outcome_weight = shard["outcome_known"][shard_indices].astype(np.float32)
+        if "search_best_outcome" in shard:
+            search_best_outcome = shard["search_best_outcome"][shard_indices].astype(np.int32)
+        else:
+            search_best_outcome = np.full((shard_indices.shape[0],), -1, dtype=np.int32)
         if label_source == "search-best":
-            if "search_best_outcome" in shard:
-                search_best_outcome = shard["search_best_outcome"][shard_indices].astype(np.int32)
+            if np.any(search_best_outcome >= 0):
                 label_known = search_best_outcome >= 0
                 outcome_target = np.where(label_known, search_best_outcome, OUTCOME_DRAW).astype(np.int32)
                 outcome_weight = label_known.astype(np.float32)
@@ -178,6 +181,8 @@ def load_strategy_dataset(
             action_weight = ~(outcome_known & (outcome == OUTCOME_DRAW))
         elif action_ce_weight_mode == "wins":
             action_weight = outcome_known & (outcome == OUTCOME_WIN)
+        elif action_ce_weight_mode == "search-best-win":
+            action_weight = search_best_outcome == OUTCOME_WIN
         else:
             action_weight = np.ones_like(outcome, dtype=np.bool_)
         chunks["action_weight"].append(action_weight.astype(np.float32))

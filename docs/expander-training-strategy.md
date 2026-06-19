@@ -8080,3 +8080,144 @@ useful iteration is data quality:
 The key failure mode is no longer infrastructure or GPU availability; it is that
 one-step terminal-window imitation does not yet encode the full
 gather-attack-finish chain.
+
+## 2026-06-19 Midgame contact search-win action gate v3
+
+The v0-v2 failure suggested the next change should be data gating, not another
+loss sweep. Added:
+
+```text
+adaptive_strategy_supervised.py --action-ce-weight-mode search-best-win
+```
+
+This keeps policy KL and auxiliary losses on every loaded row, but only applies
+primitive action CE when a search-teacher shard has:
+
+```text
+search_best_outcome == win
+```
+
+The purpose is to train on broader midgame/contact trajectories while avoiding
+action CE from draw/loss states. A focused unit test now verifies that loader
+`action_weight` follows `search_best_outcome`, independent of the full-trajectory
+outcome.
+
+Collected a broader fixed-v5 `max250` midgame/contact shard:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-v0/
+teacher/search prior:
+  runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx
+opponent:
+  /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+search:
+  top_k=4
+  rollout_steps=32
+  rollouts/action=1
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  outcome_known
+  search_gap >= 0.25
+kept rows by shard:
+  2251, 1950, 2054, 2144, 1993, 1778, 2114, 2031
+total rows:
+  16315
+trajectory outcome:
+  loss 5365, draw 8347, win 2603
+search_best_outcome:
+  loss 12, draw 14152, win 2151
+search_best_win action rows:
+  13.18%
+```
+
+Trained a policy-coupled U-Net checkpoint:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+init:
+  runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx
+update:
+  all weights
+loss:
+  policy_kl=2.0
+  action_ce=0.20
+  action_ce_weight_mode=search-best-win
+  finish=0.50 balanced
+  outcome=0.40 balanced
+  belief=0.25
+  intent=0.20
+lr:
+  5e-6
+result:
+  KL: 0.0003 -> 0.0171
+  action CE on search-best-win rows: 3.2851 -> 2.7896
+  action row weight: ~0.132
+  finish accuracy: 39.9% -> 49.8%
+  outcome accuracy: 16.3% -> 53.4%
+  belief loss: 0.1142 -> 0.0991
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `86600`:
+
+```text
+init:
+  p0 13/41/74, win 10.16%, draw 57.81%
+  p1  9/52/67, win  7.03%, draw 52.34%
+  min 7.03%
+
+v3:
+  p0 13/40/75, win 10.16%, draw 58.59%
+  p1 16/43/69, win 12.50%, draw 53.91%
+  min 10.16%
+```
+
+Fixed-v5 `max250`, 256 games/seat, seed `86640`:
+
+```text
+init:
+  p0 25/95/136, win  9.77%, draw 53.12%
+  p1 30/89/137, win 11.72%, draw 53.52%
+  min 9.77%
+
+v3:
+  p0 41/96/119, win 16.02%, draw 46.48%
+  p1 29/95/132, win 11.33%, draw 51.56%
+  min 11.33%
+```
+
+Expander adaptive 8/12/16, 128 games/row, seed `86680`:
+
+```text
+init min:
+  75.00%
+v3 min:
+  75.78%
+
+row details:
+  8p0  75.00% -> 75.78%
+  8p1  78.12% -> 77.34%
+  12p0 85.94% -> 82.81%
+  12p1 83.59% -> 82.81%
+  16p0 78.91% -> 82.03%
+  16p1 75.00% -> 77.34%
+```
+
+Conclusion: this is the first fixed-v5 midgame imitation variant in this round
+with a positive 256-row fixed-v5 signal and no immediate Expander regression.
+It is still far below the fixed-v5 promotion target, so do not promote yet. The
+useful next step is to scale this exact data recipe, not tune thresholds:
+
+```text
+1. collect 3-5x more midgame/contact/high-gap rows with the same filters
+2. keep action_ce_weight_mode=search-best-win
+3. add 12/16 Expander contact rows to protect adaptive rows during full update
+4. re-evaluate fixed-v5 max250 at 512 games/seat only if 256-row stays positive
+```
+
+This is a better direction than terminal-window-only decisive imitation because
+it preserves draw/loss rows as negative strategic context while keeping primitive
+action imitation tied to local search rollouts that actually win.

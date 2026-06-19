@@ -1100,6 +1100,44 @@ def test_search_q_value_metrics_uses_candidate_outcomes():
     assert reversed_acc == 0.0
 
 
+def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
+    import numpy as np
+
+    from examples._experimental.ppo.adaptive_strategy_supervised import OUTCOME_DRAW, OUTCOME_WIN, load_strategy_dataset
+
+    path = tmp_path / "strategy.npz"
+    samples = 4
+    pad_size = 2
+    action_count = 8 * pad_size * pad_size + 1
+    np.savez_compressed(
+        path,
+        obs=np.zeros((samples, 1, pad_size, pad_size), dtype=np.float16),
+        legal_mask=np.ones((samples, pad_size, pad_size, 4), dtype=np.bool_),
+        active=np.ones((samples, pad_size, pad_size), dtype=np.bool_),
+        intent=np.zeros((samples,), dtype=np.int8),
+        outcome=np.array([OUTCOME_WIN, OUTCOME_DRAW, OUTCOME_DRAW, OUTCOME_WIN], dtype=np.int8),
+        outcome_known=np.ones((samples,), dtype=np.float16),
+        finish_within_250=np.array([1, 0, 0, 1], dtype=np.float16),
+        enemy_general_heatmap=np.zeros((samples, pad_size, pad_size), dtype=np.float16),
+        source_heatmap=np.zeros((samples, pad_size, pad_size), dtype=np.float16),
+        target_heatmap=np.zeros((samples, pad_size, pad_size), dtype=np.float16),
+        teacher_logits=np.zeros((samples, action_count), dtype=np.float16),
+        teacher_action_index=np.arange(samples, dtype=np.int32),
+        grid_size=np.full((samples,), pad_size, dtype=np.int16),
+        seat=np.array([0, 0, 1, 1], dtype=np.int8),
+        search_candidate_indices=np.zeros((samples, 2), dtype=np.int32),
+        search_prior_scores=np.zeros((samples, 2), dtype=np.float16),
+        search_scores=np.zeros((samples, 2), dtype=np.float16),
+        search_outcomes=np.zeros((samples, 2), dtype=np.int8),
+        search_score_gap=np.ones((samples,), dtype=np.float16),
+        search_best_outcome=np.array([OUTCOME_DRAW, OUTCOME_WIN, -1, OUTCOME_WIN], dtype=np.int8),
+    )
+
+    dataset = load_strategy_dataset([path], action_ce_weight_mode="search-best-win")
+
+    assert jnp.allclose(dataset["action_weight"], jnp.array([0.0, 1.0, 0.0, 1.0]))
+
+
 def test_accepted_replacement_weights_prefer_outcome_then_score():
     from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights
 
