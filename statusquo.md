@@ -351,3 +351,9 @@
 - **Status:** Completed
 - **Next Steps:** Playtest with multiple compatible 8x8 checkpoints and decide whether to add an explicit safe allowlist for external model directories.
 - **Context:** The model selector scans CLI-provided checkpoints plus `.eqx` files in the repository root and `legacymodels/`; incompatible checkpoints fail gracefully instead of crashing the WebSocket.
+
+## [2026-06-19 23:50] Web Stable Model Select
+- **Changes:** Changed the browser Control panel to incrementally sync existing player rows and select options instead of rebuilding the DOM on every tick, preserving focused model/control selectors while snapshots stream in.
+- **Status:** Completed
+- **Next Steps:** Continue playtesting live handoff at higher tick rates and with slower model loads.
+- **Context:** Added a Node-backed static app regression test proving tick renders keep the same select nodes and preserve focused values.

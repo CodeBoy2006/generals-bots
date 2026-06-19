@@ -145,7 +145,7 @@ function renderHud(snapshot) {
 function renderControlPanel(snapshot) {
   const players = Array.isArray(snapshot.players) ? snapshot.players : [];
   const humanPlayers = players.filter((player) => player.control === "human");
-  replaceOptions(
+  syncSelectOptions(
     ui.activeHumanSelect,
     humanPlayers.map((player) => ({ value: String(player.index), label: player.name })),
     snapshot.active_human_player === null || snapshot.active_human_player === undefined
@@ -154,45 +154,71 @@ function renderControlPanel(snapshot) {
   );
   ui.activeHumanSelect.disabled = snapshot.game_done || humanPlayers.length === 0;
 
-  ui.playerControlList.replaceChildren();
-  for (const player of players) {
-    const row = document.createElement("div");
-    row.className = "control-row";
-
-    const label = document.createElement("div");
-    label.className = "control-player";
-    label.textContent = player.name;
-
-    const controlSelect = document.createElement("select");
-    controlSelect.className = "control-mode-select";
-    replaceOptions(
-      controlSelect,
-      [
-        { value: "human", label: "Human" },
-        { value: "model", label: "Model" },
-      ],
-      player.control || "model"
-    );
-    controlSelect.disabled = snapshot.game_done;
-    controlSelect.addEventListener("change", () => {
-      sendCommand({ type: "set_player_control", player: player.index, control: controlSelect.value });
-    });
-
-    const modelSelect = document.createElement("select");
-    modelSelect.className = "model-select";
-    replaceOptions(
-      modelSelect,
-      modelOptions(snapshot),
-      player.model_id === null || player.model_id === undefined ? "" : String(player.model_id)
-    );
-    modelSelect.disabled = snapshot.game_done || !modelSelect.options.length;
-    modelSelect.addEventListener("change", () => {
-      sendCommand({ type: "set_player_model", player: player.index, model_id: modelSelect.value });
-    });
-
-    row.append(label, controlSelect, modelSelect);
-    ui.playerControlList.appendChild(row);
+  const existingRows = new Map();
+  for (const row of ui.playerControlList.children) {
+    existingRows.set(row.__playerIndex, row);
   }
+
+  const nextRows = [];
+  for (const player of players) {
+    const row = existingRows.get(player.index) || createControlRow(player.index);
+    syncControlRow(row, player, snapshot);
+    nextRows.push(row);
+  }
+
+  const currentRows = Array.from(ui.playerControlList.children);
+  const sameRows =
+    currentRows.length === nextRows.length && currentRows.every((row, index) => row === nextRows[index]);
+  if (!sameRows) {
+    ui.playerControlList.replaceChildren(...nextRows);
+  }
+}
+
+function createControlRow(playerIndex) {
+  const row = document.createElement("div");
+  row.className = "control-row";
+  row.__playerIndex = playerIndex;
+
+  const label = document.createElement("div");
+  label.className = "control-player";
+
+  const controlSelect = document.createElement("select");
+  controlSelect.className = "control-mode-select";
+  controlSelect.addEventListener("change", () => {
+    sendCommand({ type: "set_player_control", player: row.__playerIndex, control: controlSelect.value });
+  });
+
+  const modelSelect = document.createElement("select");
+  modelSelect.className = "model-select";
+  modelSelect.addEventListener("change", () => {
+    sendCommand({ type: "set_player_model", player: row.__playerIndex, model_id: modelSelect.value });
+  });
+
+  row.__label = label;
+  row.__controlSelect = controlSelect;
+  row.__modelSelect = modelSelect;
+  row.append(label, controlSelect, modelSelect);
+  return row;
+}
+
+function syncControlRow(row, player, snapshot) {
+  row.__playerIndex = player.index;
+  row.__label.textContent = player.name;
+  syncSelectOptions(
+    row.__controlSelect,
+    [
+      { value: "human", label: "Human" },
+      { value: "model", label: "Model" },
+    ],
+    player.control || "model"
+  );
+  row.__controlSelect.disabled = snapshot.game_done;
+  syncSelectOptions(
+    row.__modelSelect,
+    modelOptions(snapshot),
+    player.model_id === null || player.model_id === undefined ? "" : String(player.model_id)
+  );
+  row.__modelSelect.disabled = snapshot.game_done || !row.__modelSelect.options.length;
 }
 
 function renderPlayers(snapshot) {
@@ -228,15 +254,43 @@ function renderPlayers(snapshot) {
   }
 }
 
-function replaceOptions(select, options, selectedValue) {
-  const activeValue = String(selectedValue);
-  select.replaceChildren();
-  for (const option of options) {
-    const node = document.createElement("option");
-    node.value = option.value;
-    node.textContent = option.label;
-    node.selected = option.value === activeValue;
-    select.appendChild(node);
+function syncSelectOptions(select, options, selectedValue) {
+  const nextOptions = options.map((option) => ({
+    value: String(option.value),
+    label: String(option.label),
+  }));
+  const currentOptions = Array.from(select.options || []);
+  const sameOptions =
+    currentOptions.length === nextOptions.length &&
+    currentOptions.every(
+      (option, index) => option.value === nextOptions[index].value && option.textContent === nextOptions[index].label
+    );
+  const selected = String(selectedValue);
+  const focusedValue =
+    document.activeElement === select && nextOptions.some((option) => option.value === select.value)
+      ? select.value
+      : null;
+  const desiredValue = focusedValue === null ? selected : focusedValue;
+
+  if (!sameOptions) {
+    select.replaceChildren();
+    for (const option of nextOptions) {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      select.appendChild(node);
+    }
+  }
+
+  if (select.value !== desiredValue || !sameOptions) {
+    setSelectValue(select, desiredValue);
+  }
+}
+
+function setSelectValue(select, value) {
+  select.value = value;
+  for (const option of select.options || []) {
+    option.selected = option.value === value;
   }
 }
 
