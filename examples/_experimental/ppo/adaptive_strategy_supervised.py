@@ -81,6 +81,7 @@ def load_strategy_dataset(
     finish_head_mode: str = "binary",
     action_ce_weight_mode: str = "all",
     label_source: str = "trajectory",
+    action_ce_path_contains: tuple[str, ...] = (),
 ) -> dict[str, jnp.ndarray]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
     rng = np.random.default_rng(seed)
@@ -213,6 +214,8 @@ def load_strategy_dataset(
             action_weight = search_best_outcome == OUTCOME_WIN
         else:
             action_weight = np.ones_like(outcome, dtype=np.bool_)
+        if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
+            action_weight = np.zeros_like(action_weight, dtype=np.bool_)
         chunks["action_weight"].append(action_weight.astype(np.float32))
 
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
@@ -802,6 +805,12 @@ def parse_args():
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight-mode", choices=ACTION_CE_WEIGHT_MODES, default="all")
+    parser.add_argument(
+        "--action-ce-path-contains",
+        action="append",
+        default=[],
+        help="Only shards whose path contains this token contribute action CE. Repeatable.",
+    )
     parser.add_argument("--q-kl-weight", type=float, default=0.0)
     parser.add_argument("--q-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--search-q-rank-weight", type=float, default=0.0)
@@ -907,6 +916,7 @@ def main():
         args.finish_head_mode,
         args.action_ce_weight_mode,
         args.label_source,
+        tuple(args.action_ce_path_contains),
     )
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
     if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:

@@ -9308,3 +9308,216 @@ Do not sweep learned-gate thresholds. The next useful step is stronger adapter
 data or a policy delta trained to expose more decisive state-conditioned
 differences, then re-use this gate machinery.
 ```
+
+## 2026-06-19: Domain-Filtered Action CE and Terminal Search-Win Probe
+
+Added a loader-side action CE domain filter:
+
+```text
+adaptive_strategy_supervised.py
+  --action-ce-path-contains <token>
+```
+
+When one or more tokens are provided, shards whose path does not contain any
+token keep contributing policy KL, finish/outcome, belief, intent, and other
+auxiliary losses, but their primitive action CE weight is zeroed. This lets
+fixed-v5 decisive shards teach actions while Expander shards act as protection
+data.
+
+Before training, an adapter-delta inspection showed why the previous learned
+gate was data-starved:
+
+```text
+p0mix-v0:
+  total rows: 53,922
+  greedy top1 changed: 175
+  fixed-v5 changed rows: 90
+  fixed-v5 changed rows with search-best win: 4
+
+p0mix-v1, stronger action CE:
+  greedy top1 changed: 933
+  fixed-v5 changed rows: 397
+  fixed-v5 changed rows with search-best win: 20
+  expander changed rows with search-best win: 50
+```
+
+The stronger adapter created more deltas, but too many were in the Expander
+protection domain, which explains why a static or learned gate could not isolate
+fixed-v5 gains.
+
+Domain-filtered policy-head probe:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-p0fixedaction-v0/
+data:
+  fixed-v5-safev3-p0-v0 + expander-safev3-v0
+action CE:
+  search-best-win rows only
+  path contains fixed-v5-safev3-p0
+update:
+  policy-heads
+final:
+  KL 0.0018
+  ActW 0.077
+```
+
+Results:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 88620:
+  p0 10.94%
+  p1  6.25%
+  min  6.25%
+
+Expander 8/12/16, 64 games/row, seed 88640:
+  8p0 81.25%, 8p1 70.31%
+  12p0 76.56%, 12p1 82.81%
+  16p0 84.38%, 16p1 70.31%
+  min 70.31%
+```
+
+Domain-filtered full-trunk p0 probe:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-main-p0fixedaction-v0/
+data:
+  fixed-v5-safev3-p0-v0 + expander-safev3-v0
+balance:
+  size-seat-domain
+action CE:
+  search-best-win rows only
+  path contains fixed-v5-safev3-p0
+update:
+  all weights
+final:
+  KL 0.0056
+  ActW 0.019
+```
+
+Results:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 88720:
+  p0 13.28%
+  p1 10.16%
+  min 10.16%
+
+Expander 8/12/16, 64 games/row, seed 88740:
+  8p0 82.81%, 8p1 65.62%
+  12p0 82.81%, 12p1 89.06%
+  16p0 76.56%, 16p1 82.81%
+  min 65.62%
+```
+
+Domain-filtered full-trunk two-seat probe:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-main-fixedaction-v0/
+data:
+  fixed-v5-safev3-v0 + expander-safev3-v0
+balance:
+  size-seat-domain
+action CE:
+  search-best-win rows only
+  path contains fixed-v5-safev3-v0
+update:
+  all weights
+final:
+  KL 0.0047
+  ActW 0.033
+```
+
+Results:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 88820:
+  p0 10.16%
+  p1 14.84%
+  min 10.16%
+
+Expander 8/12/16, 64 games/row, seed 88840:
+  8p0 70.31%, 8p1 64.06%
+  12p0 81.25%, 12p1 84.38%
+  16p0 75.00%, 16p1 78.12%
+  min 64.06%
+```
+
+Collected a stricter terminal/search-win fixed-v5 shard:
+
+```text
+run:
+  runs/adaptive-midgame-terminal-searchwin-fixed-v5-safev3-v0/
+teacher/search prior:
+  adaptive-midgame-contact-searchwin-imitation-v3
+opponent:
+  fixed v5 sample
+filters:
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+  outcome_known
+  terminal_window <= 120
+  search_gap >= 0.25
+  search_best_win
+rows:
+  1,722
+search_best_outcome:
+  win 1,722
+trajectory outcome by seat:
+  p0 loss/draw/win 238/231/551
+  p1 loss/draw/win 120/165/417
+```
+
+Terminal winning-trajectory full-trunk probe:
+
+```text
+run:
+  runs/adaptive-midgame-terminal-searchwin-safev3-main-terminalwin-v0/
+data:
+  terminal-searchwin fixed-v5 + expander-safev3-v0
+balance:
+  size-seat-domain
+action CE:
+  trajectory win rows only
+  path contains terminal-searchwin
+update:
+  all weights
+final:
+  KL 0.0061
+  ActW 0.141
+```
+
+Results:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 89020:
+  p0  8.59%
+  p1 11.72%
+  min  8.59%
+
+Expander 8/12/16, 64 games/row, seed 89040:
+  8p0 76.56%, 8p1 62.50%
+  12p0 76.56%, 12p1 76.56%
+  16p0 82.81%, 16p1 76.56%
+  min 62.50%
+```
+
+Conclusion:
+
+```text
+The new domain filter works and is useful for controlled probes, but the
+gameplay evidence is now consistent:
+  primitive action CE remains too blunt, even when restricted by domain,
+  seat, terminal window, search-best-win, or true trajectory wins.
+
+The losses move, but fixed-v5 max250 does not break past the old 10%-12% band,
+and 8x Expander player-1 is repeatedly the first row to collapse.
+
+Stop global primitive CE imitation on these shards. The next useful path is to
+use the terminal/search-win data as non-primitive supervision: finish/outcome
+calibration, plan/target Q, or a plan-conditioned Worker trained/evaluated
+before it is mixed into the base policy.
+```

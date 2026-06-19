@@ -1070,3 +1070,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not sweep learned gate thresholds. Train a stronger policy-delta adapter or collect richer decisive adapter data before reusing the gate machinery.
 - **Context:** v0 trained on only 175 changed-action examples with 4 positives; fixed-v5 max250 256-row held `12.11%` min but Expander 128-row fell to `69.53%`. v1 added unchanged-action negatives (`53,922` examples, still only 4 positives); threshold `0.1` fell to fixed-v5 min `9.38%`. The current p0mix adapter is too sparse a delta source for learned gating.
+
+## [2026-06-19 22:29] Domain-Filtered Action CE Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --action-ce-path-contains` so primitive action CE can be restricted to selected shard path tokens while all shards still contribute KL/aux losses. Documented the flag and GPU results for domain-filtered policy-head, full-trunk, and terminal/search-win probes.
+- **Status:** Completed
+- **Next Steps:** Stop global primitive CE imitation on these fixed-v5/search-win shards. Reuse the new terminal/search-win data for finish/outcome calibration, plan/target Q, or a plan-conditioned Worker that is validated before it is mixed into the base policy.
+- **Context:** GPU was freed by stopping a stale `play_web.py` process occupying ~12GB. Domain-filtered p0 policy-head reached fixed-v5 128-row min `6.25%` and Expander 64-row min `70.31%`; p0 full-trunk reached fixed-v5 `10.16%` but Expander `65.62%`; two-seat full-trunk reached fixed-v5 `10.16%` but Expander `64.06%`; terminal/search-win full-trunk reached fixed-v5 `8.59%` and Expander `62.50%`. The filter works, but primitive action CE remains the wrong insertion point.
