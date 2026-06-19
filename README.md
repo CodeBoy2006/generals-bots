@@ -9,6 +9,7 @@
 - `generals/core/`：核心游戏逻辑、环境包装、动作、观测、地图生成和奖励函数。
 - `generals/agents/`：内置 agent，包括 `RandomAgent` 和 `ExpanderAgent`。
 - `generals/gui/`：pygame 可视化和 replay GUI。
+- `generals/web/`：浏览器 Canvas 渲染层和 FastAPI WebSocket 会话服务。
 - `generals/remote/`：连接 generals.io 远程服务的客户端代码。
 - `examples/`：单局、向量化、可视化示例。
 - `examples/_experimental/ppo/`：实验性 PPO、行为克隆、策略评估和策略可视化工具。
@@ -106,6 +107,19 @@ pygame 可视化：
 uv run python examples/visualization_example.py
 ```
 
+浏览器可视化，适合远程服务器或没有远端 GUI 的环境：
+
+```bash
+uv run python examples/play_web.py generals-ppo-8x8-expander-gpu-v5.eqx \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+启动后在浏览器打开 `http://127.0.0.1:8765`。如果要从另一台机器访问，
+把 `--host` 设为 `0.0.0.0`，再访问服务器 IP 的同一端口；该开发服务器没有鉴权，
+只应暴露在可信网络或 SSH 隧道中。浏览器端只负责 Canvas 绘制和按钮输入，
+游戏规则、战争迷雾、PPO 推理和 rollout-search 仍在 Python/JAX 服务端执行。
+
 玩家对战训练好的 PPO checkpoint：
 
 ```bash
@@ -193,6 +207,23 @@ uv run python examples/play_against_model.py \
   --tick-rate 4
 ```
 
+浏览器入口接受同一组模型、地图、策略、搜索和自动 tick 参数。观看两个 PPO
+在浏览器里对战：
+
+```bash
+uv run python examples/play_web.py \
+  --machine-vs-machine \
+  --model-0-path /tmp/generals-ppo-a.eqx \
+  --model-1-path /tmp/generals-ppo-b.eqx \
+  --grid-size 8 \
+  --map-generator generated \
+  --policy-mode sample \
+  --opponent-policy-mode sample \
+  --tick-rate 4 \
+  --host 0.0.0.0 \
+  --port 8765
+```
+
 手动打开 rollout-search：
 
 ```bash
@@ -224,6 +255,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 控制方式：
 
 - 左键点击自己的可移动格子，再点击相邻目标格移动。
+- 浏览器 UI 用右侧 `Split`、`Auto tick` 和 `Rate` 控件替代 pygame 快捷键，也提供 `Pass`、`Cancel` 和 `Restart` 按钮。
 - `S` 切换下一步是否移动一半军队，`P` 跳过本回合。
 - 右键或 `Esc` 取消选中，终局后按 `R` 重开，`Q` 退出。
 - 选中的源格会显示黄色边框，可移动目标格会显示绿色边框。

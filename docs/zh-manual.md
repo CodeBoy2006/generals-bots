@@ -18,6 +18,7 @@
 - 环境包装类 `GeneralsEnv` 支持固定地图和变尺寸/填充地图，并使用预生成 state pool 做快速 auto-reset。
 - 内置 `RandomAgent` 和 `ExpanderAgent` 两个基线 agent。
 - `examples/` 提供单局、向量化、GUI 可视化示例。
+- `generals/web/` 提供浏览器 Canvas 渲染和 FastAPI WebSocket 会话服务，适合远程机器无 GUI 场景。
 - `examples/_experimental/ppo/` 提供实验性训练、行为克隆和批量评估工具。
 
 ## 2. 目录结构
@@ -28,6 +29,7 @@
 │   ├── core/                    # JAX 游戏逻辑、环境、动作、观测、地图生成、奖励
 │   ├── agents/                  # Agent 抽象类和内置策略
 │   ├── gui/                     # pygame GUI 和 replay 渲染
+│   ├── web/                     # 浏览器 Canvas 渲染和 WebSocket 会话服务
 │   ├── remote/                  # generals.io 远程客户端相关代码
 │   └── assets/                  # GUI 图片和字体资源
 ├── examples/                    # 用户示例
@@ -280,6 +282,19 @@ uv run python examples/visualization_example.py
 ```
 
 该示例会显示一局 `RandomAgent` 对 `ExpanderAgent` 的游戏过程。若在无显示服务器的远程机器上运行，pygame 窗口可能无法打开；此时优先运行非 GUI 示例或使用本地桌面/远程显示转发。
+
+远程机器推荐使用浏览器渲染入口：
+
+```bash
+uv run python examples/play_web.py generals-ppo-8x8-expander-gpu-v5.eqx \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+本机浏览器打开 `http://127.0.0.1:8765` 即可。如果浏览器在另一台电脑上，
+把 `--host` 设为 `0.0.0.0`，然后访问服务器 IP 的同一端口。该入口没有内置鉴权，
+只应暴露在可信网络或 SSH 隧道里。浏览器端负责 Canvas 绘制和控件输入；
+游戏规则、战争迷雾、PPO 推理和 rollout-search 仍由 Python/JAX 服务端执行。
 
 ## 6. 性能实验
 
@@ -555,6 +570,21 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
   --preview-top-k 3
 ```
 
+同一模型也可以用浏览器入口对战：
+
+```bash
+uv run python examples/play_web.py /tmp/generals-ppo-8x8-generated.eqx \
+  --grid-size 8 \
+  --map-generator generated \
+  --policy-mode sample \
+  --auto-tick \
+  --tick-rate 2 \
+  --human-player 0 \
+  --preview-top-k 3 \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
 也可以直接观看 PPO 机器对战：
 
 ```bash
@@ -567,6 +597,22 @@ uv run python examples/play_against_model.py \
   --policy-mode sample \
   --opponent-policy-mode sample \
   --tick-rate 4
+```
+
+浏览器观看两个 PPO 对战：
+
+```bash
+uv run python examples/play_web.py \
+  --machine-vs-machine \
+  --model-0-path /tmp/generals-ppo-a.eqx \
+  --model-1-path /tmp/generals-ppo-b.eqx \
+  --grid-size 8 \
+  --map-generator generated \
+  --policy-mode sample \
+  --opponent-policy-mode sample \
+  --tick-rate 4 \
+  --host 0.0.0.0 \
+  --port 8765
 ```
 
 若要在 GUI 中使用 `v5 + rollout-search`，直接用脚本环境变量打开搜索：
@@ -600,10 +646,12 @@ SEARCH_ROLLOUTS_PER_ACTION=2 \
 ```
 
 当前 GUI 搜索只支持 9 通道 observation checkpoint；v5 checkpoint 可直接使用。
+浏览器入口沿用同一组搜索参数，例如 `uv run python examples/play_web.py generals-ppo-8x8-expander-gpu-v5.eqx --search-policy --policy-input observation`。
 
 控制方式：
 
 - 左键点击自己的可移动格子作为源格，再点击相邻目标格提交移动。
+- 浏览器 UI 用右侧 `Split`、`Auto tick` 和 `Rate` 控件替代 pygame 快捷键，并提供 `Pass`、`Cancel`、`Restart` 按钮。
 - `S` 切换下一步是否 split/半兵移动。
 - `P` 跳过本回合。
 - 右键或 `Esc` 取消当前选中。

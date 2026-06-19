@@ -315,3 +315,9 @@
 - **Status:** Completed
 - **Next Steps:** Update README and the Chinese manual with the new browser entry point, then run full regression and browser smoke verification.
 - **Context:** The page uses the `/ws/game` snapshot protocol directly, hides fogged cells on the client, and sends semantic commands for select, move, pass, cancel, split, auto tick, and restart.
+
+## [2026-06-19 20:37] Web Renderer Documentation
+- **Changes:** Documented `generals/web/`, `examples/play_web.py`, remote browser access, WebSocket/Canvas responsibilities, trusted-network caveat, and browser control mapping in README and the Chinese manual.
+- **Status:** Completed
+- **Next Steps:** Run full regression, smoke the server and browser UI, then merge and push the completed implementation.
+- **Context:** The browser renderer is now documented as the preferred path for remote machines without GUI display, while the pygame path remains available for local desktop use.
