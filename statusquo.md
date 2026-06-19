@@ -987,3 +987,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote q-rerank from this probe. Use high-gap search rankings for calibrated/gated Q, finish/value/intent heads, or broader mixed datasets before any full-policy update.
 - **Context:** CUDA run `runs/adaptive-midgame-search-q-rank-v0/` reduced SQ loss `3.8067 -> 2.7584` but top1 stayed weak. Expander 256-row seed85280 scale=0 was `71.09%`; q-rerank scale `0.001` was `71.48%`, while scale `0.01` collapsed 64-row min to `54.69%` on 8p1. A low-lr full-policy decisive imitation recheck with KL/action CE/finish/outcome/belief/intent still collapsed 64-row 8p1 to `56.25%`.
+
+## [2026-06-19 17:26] Search-Best Outcome Head Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --label-source search-best`, `--balance-finish-labels`, and `--balance-outcome-labels` so high-gap search shards can train frozen finish/outcome heads from local rollout-search best-action outcomes. Updated README, zh manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Do not use this checkpoint for promotion yet. Next attempt should either unfreeze a small value/strategy bottleneck under policy freeze/KL, or collect broader search-best labels with negative and draw-heavy non-winning rows before using finish gates in gameplay.
+- **Context:** Current environment had no visible GPU (`CUDA_ERROR_NO_DEVICE`, `nvidia-smi` failed), so runs are CPU path/label diagnostics only. `search_best_outcome` win labels in highgap-v1 are rare (`19%-35%` by stratum). Unbalanced v0 reached finish accuracy `72.0%`, matching draw-majority behavior; balanced v1 reached finish loss `0.6982`, outcome loss `1.0781`, outcome accuracy `39.6%`, and passed a 2-logit finish evaluator load smoke.

@@ -683,7 +683,9 @@ Draw-heavy shards should not usually contribute action CE. `adaptive_strategy_su
 
 Use `adaptive_strategy_supervised.py --balance-strata size-seat` when a filtered shard is concentrated in a few grid-size or learner-seat rows. It downsamples to equal `(grid_size, seat)` counts before shuffling, which is useful for high-gap or terminal-window imitation probes where raw row counts can hide seat tradeoffs.
 
-This is a representation-learning step, not a gameplay promotion step. Use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head.
+`adaptive_strategy_supervised.py --label-source search-best` switches only the finish/outcome labels from full-trajectory outcome to the saved rollout-search best-action outcome. This is useful on high-gap search shards where the recorded trajectory may eventually win but the local search best action still distinguishes immediate win-like states from draw-like states. Pair it with `--finish-head-mode binary --init-finish-head-mode multi-horizon` when converting a 3-logit finish checkpoint into a 2-logit finish gate. `--balance-finish-labels` and `--balance-outcome-labels` apply batch-level inverse-frequency weighting so rare search-win labels are not drowned by search-draw rows.
+
+This is a representation-learning step, not a gameplay promotion step. For ordinary trajectory labels, use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head. Search-best labels are a separate probe because they supervise local search outcome, not the final rollout winner.
 
 For a cautious policy-coupled follow-up, start from a checkpoint that already has trained strategy heads, cap each shard to avoid long fixed-v5 rollouts dominating the batch, and require a positive policy KL anchor:
 

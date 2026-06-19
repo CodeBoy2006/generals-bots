@@ -7514,3 +7514,66 @@ policy on narrow high-gap winning rows creates a seat-specific regression.
 Freeze policy first, mix broader non-winning/draw-heavy counterexamples, or add
 a much stricter per-stratum behavior-preservation gate before trying another
 full-policy trajectory imitation run.
+
+### Search-best outcome/finish head
+
+High-gap search shards have a useful local label that trajectory outcome hides.
+In `adaptive-strategy-search-highgap-v1`, the saved trajectory outcome is all
+win after filtering, but `search_best_outcome` still separates local search-win
+from search-draw states:
+
+```text
+search_best_outcome win rate by stratum:
+  8p0: 34.6%
+  8p1: 19.0%
+  12p0: 21.9%
+  12p1: 32.4%
+  16p0: 26.1%
+  16p1: 23.3%
+balanced rows: 1230
+```
+
+`adaptive_strategy_supervised.py --label-source search-best` now switches only
+finish/outcome labels to this local search-best outcome. Action CE weighting
+continues to use the real trajectory outcome. The same change adds
+`--balance-finish-labels` and `--balance-outcome-labels` to avoid the rare
+search-win labels being swamped by search-draw rows.
+
+CPU probes were used because the current continuation environment had no CUDA
+device (`nvidia-smi` could not communicate with the driver and JAX reported
+`CUDA_ERROR_NO_DEVICE`). These runs are path/label diagnostics, not GPU training
+records.
+
+```text
+run: runs/adaptive-search-best-outcome-head-v0/
+labels: search-best
+finish head: binary, warm-started from multi-horizon v1
+losses: finish=0.5, outcome=0.5
+balance: none
+result:
+  finish loss: 1.3691 -> 0.6268
+  finish accuracy: 26.4% -> 72.0%
+  outcome loss: 2.7738 -> 1.3488
+  outcome accuracy: 28.6% -> 40.8%
+interpretation:
+  finish accuracy mostly matches the draw-majority baseline, so the unbalanced
+  run is not evidence of decisive-state recognition.
+
+run: runs/adaptive-search-best-outcome-head-v1/
+labels: search-best
+losses: finish=0.5, outcome=0.5
+balance: finish labels + outcome labels
+result:
+  finish loss: 0.9918 -> 0.6982
+  finish accuracy: 26.2% -> 44.7%
+  outcome loss: 1.9116 -> 1.0781
+  outcome accuracy: 28.8% -> 39.6%
+  evaluator load smoke: passed with --strategy-finish-outputs 2
+```
+
+Conclusion: the data path is now correct and the outcome head learns some
+search-best structure, but binary finish from frozen last-layer heads is still
+weak. The next promotion-oriented version should either unfreeze a small shared
+value/strategy bottleneck with a KL-anchored policy freeze, or collect broader
+search-best labels including negative/draw-heavy non-winning rows before using
+finish gates in gameplay.

@@ -31,6 +31,7 @@ OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
 ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins")
 BALANCE_STRATA_MODES = ("none", "size-seat")
+LABEL_SOURCE_MODES = ("trajectory", "search-best")
 
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
@@ -56,6 +57,7 @@ def load_strategy_dataset(
     seed: int = 0,
     finish_head_mode: str = "binary",
     action_ce_weight_mode: str = "all",
+    label_source: str = "trajectory",
 ) -> dict[str, jnp.ndarray]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
     rng = np.random.default_rng(seed)
@@ -96,22 +98,44 @@ def load_strategy_dataset(
         chunks["legal_mask"].append(shard["legal_mask"][shard_indices].astype(np.bool_))
         chunks["active"].append(shard["active"][shard_indices].astype(np.bool_))
         chunks["intent"].append(shard["intent"][shard_indices].astype(np.int32))
+        trajectory_outcome = shard["outcome"][shard_indices].astype(np.int32)
+        trajectory_outcome_weight = shard["outcome_known"][shard_indices].astype(np.float32)
+        if label_source == "search-best":
+            if "search_best_outcome" in shard:
+                search_best_outcome = shard["search_best_outcome"][shard_indices].astype(np.int32)
+                label_known = search_best_outcome >= 0
+                outcome_target = np.where(label_known, search_best_outcome, OUTCOME_DRAW).astype(np.int32)
+                outcome_weight = label_known.astype(np.float32)
+                finish_target = (search_best_outcome == OUTCOME_WIN).astype(np.float32)
+            else:
+                shard_count = shard_indices.shape[0]
+                outcome_target = np.full((shard_count,), OUTCOME_DRAW, dtype=np.int32)
+                outcome_weight = np.zeros((shard_count,), dtype=np.float32)
+                finish_target = np.zeros((shard_count,), dtype=np.float32)
+        else:
+            outcome_target = trajectory_outcome
+            outcome_weight = trajectory_outcome_weight
+            finish_target = shard["finish_within_250"][shard_indices].astype(np.float32)
         if finish_head_mode == "multi-horizon":
-            chunks["finish"].append(
-                np.stack(
+            if label_source == "search-best":
+                # Search-best labels are horizon-free; repeat the same target so
+                # multi-output checkpoints can still learn the search win signal.
+                finish_targets = np.repeat(finish_target[:, None], 3, axis=1)
+            else:
+                finish_targets = np.stack(
                     [
                         shard["finish_within_50"][shard_indices],
                         shard["finish_within_100"][shard_indices],
                         shard["finish_within_250"][shard_indices],
                     ],
                     axis=-1,
-                ).astype(np.float32)
-            )
+                )
+            chunks["finish"].append(finish_targets.astype(np.float32))
         else:
-            chunks["finish"].append((shard["finish_within_250"][shard_indices] > 0.5).astype(np.int32))
-        chunks["finish_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
-        chunks["outcome"].append(shard["outcome"][shard_indices].astype(np.int32))
-        chunks["outcome_weight"].append(shard["outcome_known"][shard_indices].astype(np.float32))
+            chunks["finish"].append((finish_target > 0.5).astype(np.int32))
+        chunks["finish_weight"].append(outcome_weight.astype(np.float32))
+        chunks["outcome"].append(outcome_target.astype(np.int32))
+        chunks["outcome_weight"].append(outcome_weight.astype(np.float32))
         chunks["enemy_general"].append(shard["enemy_general_heatmap"][shard_indices].astype(np.float32))
         chunks["source_heatmap"].append(shard["source_heatmap"][shard_indices].astype(np.float32))
         chunks["target_heatmap"].append(shard["target_heatmap"][shard_indices].astype(np.float32))
@@ -140,8 +164,8 @@ def load_strategy_dataset(
             )
             chunks["search_scores"].append(np.full((shard_count, search_candidate_count), -1.0e4, dtype=np.float32))
             chunks["search_score_gap"].append(np.zeros((shard_count,), dtype=np.float32))
-        outcome = shard["outcome"][shard_indices].astype(np.int32)
-        outcome_known = shard["outcome_known"][shard_indices].astype(np.float32) > 0.0
+        outcome = trajectory_outcome
+        outcome_known = trajectory_outcome_weight > 0.0
         if action_ce_weight_mode == "non-draw":
             action_weight = ~(outcome_known & (outcome == OUTCOME_DRAW))
         elif action_ce_weight_mode == "wins":
@@ -253,6 +277,30 @@ def search_q_rank_metrics(
     return loss, accuracy, entropy, weight_mean
 
 
+def binary_balance_weights(labels: jnp.ndarray, weights: jnp.ndarray) -> jnp.ndarray:
+    """Return per-label weights that give positive and negative labels equal mass."""
+    labels_f = labels.astype(jnp.float32)
+    weights_f = weights.astype(jnp.float32)
+    positives = jnp.sum(weights_f * labels_f)
+    negatives = jnp.sum(weights_f * (1.0 - labels_f))
+    total = positives + negatives
+    positive_scale = total / jnp.maximum(2.0 * positives, 1.0)
+    negative_scale = total / jnp.maximum(2.0 * negatives, 1.0)
+    return jnp.where(labels_f > 0.5, positive_scale, negative_scale)
+
+
+def class_balance_weights(targets: jnp.ndarray, weights: jnp.ndarray, num_classes: int) -> jnp.ndarray:
+    """Return inverse-frequency per-sample class weights for present classes."""
+    weights_f = weights.astype(jnp.float32)
+    class_ids = jnp.arange(num_classes)
+    counts = jnp.sum((targets[:, None] == class_ids[None, :]).astype(jnp.float32) * weights_f[:, None], axis=0)
+    present = counts > 0.0
+    present_count = jnp.maximum(jnp.sum(present.astype(jnp.float32)), 1.0)
+    total = jnp.sum(counts)
+    scales = jnp.where(present, total / jnp.maximum(present_count * counts, 1.0), 0.0)
+    return scales[targets]
+
+
 @eqx.filter_jit
 def train_step(
     network,
@@ -271,6 +319,8 @@ def train_step(
     search_q_temperature: float,
     source_weight: float,
     target_weight: float,
+    balance_finish_labels: bool,
+    balance_outcome_labels: bool,
     freeze_base: bool,
     multi_horizon_finish: bool,
 ):
@@ -308,8 +358,14 @@ def train_step(
         finish_normalizer = jnp.maximum(jnp.sum(finish_weights), 1.0)
         if multi_horizon_finish:
             finish_losses = binary_cross_entropy_with_logits(outputs.finish_logits, finish_targets)
-            finish_loss = jnp.sum(finish_losses * finish_weights[:, None])
-            finish_loss = finish_loss / jnp.maximum(finish_normalizer * finish_targets.shape[-1], 1.0)
+            finish_label_weights = jnp.where(
+                balance_finish_labels,
+                binary_balance_weights(finish_targets, finish_weights[:, None]),
+                1.0,
+            )
+            weighted_finish = finish_losses * finish_weights[:, None] * finish_label_weights
+            finish_loss = jnp.sum(weighted_finish)
+            finish_loss = finish_loss / jnp.maximum(jnp.sum(finish_weights[:, None] * finish_label_weights), 1.0)
             finish_predictions = (jax.nn.sigmoid(outputs.finish_logits) >= 0.5).astype(jnp.float32)
             finish_accuracy = jnp.sum(
                 (finish_predictions == finish_targets).astype(jnp.float32) * finish_weights[:, None]
@@ -318,7 +374,13 @@ def train_step(
         else:
             finish_log_probs = jax.nn.log_softmax(outputs.finish_logits, axis=-1)
             finish_losses = -finish_log_probs[jnp.arange(finish_log_probs.shape[0]), finish_targets]
-            finish_loss = jnp.sum(finish_losses * finish_weights) / finish_normalizer
+            finish_label_weights = jnp.where(
+                balance_finish_labels,
+                binary_balance_weights(finish_targets, finish_weights),
+                1.0,
+            )
+            finish_loss = jnp.sum(finish_losses * finish_weights * finish_label_weights)
+            finish_loss = finish_loss / jnp.maximum(jnp.sum(finish_weights * finish_label_weights), 1.0)
             finish_accuracy = jnp.sum(
                 (jnp.argmax(outputs.finish_logits, axis=-1) == finish_targets).astype(jnp.float32) * finish_weights
             )
@@ -339,7 +401,13 @@ def train_step(
             outcome_log_probs = jax.nn.log_softmax(outcome_logits, axis=-1)
             outcome_losses = -outcome_log_probs[jnp.arange(outcome_log_probs.shape[0]), outcome_targets]
             outcome_normalizer = jnp.maximum(jnp.sum(outcome_weights), 1.0)
-            outcome_loss = jnp.sum(outcome_losses * outcome_weights) / outcome_normalizer
+            outcome_label_weights = jnp.where(
+                balance_outcome_labels,
+                class_balance_weights(outcome_targets, outcome_weights, 3),
+                1.0,
+            )
+            outcome_loss = jnp.sum(outcome_losses * outcome_weights * outcome_label_weights)
+            outcome_loss = outcome_loss / jnp.maximum(jnp.sum(outcome_weights * outcome_label_weights), 1.0)
             outcome_accuracy = jnp.sum(
                 (jnp.argmax(outcome_logits, axis=-1) == outcome_targets).astype(jnp.float32) * outcome_weights
             )
@@ -480,6 +548,8 @@ def train_epoch(
     search_q_temperature: float,
     source_weight: float,
     target_weight: float,
+    balance_finish_labels: bool,
+    balance_outcome_labels: bool,
     freeze_base: bool,
     multi_horizon_finish: bool,
 ):
@@ -530,6 +600,8 @@ def train_epoch(
             search_q_temperature,
             source_weight,
             target_weight,
+            balance_finish_labels,
+            balance_outcome_labels,
             freeze_base,
             multi_horizon_finish,
         )
@@ -544,6 +616,12 @@ def parse_args():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-shard", type=int, default=None)
     parser.add_argument("--balance-strata", choices=BALANCE_STRATA_MODES, default="none")
+    parser.add_argument(
+        "--label-source",
+        choices=LABEL_SOURCE_MODES,
+        default="trajectory",
+        help="Use trajectory outcome labels or rollout-search best-action outcome labels for finish/outcome heads.",
+    )
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
@@ -577,6 +655,8 @@ def parse_args():
     parser.add_argument("--finish-weight", type=float, default=0.4)
     parser.add_argument("--belief-weight", type=float, default=0.3)
     parser.add_argument("--outcome-weight", type=float, default=0.0)
+    parser.add_argument("--balance-finish-labels", action="store_true")
+    parser.add_argument("--balance-outcome-labels", action="store_true")
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight-mode", choices=ACTION_CE_WEIGHT_MODES, default="all")
@@ -661,8 +741,11 @@ def main():
         args.seed,
         args.finish_head_mode,
         args.action_ce_weight_mode,
+        args.label_source,
     )
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
+    if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:
+        raise ValueError("--label-source search-best requires shards with search_best_outcome labels")
     key = jrandom.PRNGKey(args.seed)
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
     init_value_bins = (
@@ -684,10 +767,12 @@ def main():
     print(f"Network arch:  {args.network_arch}")
     print(f"Warm start:    {args.init_model_path}")
     print(f"Finish head:   {args.finish_head_mode} ({finish_outputs} logits)")
+    print(f"Label source:  {args.label_source}")
     print(
         "Loss weights:  "
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
         f"belief={args.belief_weight:g}, outcome={args.outcome_weight:g}, "
+        f"balance_finish={args.balance_finish_labels}, balance_outcome={args.balance_outcome_labels}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
         f"action_ce_mode={args.action_ce_weight_mode}, "
         f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}, "
@@ -751,6 +836,8 @@ def main():
             args.search_q_temperature,
             args.source_weight,
             args.target_weight,
+            args.balance_finish_labels,
+            args.balance_outcome_labels,
             args.update_scope == "strategy-heads",
             args.finish_head_mode == "multi-horizon",
         )
