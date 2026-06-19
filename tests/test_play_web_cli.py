@@ -2,7 +2,7 @@ import sys
 import importlib
 from pathlib import Path
 
-from examples.play_web import args_to_config, parse_args
+from examples.play_web import args_to_config, build_model_catalog, parse_args
 from generals.web.server import create_app
 from generals.web.session import WebSessionConfig
 
@@ -92,6 +92,25 @@ def test_parse_web_args_treats_zero_max_steps_as_unlimited(monkeypatch):
     config = args_to_config(args)
 
     assert config.max_steps is None
+
+
+def test_build_model_catalog_includes_explicit_and_discovered_checkpoints(tmp_path):
+    explicit = tmp_path / "explicit.eqx"
+    explicit.write_text("model", encoding="utf-8")
+    root_model = tmp_path / "root.eqx"
+    root_model.write_text("model", encoding="utf-8")
+    legacy_dir = tmp_path / "legacymodels" / "nested"
+    legacy_dir.mkdir(parents=True)
+    legacy_model = legacy_dir / "legacy.eqx"
+    legacy_model.write_text("model", encoding="utf-8")
+
+    catalog = build_model_catalog([str(explicit)], repo_root=tmp_path)
+
+    assert catalog == [
+        {"id": str(explicit), "label": "explicit.eqx", "path": str(explicit)},
+        {"id": str(root_model), "label": "root.eqx", "path": str(root_model)},
+        {"id": str(legacy_model), "label": "legacy.eqx", "path": str(legacy_model)},
+    ]
 
 
 def test_static_browser_assets_and_real_asset_mounts_exist():

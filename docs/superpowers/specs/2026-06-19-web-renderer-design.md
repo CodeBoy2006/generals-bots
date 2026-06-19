@@ -159,8 +159,12 @@ Example:
     "visible": [[true, true], [true, false]]
   },
   "players": [
-    {"index": 0, "name": "Human", "army": 5, "land": 1, "color": "#dc3737"},
-    {"index": 1, "name": "PPO Model", "army": 3, "land": 1, "color": "#285adc"}
+    {"index": 0, "name": "Human", "army": 5, "land": 1, "color": "#dc3737", "control": "human", "model_id": "v5"},
+    {"index": 1, "name": "PPO Model", "army": 3, "land": 1, "color": "#285adc", "control": "model", "model_id": "v4"}
+  ],
+  "active_human_player": 0,
+  "model_catalog": [
+    {"id": "v5", "label": "generals-ppo-8x8-expander-gpu-v5.eqx", "path": "generals-ppo-8x8-expander-gpu-v5.eqx"}
   ],
   "time": 2,
   "step_count": 1,
@@ -205,6 +209,9 @@ Commands:
 {"type": "set_split", "enabled": true}
 {"type": "restart"}
 {"type": "set_auto_tick", "enabled": true, "tick_rate": 2.0}
+{"type": "set_player_control", "player": 0, "control": "model"}
+{"type": "set_player_model", "player": 0, "model_id": "generals-ppo-8x8-expander-gpu-v5.eqx"}
+{"type": "set_active_human_player", "player": 1}
 {"type": "set_visibility", "mode": "human"}
 ```
 
@@ -221,7 +228,7 @@ Components:
 - `GameClient`: WebSocket lifecycle, reconnect display, command send queue, snapshot store.
 - `BoardCanvas`: draws the grid, fog, ownership colors, terrain, army numbers, selection, valid targets, and AI preview arrows.
 - `HudPanel`: draws or renders DOM HUD for players, army, land, time, speed, selected cell, split state, terminal winner, and policy candidates.
-- `Controls`: pass, split toggle, restart, auto tick toggle, tick-rate control, visibility selector for watch mode.
+- `Controls`: pass, split toggle, restart, auto tick toggle, tick-rate control, dynamic human/model handoff controls, model selectors, and visibility selector for watch mode.
 - `CoordinateMapper`: converts pointer coordinates into board cells and keeps resize behavior stable.
 
 The board should use the existing asset semantics:

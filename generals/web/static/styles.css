@@ -41,7 +41,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -82,6 +83,16 @@ input[type="number"] {
   color: var(--text);
 }
 
+select {
+  min-height: 34px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #101319;
+  color: var(--text);
+}
+
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -104,7 +115,8 @@ input[type="number"] {
 .command-row,
 .control-strip,
 .switch-control,
-.number-control {
+.number-control,
+.select-control {
   display: flex;
   align-items: center;
 }
@@ -230,11 +242,16 @@ input[type="number"] {
 }
 
 .switch-control,
-.number-control {
+.number-control,
+.select-control {
   gap: 8px;
   min-height: 36px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+.select-control select {
+  flex: 1 1 auto;
 }
 
 .command-row {
@@ -249,6 +266,31 @@ input[type="number"] {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.handoff-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.player-control-list {
+  display: grid;
+  gap: 8px;
+}
+
+.control-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px minmax(110px, 1.2fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+}
+
+.control-player {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .metric {

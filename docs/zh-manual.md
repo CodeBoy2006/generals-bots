@@ -652,6 +652,8 @@ SEARCH_ROLLOUTS_PER_ACTION=2 \
 
 - 左键点击自己的可移动格子作为源格，再点击相邻目标格把移动加入队列。
 - 浏览器 UI 提供 `Split`、`Auto tick`、`Rate`、`Pass`、`Cancel`、`Undo`、`Clear` 和 `Restart` 控件。
+- `Control` 面板可随时把任一玩家切换为 `Human` 接管或 `Model` 托管，也可为每个玩家从模型下拉框切换 checkpoint；切换不会重开局。
+- 模型下拉框会包含启动命令传入的 checkpoint，以及仓库根目录和 `legacymodels/` 下扫描到的 `.eqx` 文件。
 - 键盘操作与 generals.io 核心习惯一致：`W/A/S/D` 或方向键从当前选中格排队移动，`Space` 取消选中，`Z` 切换半兵，`E` 撤销最后一个队列动作，`Q` 在有队列时清空队列、无队列时排队 pass。
 - 选中的源格会显示黄色边框，可移动目标格会显示绿色边框；已排队移动会在棋盘上显示绿色箭头，并在右侧 `Move Queue` 列表中按顺序显示。
 - 自动 tick 默认开启，每个 tick 优先执行一个队列动作；没有队列时会自动 pass 并继续推进时间，选中格仍可移动时会保持选中，失效时自动清空。`--no-auto-tick` 可关闭，`--tick-rate` 控制每秒自动推进次数。

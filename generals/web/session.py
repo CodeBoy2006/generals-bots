@@ -65,12 +65,14 @@ class WebSessionConfig:
     max_generals_distance: int | None = None
     city_army_min: int = 40
     city_army_max: int = 51
+    model_catalog: list[dict[str, str]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class QueuedMove:
     """One pending human action in the browser move queue."""
 
+    player: int
     source: tuple[int, int] | None
     target: tuple[int, int] | None
     split: bool = False
@@ -92,8 +94,13 @@ class WebGameSession:
         machine_vs_machine: bool = False,
         model_agent: WebAgent | None = None,
         machine_agents: tuple[WebAgent, WebAgent] | None = None,
+        agent_loader: Callable[[int, str], WebAgent] | None = None,
         policy_agent: Any | None = None,
         preview_player: int = 0,
+        player_controls: tuple[str, str] | list[str] | None = None,
+        active_human_player: int | None = None,
+        player_model_ids: tuple[str | None, str | None] | list[str | None] | None = None,
+        model_catalog: list[dict[str, str]] | None = None,
         auto_tick: bool = True,
         tick_rate: float = 2.0,
         max_steps: int | None = None,
@@ -112,6 +119,22 @@ class WebGameSession:
         self.model_player = 1 - human_player
         self.model_agent = model_agent
         self.machine_agents = machine_agents
+        self.agent_loader = agent_loader
+        self.model_agents: list[WebAgent | None] = list(machine_agents) if machine_agents else [None, None]
+        if model_agent is not None:
+            self.model_agents[self.model_player] = model_agent
+        default_controls = ["model", "model"] if machine_vs_machine else ["model", "model"]
+        if not machine_vs_machine:
+            default_controls[human_player] = "human"
+        self.player_controls = list(player_controls or default_controls)
+        self.player_model_ids = list(player_model_ids or [None, None])
+        self.model_catalog = [dict(model) for model in model_catalog or []]
+        self.agent_cache: dict[tuple[int, str], WebAgent] = {}
+        self.active_human_player = (
+            active_human_player
+            if active_human_player is not None and self.player_controls[active_human_player] == "human"
+            else self._first_human_player()
+        )
         self.policy_agent = policy_agent or model_agent or (machine_agents[0] if machine_agents else None)
         self.preview_player = preview_player
         self.auto_tick_enabled = auto_tick
@@ -143,36 +166,38 @@ class WebGameSession:
         def grid_factory(map_key: jnp.ndarray) -> jnp.ndarray:
             return make_grid(args, map_key)
 
-        if config.machine_vs_machine:
-            model_path = config.model_0_path or config.model_path
-            opponent_model_path = config.model_1_path or model_path
-            if model_path is None:
-                raise ValueError("model_path or model_0_path is required")
-            if opponent_model_path is None:
-                raise ValueError("model_1_path or opponent_model_path is required")
-            opponent_policy_mode = config.opponent_policy_mode or config.policy_mode
-            machine_agents = (
-                make_policy_agent(
-                    model_path,
-                    config.grid_size,
-                    config.policy_mode,
-                    names[0],
-                    config.model_0_policy_input,
-                    config.model_0_input_channels,
-                    config.search_policy,
-                    search_config,
-                ),
-                make_policy_agent(
-                    opponent_model_path,
-                    config.grid_size,
-                    opponent_policy_mode,
-                    names[1],
-                    config.model_1_policy_input,
-                    config.model_1_input_channels,
-                    config.opponent_search_policy,
-                    search_config,
-                ),
+        primary_model_path = config.model_path or config.model_0_path
+        if primary_model_path is None:
+            raise ValueError("model_path or model_0_path is required")
+        player_model_ids = [
+            config.model_0_path or primary_model_path,
+            config.model_1_path or primary_model_path,
+        ]
+        model_catalog = list(config.model_catalog or [])
+        known_model_ids = {model["id"] for model in model_catalog}
+        for model_id in player_model_ids:
+            if model_id is not None and model_id not in known_model_ids:
+                model_catalog.append({"id": model_id, "label": str(model_id).split("/")[-1], "path": model_id})
+                known_model_ids.add(model_id)
+
+        def agent_loader(player: int, model_id: str) -> WebAgent:
+            policy_mode = config.policy_mode if player == 0 else config.opponent_policy_mode or config.policy_mode
+            policy_input = config.model_0_policy_input if player == 0 else config.model_1_policy_input
+            input_channels = config.model_0_input_channels if player == 0 else config.model_1_input_channels
+            use_search = config.search_policy if player == 0 else config.opponent_search_policy
+            return make_policy_agent(
+                model_id,
+                config.grid_size,
+                policy_mode,
+                names[player],
+                policy_input,
+                input_channels,
+                use_search,
+                search_config,
             )
+
+        if config.machine_vs_machine:
+            player_controls = ["model", "model"]
             return cls(
                 grid_factory=grid_factory,
                 names=names,
@@ -180,8 +205,11 @@ class WebGameSession:
                 key=key,
                 human_player=config.human_player,
                 machine_vs_machine=True,
-                machine_agents=machine_agents,
-                policy_agent=machine_agents[0],
+                agent_loader=agent_loader,
+                player_controls=player_controls,
+                active_human_player=None,
+                player_model_ids=player_model_ids,
+                model_catalog=model_catalog,
                 preview_player=0,
                 auto_tick=config.auto_tick,
                 tick_rate=config.tick_rate,
@@ -190,19 +218,8 @@ class WebGameSession:
                 ai_preview=config.ai_preview,
             )
 
-        model_path = config.model_path or config.model_0_path
-        if model_path is None:
-            raise ValueError("model_path or model_0_path is required")
-        model_agent = make_policy_agent(
-            model_path,
-            config.grid_size,
-            config.policy_mode,
-            "PPO Model",
-            config.model_0_policy_input,
-            config.model_0_input_channels,
-            config.search_policy,
-            search_config,
-        )
+        player_controls = ["model", "model"]
+        player_controls[config.human_player] = "human"
         return cls(
             grid_factory=grid_factory,
             names=names,
@@ -210,8 +227,11 @@ class WebGameSession:
             key=key,
             human_player=config.human_player,
             machine_vs_machine=False,
-            model_agent=model_agent,
-            policy_agent=model_agent,
+            agent_loader=agent_loader,
+            player_controls=player_controls,
+            active_human_player=config.human_player,
+            player_model_ids=player_model_ids,
+            model_catalog=model_catalog,
             preview_player=1 - config.human_player,
             auto_tick=config.auto_tick,
             tick_rate=config.tick_rate,
@@ -232,6 +252,11 @@ class WebGameSession:
         auto_tick: bool = True,
         tick_rate: float = 2.0,
         max_steps: int | None = None,
+        player_controls: tuple[str, str] | list[str] | None = None,
+        active_human_player: int | None = None,
+        player_model_ids: tuple[str | None, str | None] | list[str | None] | None = None,
+        model_catalog: list[dict[str, str]] | None = None,
+        agent_loader: Callable[[int, str], WebAgent] | None = None,
     ) -> "WebGameSession":
         colors = ["#dc3737", "#285adc"]
         if machine_vs_machine:
@@ -245,6 +270,11 @@ class WebGameSession:
                 human_player=human_player,
                 machine_vs_machine=True,
                 machine_agents=(agents[0], agents[1]),
+                agent_loader=agent_loader,
+                player_controls=player_controls,
+                active_human_player=active_human_player,
+                player_model_ids=player_model_ids,
+                model_catalog=model_catalog,
                 preview_player=0,
                 auto_tick=auto_tick,
                 tick_rate=tick_rate,
@@ -252,8 +282,10 @@ class WebGameSession:
                 ai_preview=False,
             )
 
-        if len(agents) != 1:
-            raise ValueError("human test sessions require one model agent")
+        if len(agents) not in (1, 2):
+            raise ValueError("human test sessions require one or two model agents")
+        machine_agents = (agents[0], agents[1]) if len(agents) == 2 else None
+        model_agent = None if len(agents) == 2 else agents[0]
         return cls(
             initial_grid=grid,
             names=names,
@@ -261,7 +293,13 @@ class WebGameSession:
             key=jrandom.PRNGKey(0),
             human_player=human_player,
             machine_vs_machine=False,
-            model_agent=agents[0],
+            model_agent=model_agent,
+            machine_agents=machine_agents,
+            agent_loader=agent_loader,
+            player_controls=player_controls,
+            active_human_player=active_human_player,
+            player_model_ids=player_model_ids,
+            model_catalog=model_catalog,
             preview_player=1 - human_player,
             auto_tick=auto_tick,
             tick_rate=tick_rate,
@@ -289,13 +327,14 @@ class WebGameSession:
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-safe snapshot for the current state."""
         self._refresh_policy_preview()
-        visibility_player = None if self.machine_vs_machine else self.human_player
+        visibility_player = self.active_human_player if self.active_human_player is not None else None
+        mode = "machine-vs-machine" if self.active_human_player is None else "human-vs-model"
         return build_snapshot(
             state=self.state,
             info=self.info,
             names=self.names,
             colors=self.colors,
-            mode="machine-vs-machine" if self.machine_vs_machine else "human-vs-model",
+            mode=mode,
             visibility_player=visibility_player,
             step_count=self.step_count,
             selected_cell=self.selected_cell,
@@ -304,26 +343,56 @@ class WebGameSession:
             auto_tick_enabled=self.auto_tick_enabled,
             tick_rate=self.tick_rate,
             policy_preview=self.policy_preview,
-            valid_targets=self._valid_targets(self.selected_cell),
+            valid_targets=self._valid_targets(self.active_human_player, self.selected_cell),
             reached_limit=self._reached_limit(),
             queued_moves=self._serialized_queue(),
+            player_controls=self.player_controls,
+            player_model_ids=self.player_model_ids,
+            model_catalog=self.model_catalog,
+            active_human_player=self.active_human_player,
         )
 
     def submit_client_command(self, command: dict[str, Any]) -> dict[str, Any]:
         """Apply one semantic browser command and return the resulting snapshot."""
         command_type = command.get("type")
         if command_type == "select":
-            self._select((int(command["row"]), int(command["col"])))
+            player = self._active_human_or_none()
+            if player is None:
+                self.last_message = "No active human player"
+            else:
+                self._select(player, (int(command["row"]), int(command["col"])))
             return self.snapshot()
         if command_type == "move":
             source = tuple(command["source"])
             target = tuple(command["target"])
-            self._queue_move((int(source[0]), int(source[1])), (int(target[0]), int(target[1])), bool(command["split"]))
+            player = self._active_human_or_none()
+            if player is None:
+                self.last_message = "No active human player"
+            else:
+                self._queue_move(
+                    player,
+                    (int(source[0]), int(source[1])),
+                    (int(target[0]), int(target[1])),
+                    bool(command["split"]),
+                )
             return self.snapshot()
         if command_type == "pass":
-            self.selected_cell = None
-            self.move_queue.append(QueuedMove(source=None, target=None, is_pass=True))
-            self.last_message = "Pass queued"
+            player = self._active_human_or_none()
+            if player is None:
+                self.last_message = "No active human player"
+            else:
+                self.selected_cell = None
+                self.move_queue.append(QueuedMove(player=player, source=None, target=None, is_pass=True))
+                self.last_message = "Pass queued"
+            return self.snapshot()
+        if command_type == "set_player_control":
+            self._set_player_control(int(command["player"]), str(command["control"]))
+            return self.snapshot()
+        if command_type == "set_player_model":
+            self._set_player_model(int(command["player"]), str(command["model_id"]))
+            return self.snapshot()
+        if command_type == "set_active_human_player":
+            self._set_active_human_player(int(command["player"]))
             return self.snapshot()
         if command_type == "undo_queue":
             self._undo_queue()
@@ -355,55 +424,73 @@ class WebGameSession:
         if self._game_done() or not self._auto_tick_due(now):
             return self.snapshot()
 
-        if self.machine_vs_machine:
-            if self.machine_agents is None:
-                self.last_message = "No machine agents"
-                return self.snapshot()
-            self.key, action_key = jrandom.split(self.key)
-            actions = self._choose_machine_actions(action_key)
-            self._advance(actions, now)
-            self.last_message = "Tick"
-            return self.snapshot()
-
-        queued_action = self._pop_next_queued_action()
-        if queued_action is not None:
-            action, is_pass = queued_action
-            self._advance_human_turn(action, now=now)
-            self.last_message = "Queued pass executed" if is_pass else "Queued move executed"
-            return self.snapshot()
-
-        self._advance_human_turn(create_action(to_pass=True), now=now)
+        self.key, action_key = jrandom.split(self.key)
+        player_keys = jrandom.split(action_key, 2)
+        actions = []
+        messages = []
+        for player in range(2):
+            action, message = self._turn_action_for_player(player, player_keys[player])
+            actions.append(action)
+            if message:
+                messages.append(message)
+        self._advance(jnp.stack(actions), now)
         self._clear_invalid_selection()
-        self.last_message = "Auto pass"
+        self.last_message = self._tick_message(messages)
         return self.snapshot()
 
     def _refresh_policy_preview(self) -> None:
-        if not self.ai_preview or self._game_done() or self.policy_agent is None:
+        preview_player = self._preview_player()
+        preview_agent = self._agent_for_player(preview_player) if preview_player is not None else None
+        if not self.ai_preview or self._game_done() or preview_agent is None or preview_player is None:
             self.policy_preview = None
             return
-        if hasattr(self.policy_agent, "explain_for_state"):
-            self.policy_preview = self.policy_agent.explain_for_state(
+        if hasattr(preview_agent, "explain_for_state"):
+            self.policy_preview = preview_agent.explain_for_state(
                 self.state,
-                self.preview_player,
+                preview_player,
                 top_k=self.preview_top_k,
             )
-        elif hasattr(self.policy_agent, "explain"):
-            self.policy_preview = self.policy_agent.explain(
-                game.get_observation(self.state, self.preview_player),
+        elif hasattr(preview_agent, "explain"):
+            self.policy_preview = preview_agent.explain(
+                game.get_observation(self.state, preview_player),
                 top_k=self.preview_top_k,
             )
 
-    def _select(self, cell: tuple[int, int]) -> None:
-        if self._is_valid_source(cell):
+    def _turn_action_for_player(self, player: int, key: jnp.ndarray) -> tuple[jnp.ndarray, str | None]:
+        if self.player_controls[player] == "model":
+            agent = self._agent_for_player(player)
+            if agent is None:
+                return create_action(to_pass=True), f"No model for Player {player}"
+            return self._choose_agent_action(agent, player, key), "Tick"
+
+        queued_action = self._pop_next_queued_action(player)
+        if queued_action is not None:
+            action, is_pass = queued_action
+            return action, "Queued pass executed" if is_pass else "Queued move executed"
+        return create_action(to_pass=True), "Auto pass"
+
+    def _tick_message(self, messages: list[str]) -> str:
+        for message in messages:
+            if message.startswith("Queued"):
+                return message
+        for message in messages:
+            if message.startswith("No model"):
+                return message
+        if "Auto pass" in messages:
+            return "Auto pass"
+        return "Tick"
+
+    def _select(self, player: int, cell: tuple[int, int]) -> None:
+        if self._is_valid_source(player, cell):
             self.selected_cell = cell
             self.last_message = f"Selected: {cell}"
             return
         self.selected_cell = None
         self.last_message = "Invalid source"
 
-    def _queue_move(self, source: tuple[int, int], target: tuple[int, int], split: bool) -> None:
+    def _queue_move(self, player: int, source: tuple[int, int], target: tuple[int, int], split: bool) -> None:
         projected_state = self._projected_queue_state()
-        if not self._is_valid_source_in_state(projected_state, source):
+        if not self._is_valid_source_in_state(projected_state, player, source):
             self.selected_cell = None
             self.last_message = "Invalid source"
             return
@@ -414,7 +501,7 @@ class WebGameSession:
             self.last_message = "Invalid target"
             return
 
-        self.move_queue.append(QueuedMove(source=source, target=target, split=split))
+        self.move_queue.append(QueuedMove(player=player, source=source, target=target, split=split))
         self.selected_cell = target
         self.last_message = "Move queued"
 
@@ -435,8 +522,59 @@ class WebGameSession:
         self.selected_cell = None
         self.last_message = "Move queue cleared"
 
+    def _set_player_control(self, player: int, control: str) -> None:
+        if player not in (0, 1):
+            self.last_message = "Invalid player"
+            return
+        if control not in ("human", "model"):
+            self.last_message = "Invalid control"
+            return
+        if control == "model" and self._agent_for_player(player) is None:
+            self.last_message = f"No model for Player {player}"
+            return
+
+        self.player_controls[player] = control
+        self.move_queue.clear()
+        self.selected_cell = None
+        if control == "human":
+            self.active_human_player = player
+            self.last_message = f"Player {player} controlled by human"
+            return
+        if self.active_human_player == player:
+            self.active_human_player = self._first_human_player()
+        self.last_message = f"Player {player} hosted by model"
+
+    def _set_player_model(self, player: int, model_id: str) -> None:
+        if player not in (0, 1):
+            self.last_message = "Invalid player"
+            return
+        model = self._catalog_entry(model_id)
+        if model is None:
+            self.last_message = "Unknown model"
+            return
+        self.player_model_ids[player] = model_id
+        self.model_agents[player] = None
+        self.agent_cache.pop((player, model_id), None)
+        if self.player_controls[player] == "model" and self._agent_for_player(player) is None:
+            self.last_message = f"Could not load model for Player {player}"
+            return
+        self.last_message = f"Player {player} model: {model['label']}"
+
+    def _set_active_human_player(self, player: int) -> None:
+        if player not in (0, 1):
+            self.last_message = "Invalid player"
+            return
+        if self.player_controls[player] != "human":
+            self.last_message = f"Player {player} is not human-controlled"
+            return
+        self.active_human_player = player
+        self.move_queue.clear()
+        self.selected_cell = None
+        self.last_message = f"Active human: Player {player}"
+
     def _clear_invalid_selection(self) -> None:
-        if self.selected_cell is not None and not self._is_valid_source(self.selected_cell):
+        player = self._active_human_or_none()
+        if self.selected_cell is not None and (player is None or not self._is_valid_source(player, self.selected_cell)):
             self.selected_cell = None
 
     def _advance_human_turn(self, human_action: jnp.ndarray, now: float | None = None) -> None:
@@ -453,6 +591,11 @@ class WebGameSession:
         self.step_count += 1
         if now is not None:
             self.last_tick = now
+
+    def _stack_single_player_action(self, player: int, action: jnp.ndarray) -> jnp.ndarray:
+        actions = [create_action(to_pass=True), create_action(to_pass=True)]
+        actions[player] = action
+        return jnp.stack(actions)
 
     def _stack_human_and_model_actions(self, human_action: jnp.ndarray, model_action: jnp.ndarray) -> jnp.ndarray:
         return (
@@ -477,17 +620,19 @@ class WebGameSession:
             return agent.act_for_state(self.state, player, key)
         return agent.act(game.get_observation(self.state, player), key)
 
-    def _is_valid_source(self, cell: tuple[int, int]) -> bool:
-        return self._is_valid_source_in_state(self._projected_queue_state(), cell)
+    def _is_valid_source(self, player: int, cell: tuple[int, int]) -> bool:
+        return self._is_valid_source_in_state(self._projected_queue_state(), player, cell)
 
-    def _is_valid_source_in_state(self, state: game.GameState, cell: tuple[int, int]) -> bool:
+    def _is_valid_source_in_state(self, state: game.GameState, player: int, cell: tuple[int, int]) -> bool:
         row, col = cell
         height, width = state.armies.shape
         if row < 0 or row >= height or col < 0 or col >= width:
             return False
-        return bool(state.ownership[self.human_player, row, col]) and int(state.armies[row, col]) > 1
+        return bool(state.ownership[player, row, col]) and int(state.armies[row, col]) > 1
 
-    def _valid_targets(self, selected_cell: tuple[int, int] | None) -> list[tuple[int, int]]:
+    def _valid_targets(self, player: int | None, selected_cell: tuple[int, int] | None) -> list[tuple[int, int]]:
+        if player is None:
+            return []
         return self._valid_targets_in_state(self._projected_queue_state(), selected_cell)
 
     def _valid_targets_in_state(self, state: game.GameState, selected_cell: tuple[int, int] | None) -> list[tuple[int, int]]:
@@ -509,12 +654,11 @@ class WebGameSession:
 
     def _projected_queue_state(self) -> game.GameState:
         projected = self.state
-        model_pass = create_action(to_pass=True)
         for move in self.move_queue:
             action = self._action_for_queued_move(move, projected)
             if action is None:
                 continue
-            actions = self._stack_human_and_model_actions(action, model_pass)
+            actions = self._stack_single_player_action(move.player, action)
             projected, _ = game.step(projected, actions)
         return projected
 
@@ -523,7 +667,7 @@ class WebGameSession:
             return create_action(to_pass=True)
         if move.source is None or move.target is None:
             return None
-        if not self._is_valid_source_in_state(state, move.source):
+        if not self._is_valid_source_in_state(state, move.player, move.source):
             return None
         direction = self._direction(move.source, move.target)
         if direction is None or move.target not in self._valid_targets_in_state(state, move.source):
@@ -535,9 +679,11 @@ class WebGameSession:
             to_split=move.split,
         )
 
-    def _pop_next_queued_action(self) -> tuple[jnp.ndarray, bool] | None:
+    def _pop_next_queued_action(self, player: int) -> tuple[jnp.ndarray, bool] | None:
         while self.move_queue:
             move = self.move_queue.pop(0)
+            if move.player != player:
+                continue
             action = self._action_for_queued_move(move, self.state)
             if action is not None:
                 return action, move.is_pass
@@ -553,6 +699,59 @@ class WebGameSession:
             }
             for move in self.move_queue
         ]
+
+    def _first_human_player(self) -> int | None:
+        for player, control in enumerate(self.player_controls):
+            if control == "human":
+                return player
+        return None
+
+    def _active_human_or_none(self) -> int | None:
+        if self.active_human_player is None:
+            return None
+        if self.player_controls[self.active_human_player] != "human":
+            return None
+        return self.active_human_player
+
+    def _catalog_entry(self, model_id: str) -> dict[str, str] | None:
+        for model in self.model_catalog:
+            if model["id"] == model_id:
+                return model
+        return None
+
+    def _agent_for_player(self, player: int | None) -> WebAgent | None:
+        if player is None:
+            return None
+        cached_agent = self.model_agents[player]
+        if cached_agent is not None:
+            return cached_agent
+        model_id = self.player_model_ids[player]
+        if model_id is None:
+            return None
+        if (player, model_id) in self.agent_cache:
+            self.model_agents[player] = self.agent_cache[(player, model_id)]
+            return self.model_agents[player]
+        if self.agent_loader is None:
+            return None
+        try:
+            agent = self.agent_loader(player, model_id)
+        except Exception as error:
+            self.last_message = f"Model load failed: {error}"
+            return None
+        self.agent_cache[(player, model_id)] = agent
+        self.model_agents[player] = agent
+        return agent
+
+    def _preview_player(self) -> int | None:
+        active = self._active_human_or_none()
+        if active is not None:
+            opponent = 1 - active
+            if self.player_controls[opponent] == "model":
+                return opponent
+        for player, control in enumerate(self.player_controls):
+            if control == "model":
+                return player
+        return None
 
     def _auto_tick_due(self, now: float) -> bool:
         if not self.auto_tick_enabled or self.tick_rate <= 0:

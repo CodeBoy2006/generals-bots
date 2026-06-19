@@ -16,6 +16,32 @@ from generals.web.server import run_server
 from generals.web.session import WebSessionConfig
 
 
+def build_model_catalog(explicit_paths: list[str | None], repo_root: Path = REPO_ROOT) -> list[dict[str, str]]:
+    """Return selectable PPO checkpoints from explicit CLI paths and local model folders."""
+    seen: set[str] = set()
+    catalog: list[dict[str, str]] = []
+
+    def add_model(path: Path) -> None:
+        model_id = str(path)
+        if model_id in seen:
+            return
+        seen.add(model_id)
+        catalog.append({"id": model_id, "label": path.name, "path": model_id})
+
+    for explicit_path in explicit_paths:
+        if explicit_path:
+            add_model(Path(explicit_path))
+
+    for path in sorted(repo_root.glob("*.eqx")):
+        add_model(path)
+    legacy_root = repo_root / "legacymodels"
+    if legacy_root.exists():
+        for path in sorted(legacy_root.rglob("*.eqx")):
+            add_model(path)
+
+    return catalog
+
+
 def _resolve_alias(parser: argparse.ArgumentParser, primary_name: str, primary, alias_name: str, alias, default):
     if primary is not None and alias is not None and primary != alias:
         parser.error(f"pass either {primary_name} or {alias_name}, not both")
@@ -162,6 +188,7 @@ def args_to_config(args: argparse.Namespace) -> WebSessionConfig:
         max_generals_distance=args.max_generals_distance,
         city_army_min=args.city_army_min,
         city_army_max=args.city_army_max,
+        model_catalog=build_model_catalog([args.model_path, args.model_1_path]),
     )
 
 

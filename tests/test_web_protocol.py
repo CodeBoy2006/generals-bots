@@ -35,6 +35,13 @@ def test_snapshot_serializes_grid_players_and_human_visibility():
         policy_preview=None,
         valid_targets=[(0, 1), (1, 0)],
         queued_moves=[{"source": [0, 0], "target": [0, 1], "split": True, "is_pass": False}],
+        player_controls=["human", "model"],
+        player_model_ids=["v5", "v4"],
+        model_catalog=[
+            {"id": "v5", "label": "v5.eqx", "path": "generals-ppo-8x8-expander-gpu-v5.eqx"},
+            {"id": "v4", "label": "v4.eqx", "path": "generals-ppo-8x8-expander-gpu-v4.eqx"},
+        ],
+        active_human_player=0,
         reached_limit=False,
     )
 
@@ -49,8 +56,29 @@ def test_snapshot_serializes_grid_players_and_human_visibility():
     assert snapshot["grid"]["visible"][0][1] is True
     assert snapshot["grid"]["visible"][3][3] is False
     assert snapshot["players"] == [
-        {"index": 0, "name": "Human", "army": 5, "land": 1, "color": "#dc3737"},
-        {"index": 1, "name": "PPO Model", "army": 1, "land": 1, "color": "#285adc"},
+        {
+            "index": 0,
+            "name": "Human",
+            "army": 5,
+            "land": 1,
+            "color": "#dc3737",
+            "control": "human",
+            "model_id": "v5",
+        },
+        {
+            "index": 1,
+            "name": "PPO Model",
+            "army": 1,
+            "land": 1,
+            "color": "#285adc",
+            "control": "model",
+            "model_id": "v4",
+        },
+    ]
+    assert snapshot["active_human_player"] == 0
+    assert snapshot["model_catalog"] == [
+        {"id": "v5", "label": "v5.eqx", "path": "generals-ppo-8x8-expander-gpu-v5.eqx"},
+        {"id": "v4", "label": "v4.eqx", "path": "generals-ppo-8x8-expander-gpu-v4.eqx"},
     ]
     assert snapshot["time"] == 0
     assert snapshot["step_count"] == 0
@@ -86,6 +114,10 @@ def test_snapshot_full_visibility_shows_entire_machine_watch_board():
         policy_preview=None,
         valid_targets=[],
         queued_moves=[],
+        player_controls=["model", "model"],
+        player_model_ids=["p0", "p1"],
+        model_catalog=[],
+        active_human_player=None,
         reached_limit=False,
     )
 
@@ -93,6 +125,8 @@ def test_snapshot_full_visibility_shows_entire_machine_watch_board():
     assert snapshot["selected_cell"] is None
     assert snapshot["valid_targets"] == []
     assert snapshot["queued_moves"] == []
+    assert snapshot["active_human_player"] is None
+    assert [player["control"] for player in snapshot["players"]] == ["model", "model"]
     assert snapshot["split_enabled"] is True
     assert snapshot["auto_tick"]["tick_rate"] == 4.0
 

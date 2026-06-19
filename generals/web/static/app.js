@@ -13,6 +13,8 @@ const ui = {
   splitToggle: document.getElementById("split-toggle"),
   autoTickToggle: document.getElementById("auto-tick-toggle"),
   tickRateInput: document.getElementById("tick-rate-input"),
+  activeHumanSelect: document.getElementById("active-human-select"),
+  playerControlList: document.getElementById("player-control-list"),
   statusMessage: document.getElementById("status-message"),
   turnValue: document.getElementById("turn-value"),
   stepValue: document.getElementById("step-value"),
@@ -116,14 +118,15 @@ function syncControls(snapshot) {
     ui.tickRateInput.value = String(snapshot.auto_tick ? snapshot.auto_tick.tick_rate : 2);
   }
 
-  const isWatchMode = snapshot.mode === "machine-vs-machine";
-  const disabled = isWatchMode || snapshot.game_done;
+  const hasHumanInput = snapshot.active_human_player !== null && snapshot.active_human_player !== undefined;
+  const disabled = !hasHumanInput || snapshot.game_done;
   const hasQueue = Array.isArray(snapshot.queued_moves) && snapshot.queued_moves.length > 0;
   ui.passButton.disabled = disabled;
-  ui.cancelButton.disabled = isWatchMode;
+  ui.cancelButton.disabled = !hasHumanInput;
   ui.undoButton.disabled = disabled || !hasQueue;
   ui.clearQueueButton.disabled = disabled || !hasQueue;
   ui.splitToggle.disabled = disabled;
+  ui.activeHumanSelect.disabled = snapshot.game_done;
   ui.restartButton.disabled = false;
 }
 
@@ -133,9 +136,63 @@ function renderHud(snapshot) {
   ui.turnValue.textContent = String(snapshot.time);
   ui.stepValue.textContent = String(snapshot.step_count);
   ui.winnerValue.textContent = snapshot.winner === null ? "-" : playerName(snapshot, snapshot.winner);
+  renderControlPanel(snapshot);
   renderPlayers(snapshot);
   renderQueue(snapshot);
   renderPreview(snapshot);
+}
+
+function renderControlPanel(snapshot) {
+  const players = Array.isArray(snapshot.players) ? snapshot.players : [];
+  const humanPlayers = players.filter((player) => player.control === "human");
+  replaceOptions(
+    ui.activeHumanSelect,
+    humanPlayers.map((player) => ({ value: String(player.index), label: player.name })),
+    snapshot.active_human_player === null || snapshot.active_human_player === undefined
+      ? ""
+      : String(snapshot.active_human_player)
+  );
+  ui.activeHumanSelect.disabled = snapshot.game_done || humanPlayers.length === 0;
+
+  ui.playerControlList.replaceChildren();
+  for (const player of players) {
+    const row = document.createElement("div");
+    row.className = "control-row";
+
+    const label = document.createElement("div");
+    label.className = "control-player";
+    label.textContent = player.name;
+
+    const controlSelect = document.createElement("select");
+    controlSelect.className = "control-mode-select";
+    replaceOptions(
+      controlSelect,
+      [
+        { value: "human", label: "Human" },
+        { value: "model", label: "Model" },
+      ],
+      player.control || "model"
+    );
+    controlSelect.disabled = snapshot.game_done;
+    controlSelect.addEventListener("change", () => {
+      sendCommand({ type: "set_player_control", player: player.index, control: controlSelect.value });
+    });
+
+    const modelSelect = document.createElement("select");
+    modelSelect.className = "model-select";
+    replaceOptions(
+      modelSelect,
+      modelOptions(snapshot),
+      player.model_id === null || player.model_id === undefined ? "" : String(player.model_id)
+    );
+    modelSelect.disabled = snapshot.game_done || !modelSelect.options.length;
+    modelSelect.addEventListener("change", () => {
+      sendCommand({ type: "set_player_model", player: player.index, model_id: modelSelect.value });
+    });
+
+    row.append(label, controlSelect, modelSelect);
+    ui.playerControlList.appendChild(row);
+  }
 }
 
 function renderPlayers(snapshot) {
@@ -164,11 +221,43 @@ function renderPlayers(snapshot) {
 
     const stats = document.createElement("div");
     stats.className = "player-stats";
-    stats.textContent = `${player.army} army / ${player.land} land`;
+    stats.textContent = `${controlLabel(player)} / ${player.army} army / ${player.land} land`;
 
     row.append(swatch, body, stats);
     ui.playersList.appendChild(row);
   }
+}
+
+function replaceOptions(select, options, selectedValue) {
+  const activeValue = String(selectedValue);
+  select.replaceChildren();
+  for (const option of options) {
+    const node = document.createElement("option");
+    node.value = option.value;
+    node.textContent = option.label;
+    node.selected = option.value === activeValue;
+    select.appendChild(node);
+  }
+}
+
+function modelOptions(snapshot) {
+  return (snapshot.model_catalog || []).map((model) => ({
+    value: String(model.id),
+    label: String(model.label),
+  }));
+}
+
+function controlLabel(player) {
+  if (player.control === "human") {
+    return "Human";
+  }
+  return modelLabel(player.model_id);
+}
+
+function modelLabel(modelId) {
+  const snapshot = state.snapshot;
+  const model = snapshot && (snapshot.model_catalog || []).find((entry) => entry.id === modelId);
+  return model ? model.label : "Model";
 }
 
 function metricBar(color, ratio) {
@@ -573,6 +662,10 @@ function isValidTarget(row, col) {
   return state.snapshot.valid_targets.some((cell) => cell[0] === row && cell[1] === col);
 }
 
+function hasActiveHumanInput(snapshot) {
+  return Boolean(snapshot && snapshot.active_human_player !== null && snapshot.active_human_player !== undefined);
+}
+
 function cellKey(row, col) {
   return `${row}:${col}`;
 }
@@ -589,7 +682,7 @@ function sendAutoTick() {
 
 ui.canvas.addEventListener("click", (event) => {
   const snapshot = state.snapshot;
-  if (!snapshot || snapshot.game_done || snapshot.mode === "machine-vs-machine") {
+  if (!snapshot || snapshot.game_done || !hasActiveHumanInput(snapshot)) {
     return;
   }
   const cell = cellFromEvent(event);
@@ -629,6 +722,11 @@ ui.passButton.addEventListener("click", () => sendCommand({ type: "pass" }));
 ui.cancelButton.addEventListener("click", () => sendCommand({ type: "cancel" }));
 ui.undoButton.addEventListener("click", () => sendCommand({ type: "undo_queue" }));
 ui.clearQueueButton.addEventListener("click", () => sendCommand({ type: "clear_queue" }));
+ui.activeHumanSelect.addEventListener("change", () => {
+  if (ui.activeHumanSelect.value !== "") {
+    sendCommand({ type: "set_active_human_player", player: Number(ui.activeHumanSelect.value) });
+  }
+});
 ui.splitToggle.addEventListener("change", () => sendCommand({ type: "set_split", enabled: ui.splitToggle.checked }));
 ui.autoTickToggle.addEventListener("change", sendAutoTick);
 ui.tickRateInput.addEventListener("change", sendAutoTick);

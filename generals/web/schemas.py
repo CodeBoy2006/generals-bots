@@ -45,6 +45,13 @@ def _queued_moves(moves: list[dict[str, Any]] | tuple[dict[str, Any], ...] | Non
     return serialized
 
 
+def _model_catalog(models: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> list[dict[str, str]]:
+    return [
+        {"id": str(model["id"]), "label": str(model["label"]), "path": str(model["path"])}
+        for model in models or []
+    ]
+
+
 def encode_ownership(state: game.GameState) -> list[list[int]]:
     """Return one ownership grid using -1 for neutral/unowned cells."""
     ownership = np.full(np.asarray(state.armies).shape, -1, dtype=int)
@@ -110,6 +117,10 @@ def build_snapshot(
     valid_targets: list[tuple[int, int]],
     reached_limit: bool,
     queued_moves: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    player_controls: list[str] | tuple[str, ...] | None = None,
+    player_model_ids: list[str | None] | tuple[str | None, ...] | None = None,
+    model_catalog: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    active_human_player: int | None = None,
 ) -> dict[str, Any]:
     """Build one complete browser snapshot from authoritative game state."""
     armies = np.asarray(state.armies)
@@ -138,6 +149,10 @@ def build_snapshot(
                 "army": int(army[index]),
                 "land": int(land[index]),
                 "color": str(colors[index]),
+                "control": str((player_controls or ("model", "model"))[index]),
+                "model_id": None
+                if (player_model_ids or (None, None))[index] is None
+                else str((player_model_ids or (None, None))[index]),
             }
             for index, name in enumerate(names)
         ],
@@ -148,6 +163,8 @@ def build_snapshot(
         "selected_cell": _cell_or_none(selected_cell),
         "valid_targets": _cells(valid_targets),
         "queued_moves": _queued_moves(queued_moves),
+        "active_human_player": None if active_human_player is None else int(active_human_player),
+        "model_catalog": _model_catalog(model_catalog),
         "split_enabled": bool(split_enabled),
         "last_message": str(last_message),
         "auto_tick": {"enabled": bool(auto_tick_enabled), "tick_rate": float(tick_rate)},

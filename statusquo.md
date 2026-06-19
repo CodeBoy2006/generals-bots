@@ -345,3 +345,9 @@
 - **Status:** Completed
 - **Next Steps:** Playtest the browser queue flow at normal tick rates to confirm the new real-time selection behavior feels right.
 - **Context:** Queued moves still take priority over auto pass. The pygame play script keeps its existing selected-cell pause behavior.
+
+## [2026-06-19 23:36] Web Dynamic Model Control
+- **Changes:** Added a browser model catalog, per-player Human/Model control modes, active human selection, dynamic model switching, session-side agent caching, and a Control panel for live takeover/hosting without restarting the match.
+- **Status:** Completed
+- **Next Steps:** Playtest with multiple compatible 8x8 checkpoints and decide whether to add an explicit safe allowlist for external model directories.
+- **Context:** The model selector scans CLI-provided checkpoints plus `.eqx` files in the repository root and `legacymodels/`; incompatible checkpoints fail gracefully instead of crashing the WebSocket.

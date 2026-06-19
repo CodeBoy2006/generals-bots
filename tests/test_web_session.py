@@ -12,6 +12,14 @@ class FixedAgent:
         return self.action
 
 
+def _model_catalog():
+    return [
+        {"id": "right", "label": "right.eqx", "path": "right.eqx"},
+        {"id": "down", "label": "down.eqx", "path": "down.eqx"},
+        {"id": "pass", "label": "pass.eqx", "path": "pass.eqx"},
+    ]
+
+
 def _basic_grid():
     grid = jnp.zeros((4, 4), dtype=jnp.int32)
     grid = grid.at[0, 0].set(1)
@@ -29,6 +37,35 @@ def _human_session() -> WebGameSession:
         tick_rate=2.0,
     )
     session.state = session.state._replace(armies=session.state.armies.at[0, 0].set(5))
+    session.info = game.get_info(session.state)
+    return session
+
+
+def _dynamic_session() -> WebGameSession:
+    agents = {
+        (0, "right"): FixedAgent([0, 0, 0, 3, 0]),
+        (0, "down"): FixedAgent([0, 0, 0, 1, 0]),
+        (1, "pass"): FixedAgent([1, 0, 0, 0, 0]),
+    }
+
+    def load_agent(player, model_id):
+        return agents[(player, model_id)]
+
+    session = WebGameSession.for_testing(
+        grid=_basic_grid(),
+        names=["Human", "PPO Model"],
+        agents=(FixedAgent([0, 0, 0, 3, 0]), FixedAgent([1, 0, 0, 0, 0])),
+        player_controls=("human", "model"),
+        active_human_player=0,
+        player_model_ids=("right", "pass"),
+        model_catalog=_model_catalog(),
+        agent_loader=load_agent,
+        auto_tick=True,
+        tick_rate=2.0,
+    )
+    session.state = session.state._replace(
+        armies=session.state.armies.at[0, 0].set(5).at[3, 3].set(5)
+    )
     session.info = game.get_info(session.state)
     return session
 
@@ -102,6 +139,56 @@ def test_queued_moves_can_chain_from_projected_targets_and_be_edited():
     assert cleared["selected_cell"] is None
     assert cleared["queued_moves"] == []
     assert cleared["last_message"] == "Move queue cleared"
+
+
+def test_player_control_can_switch_between_human_takeover_and_model_hosting():
+    session = _dynamic_session()
+
+    hosted = session.submit_client_command({"type": "set_player_control", "player": 0, "control": "model"})
+    assert hosted["active_human_player"] is None
+    assert hosted["players"][0]["control"] == "model"
+    assert hosted["players"][0]["model_id"] == "right"
+    assert hosted["last_message"] == "Player 0 hosted by model"
+
+    session.last_tick = 0.0
+    ticked = session.tick(now=1.0)
+    assert ticked["time"] == 1
+    assert ticked["grid"]["ownership"][0][1] == 0
+    assert ticked["last_message"] == "Tick"
+
+    reclaimed = session.submit_client_command({"type": "set_player_control", "player": 0, "control": "human"})
+    assert reclaimed["active_human_player"] == 0
+    assert reclaimed["players"][0]["control"] == "human"
+    assert reclaimed["last_message"] == "Player 0 controlled by human"
+
+
+def test_player_model_can_change_without_restarting_match():
+    session = _dynamic_session()
+    session.submit_client_command({"type": "set_player_control", "player": 0, "control": "model"})
+    switched = session.submit_client_command({"type": "set_player_model", "player": 0, "model_id": "down"})
+
+    assert switched["players"][0]["model_id"] == "down"
+    assert switched["last_message"] == "Player 0 model: down.eqx"
+
+    session.last_tick = 0.0
+    ticked = session.tick(now=1.0)
+    assert ticked["time"] == 1
+    assert ticked["grid"]["ownership"][1][0] == 0
+    assert ticked["grid"]["ownership"][0][1] == -1
+
+
+def test_active_human_player_can_switch_between_human_players():
+    session = _dynamic_session()
+    session.submit_client_command({"type": "set_player_control", "player": 1, "control": "human"})
+    switched = session.submit_client_command({"type": "set_active_human_player", "player": 1})
+
+    assert switched["active_human_player"] == 1
+    assert switched["players"][1]["control"] == "human"
+    assert switched["last_message"] == "Active human: Player 1"
+
+    selected = session.submit_client_command({"type": "select", "row": 3, "col": 3})
+    assert selected["selected_cell"] == [3, 3]
+    assert selected["last_message"] == "Selected: (3, 3)"
 
 
 def test_split_pass_cancel_and_restart_commands_update_session_state():
