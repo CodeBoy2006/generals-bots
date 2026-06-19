@@ -7796,3 +7796,118 @@ gate/candidate model that can decide when to invoke a command/worker correction,
 or to collect the same fixed-v5 data with a longer `search_rollout_steps` budget
 to increase the local win-label density. Do not spend the next round on
 fixed-v5 action CE or spatial rerank scale sweeps.
+
+## 2026-06-19 Fixed-v5 search-Q value probe
+
+Added candidate-outcome value regression to `adaptive_strategy_supervised.py`:
+
+```text
+new args:
+  --search-q-value-weight
+  --search-q-score-scale
+  --search-q-outcome-score-weight
+target:
+  search_outcomes loss/draw/win -> -1/0/+1
+optional tie-break:
+  outcome_score_weight * tanh(search_score / score_scale)
+scope:
+  strategy action-Q head only
+```
+
+The loader now reads `search_outcomes` from search-teacher shards and falls back
+to invalid labels for older rank-only shards, so old rank probes still load.
+
+First, a rank-only fixed-v5 probe trained from the fixed-v5 bottleneck
+checkpoint:
+
+```text
+run:
+  runs/adaptive-fixed-v5-search-q-rank-v0/
+init:
+  runs/adaptive-search-best-bottleneck-fixed-v5-v0/generals-adaptive-search-best-bottleneck-fixed-v5-v0.eqx
+dataset:
+  runs/adaptive-strategy-search-fixed-v5-contact-highgap-v0/*.npz
+loss:
+  --search-q-rank-weight 1.0
+  --search-q-temperature 50.0
+result:
+  search-Q rank loss: 3.8671 -> 1.4467
+  search-Q rank top1: 24.8% -> 26.1%
+```
+
+Fixed-v5 `max250` replacement probes were not promotion-worthy:
+
+```text
+128 games/seat, seed 86220:
+  off:                 p0 10.94%, p1  7.81%, min  7.81%
+  qreplace thr=1,m=4:  p0 12.50%, p1  8.59%, min  8.59%
+  qrerank 0.001:       p0 10.94%, p1  7.81%, min  7.81%
+
+256 games/seat, seed 86240:
+  off:                 p0 10.55%, p1 10.55%, min 10.55%
+  qreplace thr=1,m=4:  p0 10.55%, p1 11.33%, min 10.55%
+```
+
+Then trained direct candidate outcome value regression:
+
+```text
+run:
+  runs/adaptive-fixed-v5-search-q-value-v0/
+init:
+  runs/adaptive-search-best-bottleneck-fixed-v5-v0/generals-adaptive-search-best-bottleneck-fixed-v5-v0.eqx
+dataset:
+  runs/adaptive-strategy-search-fixed-v5-contact-highgap-v0/*.npz
+loss:
+  --search-q-value-weight 1.0
+  --search-q-score-scale 1000.0
+  --search-q-outcome-score-weight 0.0
+result:
+  search-Q value loss: 14.0065 -> 0.3222
+  search-Q value top1: 22.3% -> 27.5%
+```
+
+GPU fixed-v5 `max250` probes with the value checkpoint:
+
+```text
+128 games/seat, seed 86280:
+  off:
+    p0 16/50/62, win 12.50%, draw 48.44%
+    p1 12/39/77, win  9.38%, draw 60.16%
+    min 9.38%
+
+  qreplace threshold=0.25, policy_margin=4:
+    p0 11/55/62, win  8.59%, draw 48.44%
+    p1  7/41/80, win  5.47%, draw 62.50%
+    min 5.47%
+
+  qreplace threshold=1.0, policy_margin=4:
+    p0 16/49/63, win 12.50%, draw 49.22%
+    p1 10/43/75, win  7.81%, draw 58.59%
+    min 7.81%
+```
+
+Conclusion: both rank and absolute candidate-outcome Q losses are learnable, but
+they do not provide a reliable primitive action replacement signal. The result
+matches the earlier spatial rerank failures: a one-step action gate is too short
+a path for the midgame finish signal. Stop Q-rerank/Q-replace threshold scans.
+The next mainline should be Midgame Decisive Trajectory Imitation:
+
+```text
+collect:
+  v5 + rollout-search winning/contact trajectories
+  U-Net base + rollout-search winning/contact trajectories
+  Plan-Q oracle best-plan leads-to-win windows
+
+filter:
+  turn >= 80 or 100
+  visible contact
+  high search/plan gap
+  trajectory win or finish_within_250
+
+train:
+  main U-Net policy with KL anchor + small action CE
+  finish/outcome/belief/intent as primary auxiliary signal
+```
+
+This should train the policy on the whole gather/attack/finish chain rather than
+asking an undercalibrated action-Q head to override individual primitive moves.

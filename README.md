@@ -762,7 +762,7 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
 
 Evaluate Q reranking with `evaluate_adaptive_policy.py --strategy-aux --strategy-q-rerank-scale <scale>`. Treat this as a probe: current results show the Q head can learn the offline teacher distribution, but direct all-action reranking has not passed 512-row promotion.
 
-Search-teacher shards can also train the strategy-Q head from rollout-search top-k rankings instead of policy/action labels. `adaptive_strategy_supervised.py --search-q-rank-weight <w>` consumes `search_candidate_indices`, `search_prior_scores`, `search_scores`, and `search_score_gap`, builds a soft ranking target with `--search-q-temperature`, and only updates rows with at least two valid candidates and positive search gap. This keeps high-gap rollout-search signal out of primitive policy CE:
+Search-teacher shards can also train the strategy-Q head from rollout-search top-k rankings instead of policy/action labels. `adaptive_strategy_supervised.py --search-q-rank-weight <w>` consumes `search_candidate_indices`, `search_prior_scores`, `search_scores`, and `search_score_gap`, builds a soft ranking target with `--search-q-temperature`, and only updates rows with at least two valid candidates and positive search gap. `--search-q-value-weight <w>` instead regresses candidate action-Q values to rollout-search replacement outcomes (`loss/draw/win -> -1/0/+1`), with optional shaped-score tie-breaks from `--search-q-score-scale` and `--search-q-outcome-score-weight`. This keeps high-gap rollout-search signal out of primitive policy CE:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -799,7 +799,7 @@ uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
   --model-path runs/adaptive-midgame-search-q-rank-v0/generals-adaptive-midgame-search-q-rank-v0.eqx
 ```
 
-The first high-gap probe learned the search rank loss, but q-rerank remained a diagnostic path: scale `0.001` only moved Expander 256-row min from `71.09%` to `71.48%`, while scale `0.01` collapsed the 8x8 player-1 row at 64 games. Do not promote Q-rerank from this result; use it as evidence that rollout-search rankings need calibration/gating or should feed finish/value heads rather than raw logits bias.
+The first high-gap probe learned the search rank loss, but q-rerank remained a diagnostic path: scale `0.001` only moved Expander 256-row min from `71.09%` to `71.48%`, while scale `0.01` collapsed the 8x8 player-1 row at 64 games. A later fixed-v5 max250 candidate-outcome value probe reduced offline value MSE but still failed direct `--strategy-q-replace-threshold` promotion at 128 games. Do not promote Q-rerank or Q-replace from these results; use them as evidence that rollout-search should feed finish/outcome/belief or midgame trajectory imitation before primitive action replacement.
 
 The strategy supervised trainer can also add explicit source/target spatial heads from `source_heatmap` and `target_heatmap` shard labels. Use `--strategy-spatial-aux` when creating the target checkpoint and leave `--init-strategy-spatial-aux` off when expanding an older strategy checkpoint that does not yet contain these heads:
 

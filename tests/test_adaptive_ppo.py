@@ -1061,6 +1061,45 @@ def test_strategy_candidate_q_target_values_can_use_outcomes():
     assert jnp.allclose(hybrid_targets, outcome_targets + 0.1 * score_targets)
 
 
+def test_search_q_value_metrics_uses_candidate_outcomes():
+    from examples._experimental.ppo.adaptive_strategy_supervised import search_q_value_metrics
+
+    candidate_indices = jnp.array([[1, 2, 3, 4]])
+    prior_scores = jnp.array([[0.0, 0.0, 0.0, 0.0]])
+    search_scores = jnp.array([[10.0, 20.0, 1000.0, -5.0]])
+    search_outcomes = jnp.array([[1, 2, 0, -1]])
+    score_gaps = jnp.array([1.0])
+    correct_q = jnp.array([[0.0, 0.0, 1.0, -1.0, 0.5]])
+    reversed_q = jnp.array([[0.0, -1.0, 0.0, 1.0, 0.5]])
+
+    correct_loss, correct_acc, correct_weight = search_q_value_metrics(
+        correct_q,
+        candidate_indices,
+        prior_scores,
+        search_scores,
+        search_outcomes,
+        score_gaps,
+        1000.0,
+        0.0,
+    )
+    reversed_loss, reversed_acc, reversed_weight = search_q_value_metrics(
+        reversed_q,
+        candidate_indices,
+        prior_scores,
+        search_scores,
+        search_outcomes,
+        score_gaps,
+        1000.0,
+        0.0,
+    )
+
+    assert correct_weight == 1.0
+    assert reversed_weight == 1.0
+    assert correct_loss < reversed_loss
+    assert correct_acc == 1.0
+    assert reversed_acc == 0.0
+
+
 def test_accepted_replacement_weights_prefer_outcome_then_score():
     from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights
 

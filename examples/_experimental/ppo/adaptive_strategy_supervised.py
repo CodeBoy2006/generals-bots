@@ -86,6 +86,7 @@ def load_strategy_dataset(
         "search_candidate_indices": [],
         "search_prior_scores": [],
         "search_scores": [],
+        "search_outcomes": [],
         "search_score_gap": [],
     }
     for path in paths:
@@ -148,14 +149,20 @@ def load_strategy_dataset(
             candidate_indices = shard["search_candidate_indices"][shard_indices].astype(np.int32)
             prior_scores = shard["search_prior_scores"][shard_indices].astype(np.float32)
             search_scores = shard["search_scores"][shard_indices].astype(np.float32)
+            if "search_outcomes" in shard:
+                search_outcomes = shard["search_outcomes"][shard_indices].astype(np.int32)
+            else:
+                search_outcomes = np.full_like(candidate_indices, -1, dtype=np.int32)
             if candidate_indices.shape[1] < search_candidate_count:
                 pad_width = search_candidate_count - candidate_indices.shape[1]
                 candidate_indices = np.pad(candidate_indices, ((0, 0), (0, pad_width)), constant_values=0)
                 prior_scores = np.pad(prior_scores, ((0, 0), (0, pad_width)), constant_values=-1.0e4)
                 search_scores = np.pad(search_scores, ((0, 0), (0, pad_width)), constant_values=-1.0e4)
+                search_outcomes = np.pad(search_outcomes, ((0, 0), (0, pad_width)), constant_values=-1)
             chunks["search_candidate_indices"].append(candidate_indices[:, :search_candidate_count])
             chunks["search_prior_scores"].append(prior_scores[:, :search_candidate_count])
             chunks["search_scores"].append(search_scores[:, :search_candidate_count])
+            chunks["search_outcomes"].append(search_outcomes[:, :search_candidate_count])
             chunks["search_score_gap"].append(shard["search_score_gap"][shard_indices].astype(np.float32))
         else:
             chunks["search_candidate_indices"].append(np.zeros((shard_count, search_candidate_count), dtype=np.int32))
@@ -163,6 +170,7 @@ def load_strategy_dataset(
                 np.full((shard_count, search_candidate_count), -1.0e4, dtype=np.float32)
             )
             chunks["search_scores"].append(np.full((shard_count, search_candidate_count), -1.0e4, dtype=np.float32))
+            chunks["search_outcomes"].append(np.full((shard_count, search_candidate_count), -1, dtype=np.int32))
             chunks["search_score_gap"].append(np.zeros((shard_count,), dtype=np.float32))
         outcome = trajectory_outcome
         outcome_known = trajectory_outcome_weight > 0.0
@@ -279,6 +287,42 @@ def search_q_rank_metrics(
     return loss, accuracy, entropy, weight_mean
 
 
+def search_q_value_metrics(
+    action_q_values: jnp.ndarray,
+    candidate_indices: jnp.ndarray,
+    prior_scores: jnp.ndarray,
+    search_scores: jnp.ndarray,
+    search_outcomes: jnp.ndarray,
+    score_gaps: jnp.ndarray,
+    score_scale: float,
+    outcome_score_weight: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Regress candidate action-Q values to search outcome values."""
+    action_count = action_q_values.shape[1]
+    valid = (
+        (candidate_indices >= 0)
+        & (candidate_indices < action_count)
+        & (prior_scores > -9999.0)
+        & (search_outcomes >= OUTCOME_LOSS)
+        & (search_outcomes <= OUTCOME_WIN)
+    )
+    valid_count = jnp.sum(valid.astype(jnp.float32), axis=1)
+    sample_weight = ((valid_count > 0.0) & (score_gaps > 0.0)).astype(jnp.float32)
+    safe_indices = jnp.clip(candidate_indices, 0, action_count - 1)
+    candidate_q = jnp.take_along_axis(action_q_values, safe_indices, axis=1)
+    outcome_targets = search_outcomes.astype(jnp.float32) - float(OUTCOME_DRAW)
+    score_targets = jnp.tanh(search_scores / score_scale)
+    targets = outcome_targets + outcome_score_weight * score_targets
+    squared_error = jnp.square(candidate_q - targets)
+    per_sample_loss = jnp.sum(jnp.where(valid, squared_error, 0.0), axis=1) / jnp.maximum(valid_count, 1.0)
+    normalizer = jnp.maximum(jnp.sum(sample_weight), 1.0)
+    loss = jnp.sum(per_sample_loss * sample_weight) / normalizer
+    pred_best = jnp.argmax(jnp.where(valid, candidate_q, -1.0e9), axis=1)
+    target_best = jnp.argmax(jnp.where(valid, targets, -1.0e9), axis=1)
+    accuracy = jnp.sum((pred_best == target_best).astype(jnp.float32) * sample_weight) / normalizer
+    return loss, accuracy, jnp.mean(sample_weight)
+
+
 def binary_balance_weights(labels: jnp.ndarray, weights: jnp.ndarray) -> jnp.ndarray:
     """Return per-label weights that give positive and negative labels equal mass."""
     labels_f = labels.astype(jnp.float32)
@@ -319,6 +363,9 @@ def train_step(
     q_action_ce_weight: float,
     search_q_rank_weight: float,
     search_q_temperature: float,
+    search_q_value_weight: float,
+    search_q_score_scale: float,
+    search_q_outcome_score_weight: float,
     source_weight: float,
     target_weight: float,
     balance_finish_labels: bool,
@@ -346,6 +393,7 @@ def train_step(
         search_candidate_indices,
         search_prior_scores,
         search_scores,
+        search_outcomes,
         search_score_gaps,
     ) = batch
 
@@ -458,6 +506,9 @@ def train_step(
         search_q_rank_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         search_q_target_entropy = jnp.asarray(0.0, dtype=jnp.float32)
         search_q_weight_mean = jnp.asarray(0.0, dtype=jnp.float32)
+        search_q_value_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        search_q_value_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        search_q_value_weight_mean = jnp.asarray(0.0, dtype=jnp.float32)
         if search_q_rank_weight > 0.0:
             (
                 search_q_rank_loss,
@@ -471,6 +522,21 @@ def train_step(
                 search_scores,
                 search_score_gaps,
                 search_q_temperature,
+            )
+        if search_q_value_weight > 0.0:
+            (
+                search_q_value_loss,
+                search_q_value_accuracy,
+                search_q_value_weight_mean,
+            ) = search_q_value_metrics(
+                outputs.action_q_values,
+                search_candidate_indices,
+                search_prior_scores,
+                search_scores,
+                search_outcomes,
+                search_score_gaps,
+                search_q_score_scale,
+                search_q_outcome_score_weight,
             )
 
         source_loss = jnp.asarray(0.0, dtype=jnp.float32)
@@ -493,6 +559,7 @@ def train_step(
             + q_kl_weight * q_policy_kl
             + q_action_ce_weight * q_action_ce
             + search_q_rank_weight * search_q_rank_loss
+            + search_q_value_weight * search_q_value_loss
             + source_weight * source_loss
             + target_weight * target_loss
         )
@@ -506,6 +573,7 @@ def train_step(
             "q_policy_kl": q_policy_kl,
             "q_action_ce": q_action_ce,
             "search_q_rank_loss": search_q_rank_loss,
+            "search_q_value_loss": search_q_value_loss,
             "source_loss": source_loss,
             "target_loss": target_loss,
             "intent_accuracy": intent_accuracy,
@@ -514,6 +582,7 @@ def train_step(
             "teacher_action_accuracy": teacher_action_accuracy,
             "q_action_accuracy": q_action_accuracy,
             "search_q_rank_accuracy": search_q_rank_accuracy,
+            "search_q_value_accuracy": search_q_value_accuracy,
             "search_q_target_entropy": search_q_target_entropy,
             "source_accuracy": source_accuracy,
             "target_accuracy": target_accuracy,
@@ -521,6 +590,7 @@ def train_step(
             "outcome_weight_mean": jnp.mean(outcome_weights),
             "action_weight_mean": jnp.mean(action_weights),
             "search_q_weight_mean": search_q_weight_mean,
+            "search_q_value_weight_mean": search_q_value_weight_mean,
         }
         return loss, metrics
 
@@ -549,6 +619,9 @@ def train_epoch(
     q_action_ce_weight: float,
     search_q_rank_weight: float,
     search_q_temperature: float,
+    search_q_value_weight: float,
+    search_q_score_scale: float,
+    search_q_outcome_score_weight: float,
     source_weight: float,
     target_weight: float,
     balance_finish_labels: bool,
@@ -585,6 +658,7 @@ def train_epoch(
             dataset["search_candidate_indices"][idx],
             dataset["search_prior_scores"][idx],
             dataset["search_scores"][idx],
+            dataset["search_outcomes"][idx],
             dataset["search_score_gap"][idx],
         )
         network, opt_state, loss, metrics = train_step(
@@ -602,6 +676,9 @@ def train_epoch(
             q_action_ce_weight,
             search_q_rank_weight,
             search_q_temperature,
+            search_q_value_weight,
+            search_q_score_scale,
+            search_q_outcome_score_weight,
             source_weight,
             target_weight,
             balance_finish_labels,
@@ -674,6 +751,24 @@ def parse_args():
         default=1.0,
         help="Softmax temperature for rollout-search top-k score targets.",
     )
+    parser.add_argument(
+        "--search-q-value-weight",
+        type=float,
+        default=0.0,
+        help="MSE weight for fitting strategy-Q values to rollout-search candidate outcomes.",
+    )
+    parser.add_argument(
+        "--search-q-score-scale",
+        type=float,
+        default=1000.0,
+        help="Scale for optional tanh(search_score / scale) tie-break in search-Q value targets.",
+    )
+    parser.add_argument(
+        "--search-q-outcome-score-weight",
+        type=float,
+        default=0.0,
+        help="Optional shaped-score tie-break weight added to loss/draw/win outcome targets.",
+    )
     parser.add_argument("--source-weight", type=float, default=0.0)
     parser.add_argument("--target-weight", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -720,6 +815,7 @@ def parse_args():
             args.q_kl_weight,
             args.q_action_ce_weight,
             args.search_q_rank_weight,
+            args.search_q_value_weight,
             args.source_weight,
             args.target_weight,
         )
@@ -727,6 +823,10 @@ def parse_args():
         parser.error("loss weights must be non-negative")
     if args.search_q_temperature <= 0.0:
         parser.error("--search-q-temperature must be positive")
+    if args.search_q_score_scale <= 0.0:
+        parser.error("--search-q-score-scale must be positive")
+    if args.search_q_outcome_score_weight < 0.0:
+        parser.error("--search-q-outcome-score-weight must be non-negative")
     if args.outcome_weight > 0.0 and not args.outcome_head:
         parser.error("--outcome-weight requires --outcome-head")
     if args.update_scope == "all" and args.policy_kl_weight <= 0.0:
@@ -782,6 +882,8 @@ def main():
         f"action_ce_mode={args.action_ce_weight_mode}, "
         f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}, "
         f"search_q_rank={args.search_q_rank_weight:g}, search_q_temp={args.search_q_temperature:g}, "
+        f"search_q_value={args.search_q_value_weight:g}, search_q_score_scale={args.search_q_score_scale:g}, "
+        f"search_q_outcome_score={args.search_q_outcome_score_weight:g}, "
         f"source={args.source_weight:g}, target={args.target_weight:g}"
     )
     if args.update_scope == "strategy-heads":
@@ -843,6 +945,9 @@ def main():
             args.q_action_ce_weight,
             args.search_q_rank_weight,
             args.search_q_temperature,
+            args.search_q_value_weight,
+            args.search_q_score_scale,
+            args.search_q_outcome_score_weight,
             args.source_weight,
             args.target_weight,
             args.balance_finish_labels,
@@ -865,6 +970,8 @@ def main():
             f"QCE {float(metrics['q_action_ce']):.4f}/{float(metrics['q_action_accuracy']) * 100:5.1f}% | "
             f"SQ {float(metrics['search_q_rank_loss']):.4f}/{float(metrics['search_q_rank_accuracy']) * 100:5.1f}% | "
             f"SQw {float(metrics['search_q_weight_mean']):.3f} | "
+            f"SQV {float(metrics['search_q_value_loss']):.4f}/{float(metrics['search_q_value_accuracy']) * 100:5.1f}% | "
+            f"SQVw {float(metrics['search_q_value_weight_mean']):.3f} | "
             f"Src {float(metrics['source_loss']):.4f}/{float(metrics['source_accuracy']) * 100:5.1f}% | "
             f"Tgt {float(metrics['target_loss']):.4f}/{float(metrics['target_accuracy']) * 100:5.1f}% | "
             f"Time {time.time() - t0:.2f}s"

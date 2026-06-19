@@ -1005,3 +1005,8 @@
 - **Status:** Completed
 - **Next Steps:** Use the fixed-v5 search-best rows for a gate/candidate model or recollect with longer search rollout horizon. Do not treat the bottleneck checkpoint as promotion because primitive policy logits are unchanged.
 - **Context:** The old best fixed-v5 imitation v5 checkpoint does not deserialize under the current U-Net value-head template, so collection used loadable `adaptive-midgame-search-imitation-v1` as search prior against fixed v5. The new dataset kept 7525 rows with search-best labels `946` win / `6578` draw / `1` loss; fixed-v5 bottleneck training reached finish accuracy `57.8%`, outcome accuracy `58.8%`, and passed a GPU evaluator load smoke.
+## [2026-06-19 19:26] Fixed-v5 Search-Q Value Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --search-q-value-weight` plus score-scale/tie-break options to regress strategy action-Q values to search candidate outcomes; added a focused unit test and updated README/manual/training log docs. Ran GPU fixed-v5 max250 probes for `adaptive-fixed-v5-search-q-value-v0`.
+- **Status:** Completed
+- **Next Steps:** Stop Q-rerank/Q-replace threshold scans; collect and train Midgame Decisive Trajectory Imitation windows with contact/high-gap/win-or-finish filters.
+- **Context:** Q-value loss dropped strongly (`14.0065 -> 0.3222`), but q-replace underperformed baseline at 128 games/seat (`min 9.38%` off vs `5.47%` at threshold `0.25` and `7.81%` at threshold `1.0`). The issue is action-level replacement, not trainability of the head.
