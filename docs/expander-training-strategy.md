@@ -8400,3 +8400,115 @@ plan-conditioned Worker action head
 gate by finish/draw confidence
 mix with base policy rather than overwriting primitive logits globally
 ```
+
+## 2026-06-19: Belief-Main-Stack Strategy Worker Probe
+
+The decisive-only action imitation results above suggested that primitive CE is
+not enough, so the next probe moved the same decisive rows into a learned
+target-conditioned Worker.
+
+Code changes:
+
+```text
+adaptive_plan_worker_supervised.py:
+  added --dataset-format strategy
+  strategy format reads:
+    obs
+    legal_mask
+    active
+    source_heatmap
+    target_heatmap
+    teacher_action_index
+  command planes:
+    source_one_hot from source_heatmap argmax
+    target_one_hot from target_heatmap argmax
+    route_potential to target
+
+evaluate_adaptive_policy.py:
+  added --strategy-plan-worker-command-source
+  spatial:
+    use strategy-spatial source/target heads
+  belief-main-stack:
+    use belief enemy_general_logits as target
+    use main-stack/route heuristic for source
+    requires --strategy-aux only, not --strategy-spatial-aux
+```
+
+The first loader version incorrectly filtered strategy rows by applying a
+4-direction legal mask directly to 8-plane full/half action indices. That kept
+only `2137` examples. The fix expands the 4-direction legal mask to full+half
+8 action planes before checking `teacher_action_index`.
+
+Corrected Worker training:
+
+```text
+run:
+  runs/adaptive-strategy-decisive-worker-v1/
+data:
+  runs/adaptive-midgame-contact-searchwin-decisive-filter-v0/
+format:
+  strategy
+examples:
+  15941
+network:
+  U-Net 64,96,128,64
+input:
+  38 channels = 35 adaptive/fog/history + 3 command planes
+loss:
+  action=0.50
+  source=1.00
+  direction=1.00
+epochs:
+  60
+```
+
+Offline training improved executor labels:
+
+```text
+loss:
+  6.8461 -> 3.5161
+action accuracy:
+  7.0% -> 29.3%
+source accuracy:
+  24.9% -> 67.7%
+direction accuracy:
+  31.0% -> 41.6%
+```
+
+Fixed-v5 `max250`, 128 games/seat, seed `87060`, safe v3 policy:
+
+```text
+off:
+  p0 15/43/70, win 11.72%, draw 54.69%
+  p1 11/40/77, win  8.59%, draw 60.16%
+  min 8.59%
+
+belief-main-stack worker, scale 0.02:
+  p0 16/43/69, win 12.50%, draw 53.91%
+  p1 11/35/82, win  8.59%, draw 64.06%
+  min 8.59%
+
+belief-main-stack worker, scale 0.05:
+  p0 12/40/76, win  9.38%, draw 59.38%
+  p1  7/45/76, win  5.47%, draw 59.38%
+  min 5.47%
+
+belief-main-stack worker, scale 0.02, worker margin >= 1.0:
+  p0 16/43/69, win 12.50%, draw 53.91%
+  p1 10/39/79, win  7.81%, draw 61.72%
+  min 7.81%
+```
+
+Conclusion:
+
+```text
+The strategy-shard Worker is trainable and the belief-main-stack command path
+lets us use safe non-spatial checkpoints. Online fixed-v5 results are still not
+promotion-worthy: low scale only shifts p0 slightly and does not fix p1; higher
+scale hurts both seats; simple worker-margin gating does not recover min win
+rate.
+```
+
+Do not continue scale/margin scans here. The useful next step is a learned gate
+or scorer trained on whether the Worker actually improves the base action in
+rollout, not more unconditional Worker logit bias.

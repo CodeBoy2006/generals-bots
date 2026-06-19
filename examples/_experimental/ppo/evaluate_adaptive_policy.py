@@ -45,6 +45,9 @@ from generals.core.action import DIRECTIONS
 from generals.core import game
 from train import random_action, stack_learner_actions
 
+PLAN_WORKER_COMMAND_SOURCE_NAMES = ("spatial", "belief-main-stack")
+PLAN_WORKER_COMMAND_SOURCE_TO_ID = {name: index for index, name in enumerate(PLAN_WORKER_COMMAND_SOURCE_NAMES)}
+
 
 @dataclass(frozen=True)
 class AdaptiveEvalRow:
@@ -99,6 +102,7 @@ def _policy_action(
     strategy_worker_policy_margin: float,
     strategy_plan_worker_rerank_scale: float,
     strategy_plan_worker_min_margin: float,
+    strategy_plan_worker_command_source: int,
     strategy_command_gate_threshold: float,
     strategy_command_gate_source_count: int,
     strategy_command_gate_target_count: int,
@@ -135,12 +139,18 @@ def _policy_action(
             strategy_spatial_rerank_scale,
         )[0]
     if strategy_plan_worker_rerank_scale > 0.0:
+        if strategy_plan_worker_command_source == PLAN_WORKER_COMMAND_SOURCE_TO_ID["belief-main-stack"]:
+            worker_source_logits = jnp.zeros_like(aux.enemy_general_logits)
+            worker_target_logits = aux.enemy_general_logits
+        else:
+            worker_source_logits = aux.source_logits
+            worker_target_logits = aux.target_logits
         worker_obs = strategy_plan_worker_obs(
             obs_arr,
             mask,
             active,
-            aux.source_logits,
-            aux.target_logits,
+            worker_source_logits,
+            worker_target_logits,
             network.pad_size,
         )
         worker_logits = plan_worker_network.logits_value(worker_obs, mask, active)[0]
@@ -607,6 +617,7 @@ def evaluate_batch(
     strategy_worker_policy_margin=-1.0,
     strategy_plan_worker_rerank_scale=0.0,
     strategy_plan_worker_min_margin=-1.0,
+    strategy_plan_worker_command_source=0,
     strategy_command_gate_threshold=-1.0,
     strategy_command_gate_source_count=1,
     strategy_command_gate_target_count=1,
@@ -722,6 +733,7 @@ def evaluate_batch(
                 strategy_worker_policy_margin,
                 strategy_plan_worker_rerank_scale,
                 strategy_plan_worker_min_margin,
+                strategy_plan_worker_command_source,
                 strategy_command_gate_threshold,
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
@@ -781,6 +793,7 @@ def evaluate_policy_opponent_batch(
     strategy_worker_policy_margin=-1.0,
     strategy_plan_worker_rerank_scale=0.0,
     strategy_plan_worker_min_margin=-1.0,
+    strategy_plan_worker_command_source=0,
     strategy_command_gate_threshold=-1.0,
     strategy_command_gate_source_count=1,
     strategy_command_gate_target_count=1,
@@ -897,6 +910,7 @@ def evaluate_policy_opponent_batch(
                 strategy_worker_policy_margin,
                 strategy_plan_worker_rerank_scale,
                 strategy_plan_worker_min_margin,
+                strategy_plan_worker_command_source,
                 strategy_command_gate_threshold,
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
@@ -979,6 +993,12 @@ def parse_args():
     parser.add_argument("--strategy-plan-worker-network-arch", choices=("cnn", "unet"), default="cnn")
     parser.add_argument("--strategy-plan-worker-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-plan-worker-min-margin", type=float, default=-1.0)
+    parser.add_argument(
+        "--strategy-plan-worker-command-source",
+        choices=PLAN_WORKER_COMMAND_SOURCE_NAMES,
+        default="spatial",
+        help="Command source for learned Plan-Worker inference.",
+    )
     parser.add_argument("--strategy-command-gate-path", default=None)
     parser.add_argument("--strategy-command-gate-threshold", type=float, default=-1.0)
     parser.add_argument("--strategy-command-gate-hidden-dim", type=int, default=32)
@@ -1070,8 +1090,14 @@ def parse_args():
         parser.error("--strategy-plan-worker-rerank-scale must be non-negative")
     if args.strategy_plan_worker_rerank_scale > 0.0 and args.strategy_plan_worker_path is None:
         parser.error("--strategy-plan-worker-rerank-scale requires --strategy-plan-worker-path")
-    if args.strategy_plan_worker_rerank_scale > 0.0 and not (args.strategy_aux and args.strategy_spatial_aux):
-        parser.error("--strategy-plan-worker-rerank-scale requires --strategy-aux --strategy-spatial-aux")
+    if args.strategy_plan_worker_rerank_scale > 0.0 and not args.strategy_aux:
+        parser.error("--strategy-plan-worker-rerank-scale requires --strategy-aux")
+    if (
+        args.strategy_plan_worker_rerank_scale > 0.0
+        and args.strategy_plan_worker_command_source == "spatial"
+        and not args.strategy_spatial_aux
+    ):
+        parser.error("--strategy-plan-worker-command-source spatial requires --strategy-spatial-aux")
     if args.strategy_plan_worker_min_margin < 0.0 and args.strategy_plan_worker_min_margin != -1.0:
         parser.error("--strategy-plan-worker-min-margin must be non-negative, or -1 to disable")
     if args.strategy_plan_worker_min_margin >= 0.0 and args.strategy_plan_worker_rerank_scale <= 0.0:
@@ -1227,7 +1253,8 @@ def main():
         print(f"Plan worker: {args.strategy_plan_worker_path}")
         print(
             "Plan worker: "
-            f"arch={args.strategy_plan_worker_network_arch}, scale={args.strategy_plan_worker_rerank_scale:g}"
+            f"arch={args.strategy_plan_worker_network_arch}, scale={args.strategy_plan_worker_rerank_scale:g}, "
+            f"command={args.strategy_plan_worker_command_source}"
         )
         if args.strategy_plan_worker_min_margin >= 0.0:
             print(f"Plan worker: min_margin={args.strategy_plan_worker_min_margin:g}")
@@ -1297,6 +1324,7 @@ def main():
                     args.strategy_worker_policy_margin,
                     args.strategy_plan_worker_rerank_scale,
                     args.strategy_plan_worker_min_margin,
+                    PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
                     args.strategy_command_gate_threshold,
                     args.strategy_command_gate_source_count,
                     args.strategy_command_gate_target_count,
@@ -1330,6 +1358,7 @@ def main():
                     args.strategy_worker_policy_margin,
                     args.strategy_plan_worker_rerank_scale,
                     args.strategy_plan_worker_min_margin,
+                    PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
                     args.strategy_command_gate_threshold,
                     args.strategy_command_gate_source_count,
                     args.strategy_command_gate_target_count,
@@ -1385,6 +1414,7 @@ def main():
         "strategy_plan_worker_network_arch": args.strategy_plan_worker_network_arch,
         "strategy_plan_worker_rerank_scale": args.strategy_plan_worker_rerank_scale,
         "strategy_plan_worker_min_margin": args.strategy_plan_worker_min_margin,
+        "strategy_plan_worker_command_source": args.strategy_plan_worker_command_source,
         "strategy_command_gate_path": args.strategy_command_gate_path,
         "strategy_command_gate_threshold": args.strategy_command_gate_threshold,
         "strategy_command_gate_hidden_dim": args.strategy_command_gate_hidden_dim,

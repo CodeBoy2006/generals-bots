@@ -1028,3 +1028,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop action-CE imitation sweeps on these shards. Use the decisive filtered data for a plan-conditioned Worker or gated plan executor, mixed with the base policy rather than globally biasing primitive logits.
 - **Context:** v4 reached fixed-v5 max250 256-row min `11.72%` but regressed Expander min to `73.44%`; v5-lite `9.38%`, v6 `8.59%`, v7 `11.33%` with Expander `72.66%`, and v8 decisive-only `10.94%`. Current safe checkpoint remains `runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx`.
+
+## [2026-06-19 20:27] Strategy Worker Command Probe
+- **Changes:** Added `adaptive_plan_worker_supervised.py --dataset-format strategy` for decisive strategy shards, added `evaluate_adaptive_policy.py --strategy-plan-worker-command-source belief-main-stack`, updated README/manual/docs, and trained/evaluated `runs/adaptive-strategy-decisive-worker-v1/`.
+- **Status:** Completed
+- **Next Steps:** Do not scan worker rerank scale or margin further. Train a gate/scorer on whether the Worker action improves the base action under rollout, then invoke the Worker only when that gate is confident.
+- **Context:** Corrected Worker loader expands the 4-direction legal mask to full/half 8 action planes before filtering labels. Worker v1 trained on `15941` decisive rows and reached action/source/direction accuracy `29.3%/67.7%/41.6%`, but fixed-v5 max250 128-row seed `87060` did not improve min: off `8.59%`, scale `0.02` `8.59%`, scale `0.05` `5.47%`, scale `0.02` margin `1.0` `7.81%`.

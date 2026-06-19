@@ -1,4 +1,4 @@
-"""Train a target-conditioned Worker from Plan-Q source-target shards."""
+"""Train a target-conditioned Worker from Plan-Q or strategy source-target shards."""
 
 from __future__ import annotations
 
@@ -230,6 +230,71 @@ def load_plan_worker_dataset(
     return {name: jnp.asarray(value) for name, value in arrays.items()}
 
 
+def _heatmap_argmax_indices(heatmap: np.ndarray, active: np.ndarray) -> np.ndarray:
+    """Return active-cell argmax indices for spatial supervision maps."""
+    flat_scores = heatmap.reshape(heatmap.shape[0], -1).astype(np.float32)
+    flat_active = active.reshape(active.shape[0], -1)
+    return np.argmax(np.where(flat_active, flat_scores, -1.0e9), axis=1).astype(np.int32)
+
+
+def load_strategy_worker_dataset(
+    paths: list[Path],
+    drop_pass_labels: bool,
+    max_examples: int | None,
+    seed: int,
+) -> dict[str, jnp.ndarray]:
+    """Load strategy shards and construct Worker command observations.
+
+    Strategy shards store one source heatmap, one target heatmap, and the
+    rollout-search teacher action per row. This gives a cheap executor dataset
+    for decisive midgame states without rerunning Plan-Q candidate generation.
+    """
+    chunks: dict[str, list[np.ndarray]] = {
+        "obs": [],
+        "legal_mask": [],
+        "active": [],
+        "labels": [],
+        "weights": [],
+    }
+    for path in paths:
+        shard = np.load(path)
+        base_obs = shard["obs"].astype(np.float32)
+        active = shard["active"].astype(np.bool_)
+        labels = shard["teacher_action_index"].astype(np.int32)
+        pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
+        keep = np.ones((base_obs.shape[0],), dtype=np.bool_)
+        if drop_pass_labels:
+            keep &= labels != pass_index
+        if "legal_mask" in shard:
+            direction_legal = np.transpose(shard["legal_mask"].astype(np.bool_), (0, 3, 1, 2))
+            move_legal = np.concatenate([direction_legal, direction_legal], axis=1).reshape(base_obs.shape[0], -1)
+            pass_legal = np.ones((base_obs.shape[0], 1), dtype=np.bool_)
+            flat_legal = np.concatenate([move_legal, pass_legal], axis=1)
+            keep &= flat_legal[np.arange(base_obs.shape[0]), np.clip(labels, 0, flat_legal.shape[1] - 1)]
+        if not np.any(keep):
+            continue
+        base_obs = base_obs[keep]
+        active = active[keep]
+        labels = labels[keep]
+        source_indices = _heatmap_argmax_indices(shard["source_heatmap"][keep], active)
+        target_indices = _heatmap_argmax_indices(shard["target_heatmap"][keep], active)
+        command = plan_command_planes(source_indices, target_indices, active, base_obs.shape[-1])
+        chunks["obs"].append(np.concatenate([base_obs, command], axis=1).astype(np.float32))
+        chunks["legal_mask"].append(shard["legal_mask"][keep].astype(np.bool_))
+        chunks["active"].append(active)
+        chunks["labels"].append(labels)
+        chunks["weights"].append(np.ones((labels.shape[0],), dtype=np.float32))
+
+    if not chunks["obs"]:
+        raise ValueError("No strategy Worker examples selected; relax filters or keep pass labels")
+    arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
+    if max_examples is not None and arrays["obs"].shape[0] > max_examples:
+        rng = np.random.default_rng(seed)
+        indices = np.sort(rng.choice(arrays["obs"].shape[0], size=max_examples, replace=False))
+        arrays = {name: value[indices] for name, value in arrays.items()}
+    return {name: jnp.asarray(value) for name, value in arrays.items()}
+
+
 @eqx.filter_jit
 def train_step(
     network,
@@ -321,6 +386,7 @@ def train_epoch(
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a target-conditioned Worker from Plan-Q shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
+    parser.add_argument("--dataset-format", choices=("plan-q", "strategy"), default="plan-q")
     parser.add_argument("--selection", choices=("best", "all", "accepted", "mixed"), default="best")
     parser.add_argument("--score-temperature", type=float, default=0.25)
     parser.add_argument("--accepted-score-margin", type=float, default=25.0)
@@ -379,17 +445,25 @@ def parse_args():
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
-    dataset = load_plan_worker_dataset(
-        paths,
-        args.selection,
-        args.score_temperature,
-        not args.keep_pass_labels,
-        args.accepted_score_margin,
-        args.mixed_best_weight,
-        args.accepted_weight,
-        args.max_examples,
-        args.seed,
-    )
+    if args.dataset_format == "strategy":
+        dataset = load_strategy_worker_dataset(
+            paths,
+            not args.keep_pass_labels,
+            args.max_examples,
+            args.seed,
+        )
+    else:
+        dataset = load_plan_worker_dataset(
+            paths,
+            args.selection,
+            args.score_temperature,
+            not args.keep_pass_labels,
+            args.accepted_score_margin,
+            args.mixed_best_weight,
+            args.accepted_weight,
+            args.max_examples,
+            args.seed,
+        )
     input_channels = args.input_channels or int(dataset["obs"].shape[1])
     if input_channels != int(dataset["obs"].shape[1]):
         raise ValueError(f"--input-channels {input_channels} does not match dataset channels {dataset['obs'].shape[1]}")
@@ -398,11 +472,13 @@ def main():
     print(f"Device:       {jax.devices()[0]}")
     print(f"Datasets:     {len(paths)} shard(s)")
     print(f"Examples:     {dataset['obs'].shape[0]}")
-    print(f"Selection:    {args.selection}")
-    if args.selection in ("accepted", "mixed"):
-        print(f"Accepted:     score_margin={args.accepted_score_margin:g}, weight={args.accepted_weight:g}")
-    if args.selection == "mixed":
-        print(f"Mixed best:   weight={args.mixed_best_weight:g}")
+    print(f"Format:       {args.dataset_format}")
+    if args.dataset_format == "plan-q":
+        print(f"Selection:    {args.selection}")
+        if args.selection in ("accepted", "mixed"):
+            print(f"Accepted:     score_margin={args.accepted_score_margin:g}, weight={args.accepted_weight:g}")
+        if args.selection == "mixed":
+            print(f"Mixed best:   weight={args.mixed_best_weight:g}")
     print(f"Input chans:  {input_channels}")
     print(f"Arch:         {args.network_arch}")
     print(
