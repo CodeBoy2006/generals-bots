@@ -1154,3 +1154,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the value-calibrated checkpoints. Stop longer plain PPO/value-only pretraining for this gate; next work should target execution/control directly with source-target outcome-Q, stronger plan-conditioned Worker positives, or advantage-labeled action selection from counterfactual plans.
 - **Context:** Full safe-v3 schema loads when outcome and strategy heads are both declared; the earlier schema mismatch was from omitting the outcome head. Value calibration learned offline (`value loss 5.2276 -> 2.9189`, MAE `0.673 -> 0.609`) but value-calibrated mixed PPO still scored fixed-v5 max250 256-row min `11.33%` and Expander 128-row min `74.22%`. The first oversampled calibration attempt OOMed at 230,424 rows; the completed run used `45,866` rows.
+
+## [2026-06-20 02:33] Fixed-v5 Short-Gate Follow-up
+- **Changes:** Documented GPU results for direct midgame trajectory imitation, policy-head-only search-best action imitation, high-gap Plan-Q Worker rerank, 8x8 fixed-v5 best-response PPO, last-iterate PPO, and draw-penalty PPO in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Stop primitive action CE and short 8-only fixed-v5 PPO for this gate. Move next to cleaner counterfactual execution labels: advantage-labeled changed actions, command-gated executor positives, or source-target outcome-Q where positives are tied to later wins rather than single-step teacher choices.
+- **Context:** Full-trunk decisive trajectory imitation hurt Expander (`65.62%` min). Policy-head variants preserved Expander but fixed-v5 gains were 128-row false positives (`v2` 256-row min `8.20%`, `v3` 256-row min `7.03%`). Current search-win shards already store search-best actions as `teacher_action_index` in ~`96.7%`-`99.98%` of valid rows. 8-only PPO with EMA, last iterate, and draw penalty all stayed below the safe-v3 fixed-v5 gate; draw penalty did not reduce draw enough.

@@ -11136,3 +11136,169 @@ remaining gap is execution/control: source-target outcome-Q, plan-conditioned
 Worker with stronger positive gates, or advantage-labeled action selection from
 counterfactual plans.
 ```
+
+### 2026-06-20: Fixed-v5 Short-Gate Follow-up
+
+This round tested whether the latest safe-v3 checkpoint can be pushed through
+the fixed-v5 `max250` gate by more direct midgame imitation or 8x8-only
+best-response PPO. All runs used GPU and wrote artifacts under ignored `runs/`.
+
+Direct midgame decisive trajectory imitation from safe-v3:
+
+```text
+run:
+  runs/adaptive-midgame-decisive-trajectory-imitation-v1/
+
+init:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+
+data:
+  adaptive-midgame-searchwin-trajectory-fixed-v5-safev3-v0
+  adaptive-midgame-contact-searchwin-fixed-v5-safev3-v0
+  adaptive-midgame-contact-searchwin-expander-safev3-v0
+  adaptive-midgame-draw-fixed-v5-v0
+
+filters:
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+
+training:
+  update_scope all
+  policy_kl 1.0
+  action_ce 0.30, wins only
+  finish 0.50, outcome 0.40, belief 0.25, intent 0.20
+```
+
+Results:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 91340:
+  min 10.16%
+  max draw 51.56%
+
+Expander adaptive, 128 games/row, seed 91360:
+  min 65.62%
+```
+
+Conclusion: full-trunk trajectory imitation moved the model but damaged the
+adaptive Expander policy, especially 16x16 player 1. Do not promote.
+
+Policy-head-only variants:
+
+```text
+runs/adaptive-midgame-decisive-trajectory-policyhead-v2/
+  update_scope policy-heads
+  policy_kl 4.0
+  action_ce 0.10, wins only
+
+fixed-v5 max250:
+  128 games/seat, seed 91400: min 11.72%
+  256 games/seat, seed 91440: min 8.20%
+
+Expander adaptive:
+  128 games/row, seed 91420: min 75.00%
+
+runs/adaptive-midgame-searchbest-action-policyhead-v3/
+  update_scope policy-heads
+  policy_kl 4.0
+  action_ce 0.20, search_best_outcome=win only
+
+fixed-v5 max250:
+  128 games/seat, seed 91480: min 12.50%
+  256 games/seat, seed 91500: min 7.03%
+```
+
+Conclusion: policy-head-only updates can preserve Expander, but the fixed-v5
+gains are 128-row false positives. The current search-win shards already store
+search-best actions as `teacher_action_index` in nearly all rows
+(`96.7%` to `99.98%` match depending on shard), so the failure is not caused by
+using raw trajectory actions.
+
+High-gap Plan-Q Worker probe:
+
+```text
+run:
+  runs/adaptive-plan-worker-highgap-mid100-v0/
+
+data:
+  runs/adaptive-plan-q-model-worker-highgap-mid100-v0/*.npz
+
+training:
+  selection best
+  target-conditioned Worker
+  20 epochs
+
+offline:
+  final action accuracy 10.0%
+  final useful accuracy 10.0%
+
+eval with:
+  adaptive-plan-q-source-target-highgap-mid100-v0
+  strategy_plan_worker_rerank_scale 0.02
+
+fixed-v5 max250, 128 games/seat, seed 91540:
+  min 6.25%
+  max draw 54.69%
+```
+
+Conclusion: the high-gap Worker labels are still too weak/noisy for inference
+replacement. Do not continue this Worker variant.
+
+8x8-only fixed-v5 PPO best-response probes:
+
+```text
+runs/adaptive-ppo-fixed-v5-8only-br-v0/
+  grid_sizes 8
+  fixed-v5 opponent p=1.0
+  mixed learner seats
+  terminal reward 20
+  rollout 256
+  top_advantage stratified 0.25
+  EMA 0.999 saved as eval model
+
+fixed-v5 max250, 128 games/seat, seed 91620:
+  min 8.59%
+
+Expander adaptive, 128 games/row, seed 91640:
+  min 67.19%
+
+runs/adaptive-ppo-fixed-v5-8only-br-last-v1/
+  same, but save last iterate and lr 5e-6
+
+fixed-v5 max250, 128 games/seat, seed 91700:
+  min 8.59%
+  max draw 61.72%
+
+Expander adaptive, 128 games/row, seed 91720:
+  min 73.44%
+
+runs/adaptive-ppo-fixed-v5-8only-drawpenalty-v0/
+  no top-advantage filtering
+  truncation_reward_scale 5.0
+
+fixed-v5 max250, 128 games/seat, seed 91780:
+  min 9.38%
+  max draw 57.03%
+```
+
+Conclusion:
+
+```text
+Short 8x8 fixed-v5 best-response PPO does not currently solve the gate.
+The EMA save path was not the root cause: saving last iterate did not help.
+Making timeout draws negative also did not reduce draw enough or improve win rate.
+
+Stop:
+  direct midgame action imitation
+  policy-head-only search-best CE
+  short 8-only fixed-v5 PPO
+  simple draw-penalty PPO
+  high-gap Worker rerank from current labels
+
+Next useful direction:
+  build cleaner counterfactual execution labels, not more primitive CE.
+  Use Plan-Q/replacement data to train an advantage-labeled action head or
+  command-gated executor where positives are "changed action later wins" rather
+  than "teacher/search picked this single action".
+```
