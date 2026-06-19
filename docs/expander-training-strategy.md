@@ -10055,3 +10055,135 @@ not another static threshold sweep; collect high-gap midgame decisive rows and
 train source/target outcome-Q or trajectory imitation so the main U-Net policy
 learns the decisive behavior directly.
 ```
+
+## 2026-06-20 - Training-time row filters and policy-head decisive imitation
+
+Added training-time row filters to `adaptive_strategy_supervised.py`:
+
+```text
+--min-row-turn
+--max-row-turn
+--require-contact
+--min-visible-enemy-cells
+--min-visible-enemy-density
+--require-outcome-win
+--require-search-best-win
+--require-finish-within-250
+--require-win-or-finish-within-250
+--min-search-score-gap
+```
+
+The filters apply before `--max-samples-per-shard`, so broad saved shards can
+be reused for focused midgame/contact/high-gap probes without writing derived
+NPZ files. The loader keeps its default dict return for tests and returns
+filter stats only when the CLI asks for them.
+
+Policy-head decisive imitation probe:
+
+```text
+run:
+  runs/adaptive-midgame-decisive-policyhead-v0/
+
+init:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+
+data:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-v1/
+  runs/adaptive-midgame-draw-fixed-v5-v0/
+  runs/adaptive-midgame-contact-searchwin-expander-12-16-v0/
+  runs/adaptive-midgame-contact-searchwin-expander-safev3-v0/
+
+row filters:
+  time >= 80
+  contact
+  visible_enemy_cells >= 1
+  search_gap >= 0.25
+
+sampling:
+  max_samples_per_shard = 2500
+  balance_strata = size-seat
+
+training:
+  update_scope = policy-heads
+  policy_kl = 3.0
+  action_ce = 0.20
+  action_ce_weight_mode = search-best-win
+  action_ce_path_contains:
+    adaptive-midgame-contact-searchwin-fixed-v5-v1
+    adaptive-midgame-contact-searchwin-expander
+  finish = 0.50, balanced, multi-horizon
+  outcome = 0.40, balanced
+  belief = 0.25
+  intent = 0.20
+  lr = 2e-5
+  epochs = 8
+```
+
+Training result:
+
+```text
+samples:
+  kept 91,725 / 91,725 rows
+  sampled 62,227 rows
+  balanced to 37,242 rows
+
+epoch 1 -> 8:
+  loss     1.5786 -> 1.5184
+  intent   56.8%  -> 75.9%
+  finish   62.6%  -> 64.4%
+  belief   0.0642 -> 0.0596
+  outcome  37.2%  -> 35.8%
+  KL       0.0195 -> 0.0171
+  ActCE    2.7742 -> 2.7816
+  ActAcc   29.1%  -> 29.0%
+  ActW     0.241
+```
+
+Gameplay:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 86640:
+  base v3:
+    p0 12.50%
+    p1 10.94%
+    min 10.94%
+
+  policyhead-v0:
+    p0 13.28%
+    p1  8.59%
+    min  8.59%
+
+Expander 8/12/16, 128 games/row, seed 86680:
+  base v3:
+    8p0 75.78%
+    8p1 77.34%
+    12p0 82.81%
+    12p1 82.81%
+    16p0 82.03%
+    16p1 77.34%
+    min 75.78%
+
+  policyhead-v0:
+    8p0 74.22%
+    8p1 75.78%
+    12p0 85.16%
+    12p1 82.03%
+    16p0 77.34%
+    16p1 75.78%
+    min 74.22%
+```
+
+Conclusion:
+
+```text
+The training-time filters work and make the probe reproducible, but freezing
+the trunk and updating only the primitive policy head does not solve the
+midgame decisive imitation problem. It learns auxiliary labels while barely
+moving action CE, then loses fixed-v5 p1 and Expander 8p0/16p0.
+
+Do not promote `adaptive-midgame-decisive-policyhead-v0`. This rules out the
+safe-looking policy-head-only version of midgame decisive imitation. The next
+useful direction is not a CE/LR sweep: use high-gap decisive rows to train
+source/target outcome-Q or a target-conditioned executor with explicit
+replacement outcome labels, while keeping the safe v3 policy as the active base.
+```

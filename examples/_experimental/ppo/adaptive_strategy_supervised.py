@@ -82,7 +82,18 @@ def load_strategy_dataset(
     action_ce_weight_mode: str = "all",
     label_source: str = "trajectory",
     action_ce_path_contains: tuple[str, ...] = (),
-) -> dict[str, jnp.ndarray]:
+    min_row_turn: int = 0,
+    max_row_turn: int | None = None,
+    require_contact: bool = False,
+    min_visible_enemy_cells: int = 0,
+    min_visible_enemy_density: float = 0.0,
+    require_outcome_win: bool = False,
+    require_search_best_win: bool = False,
+    require_finish_within_250: bool = False,
+    require_win_or_finish_within_250: bool = False,
+    min_search_score_gap: float = 0.0,
+    return_stats: bool = False,
+) -> dict[str, jnp.ndarray] | tuple[dict[str, jnp.ndarray], dict]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
     rng = np.random.default_rng(seed)
     search_candidate_count = 1
@@ -114,15 +125,80 @@ def load_strategy_dataset(
         "search_outcomes": [],
         "search_score_gap": [],
     }
+    load_stats = {
+        "rows": 0,
+        "kept": 0,
+        "sampled": 0,
+        "filters": [],
+    }
     domain_to_id: dict[str, int] = {}
+
+    def require_field(shard, path: Path, name: str) -> np.ndarray:
+        if name not in shard:
+            raise KeyError(f"{path} is missing {name} for active row filters")
+        return shard[name]
+
     for path in paths:
         shard = np.load(path)
         domain_name = dataset_domain_name(path)
         domain_id = domain_to_id.setdefault(domain_name, len(domain_to_id))
         shard_samples = shard["obs"].shape[0]
-        shard_indices = np.arange(shard_samples)
-        if max_samples_per_shard is not None and shard_samples > max_samples_per_shard:
-            shard_indices = np.sort(rng.choice(shard_samples, size=max_samples_per_shard, replace=False))
+        row_keep = np.ones((shard_samples,), dtype=np.bool_)
+
+        def add_row_filter(name: str, mask: np.ndarray) -> None:
+            nonlocal row_keep
+            bool_mask = np.asarray(mask, dtype=np.bool_)
+            load_stats["filters"].append({"name": name, "matches": int(np.sum(bool_mask))})
+            row_keep &= bool_mask
+
+        if min_row_turn > 0:
+            add_row_filter(f"time>={min_row_turn}", require_field(shard, path, "time").astype(np.int32) >= min_row_turn)
+        if max_row_turn is not None:
+            add_row_filter(f"time<={max_row_turn}", require_field(shard, path, "time").astype(np.int32) <= max_row_turn)
+        if require_contact:
+            add_row_filter("contact", require_field(shard, path, "contact").astype(np.float32) > 0.5)
+        if min_visible_enemy_cells > 0:
+            add_row_filter(
+                f"visible_enemy_cells>={min_visible_enemy_cells}",
+                require_field(shard, path, "visible_enemy_count").astype(np.int32) >= min_visible_enemy_cells,
+            )
+        if min_visible_enemy_density > 0.0:
+            add_row_filter(
+                f"visible_enemy_density>={min_visible_enemy_density:g}",
+                require_field(shard, path, "visible_enemy_density").astype(np.float32) >= min_visible_enemy_density,
+            )
+        if require_outcome_win:
+            known = require_field(shard, path, "outcome_known").astype(np.float32) > 0.0
+            add_row_filter("outcome=win", (shard["outcome"].astype(np.int32) == OUTCOME_WIN) & known)
+        if require_search_best_win:
+            add_row_filter(
+                "search_best=win",
+                require_field(shard, path, "search_best_outcome").astype(np.int32) == OUTCOME_WIN,
+            )
+        if require_finish_within_250:
+            add_row_filter(
+                "finish<=250",
+                require_field(shard, path, "finish_within_250").astype(np.float32) > 0.5,
+            )
+        if require_win_or_finish_within_250:
+            known = require_field(shard, path, "outcome_known").astype(np.float32) > 0.0
+            wins = (shard["outcome"].astype(np.int32) == OUTCOME_WIN) & known
+            finish250 = require_field(shard, path, "finish_within_250").astype(np.float32) > 0.5
+            add_row_filter("win_or_finish<=250", wins | finish250)
+        if min_search_score_gap > 0.0:
+            add_row_filter(
+                f"search_gap>={min_search_score_gap:g}",
+                require_field(shard, path, "search_score_gap").astype(np.float32) >= min_search_score_gap,
+            )
+
+        load_stats["rows"] += int(shard_samples)
+        load_stats["kept"] += int(np.sum(row_keep))
+        shard_indices = np.flatnonzero(row_keep)
+        if shard_indices.size == 0:
+            continue
+        if max_samples_per_shard is not None and shard_indices.size > max_samples_per_shard:
+            shard_indices = np.sort(rng.choice(shard_indices, size=max_samples_per_shard, replace=False))
+        load_stats["sampled"] += int(shard_indices.shape[0])
         chunks["obs"].append(shard["obs"][shard_indices].astype(np.float32))
         chunks["legal_mask"].append(shard["legal_mask"][shard_indices].astype(np.bool_))
         chunks["active"].append(shard["active"][shard_indices].astype(np.bool_))
@@ -218,10 +294,15 @@ def load_strategy_dataset(
             action_weight = np.zeros_like(action_weight, dtype=np.bool_)
         chunks["action_weight"].append(action_weight.astype(np.float32))
 
+    if not chunks["obs"]:
+        raise ValueError("row filters kept no strategy-supervision samples")
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
     if max_samples is not None:
         arrays = {name: value[:max_samples] for name, value in arrays.items()}
-    return {name: jnp.asarray(value) for name, value in arrays.items()}
+    dataset = {name: jnp.asarray(value) for name, value in arrays.items()}
+    if return_stats:
+        return dataset, load_stats
+    return dataset
 
 
 def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: int) -> dict[str, jnp.ndarray]:
@@ -756,6 +837,16 @@ def parse_args():
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-shard", type=int, default=None)
+    parser.add_argument("--min-row-turn", type=int, default=0)
+    parser.add_argument("--max-row-turn", type=int, default=None)
+    parser.add_argument("--require-contact", action="store_true")
+    parser.add_argument("--min-visible-enemy-cells", type=int, default=0)
+    parser.add_argument("--min-visible-enemy-density", type=float, default=0.0)
+    parser.add_argument("--require-outcome-win", action="store_true")
+    parser.add_argument("--require-search-best-win", action="store_true")
+    parser.add_argument("--require-finish-within-250", action="store_true")
+    parser.add_argument("--require-win-or-finish-within-250", action="store_true")
+    parser.add_argument("--min-search-score-gap", type=float, default=0.0)
     parser.add_argument("--balance-strata", choices=BALANCE_STRATA_MODES, default="none")
     parser.add_argument(
         "--label-source",
@@ -854,6 +945,18 @@ def parse_args():
         parser.error("--max-samples must be positive")
     if args.max_samples_per_shard is not None and args.max_samples_per_shard <= 0:
         parser.error("--max-samples-per-shard must be positive")
+    if args.min_row_turn < 0:
+        parser.error("--min-row-turn must be non-negative")
+    if args.max_row_turn is not None and args.max_row_turn < args.min_row_turn:
+        parser.error("--max-row-turn must be greater than or equal to --min-row-turn")
+    if args.min_visible_enemy_cells < 0:
+        parser.error("--min-visible-enemy-cells must be non-negative")
+    if not (0.0 <= args.min_visible_enemy_density <= 1.0):
+        parser.error("--min-visible-enemy-density must be between 0 and 1")
+    if args.min_search_score_gap < 0.0:
+        parser.error("--min-search-score-gap must be non-negative")
+    if args.require_outcome_win and args.require_win_or_finish_within_250:
+        parser.error("--require-outcome-win conflicts with --require-win-or-finish-within-250")
     if args.input_channels <= 0:
         parser.error("--input-channels must be positive")
     if args.init_input_channels is not None and args.init_input_channels <= 0:
@@ -908,7 +1011,7 @@ def parse_args():
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
-    dataset = load_strategy_dataset(
+    dataset, load_stats = load_strategy_dataset(
         paths,
         args.max_samples,
         args.max_samples_per_shard,
@@ -917,6 +1020,17 @@ def main():
         args.action_ce_weight_mode,
         args.label_source,
         tuple(args.action_ce_path_contains),
+        args.min_row_turn,
+        args.max_row_turn,
+        args.require_contact,
+        args.min_visible_enemy_cells,
+        args.min_visible_enemy_density,
+        args.require_outcome_win,
+        args.require_search_best_win,
+        args.require_finish_within_250,
+        args.require_win_or_finish_within_250,
+        args.min_search_score_gap,
+        True,
     )
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
     if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:
@@ -935,6 +1049,13 @@ def main():
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
     print(f"Samples:       {dataset['obs'].shape[0]}")
+    print(
+        "Row filters:   "
+        f"kept={load_stats['kept']}/{load_stats['rows']}, sampled={load_stats['sampled']}"
+    )
+    if load_stats["filters"]:
+        labels = [item["name"] for item in load_stats["filters"]]
+        print(f"Filters:       {', '.join(dict.fromkeys(labels))}")
     if args.max_samples_per_shard is not None:
         print(f"Shard cap:     {args.max_samples_per_shard}")
     if args.balance_strata != "none":

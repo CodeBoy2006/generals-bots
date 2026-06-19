@@ -1094,3 +1094,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the protect gate as a general policy. Use grid-range guards for diagnostics, then move to high-gap midgame decisive trajectory imitation or source/target outcome-Q supervision.
 - **Context:** Protect-v3 with `min_grid_size=12,max_grid_size=16` preserved 8x8 base behavior and gave small 12/16 same-seed Expander gains: 256-row seed `90000` stayed at base min `72.27%` while 12p1 improved `79.30% -> 80.08%`, 16p0 `77.34% -> 77.73%`, and 16p1 `75.00% -> 76.17%`. The six-row min is still 8p0-limited, so this is a control-surface improvement rather than a promotion.
+
+## [2026-06-20 00:09] Training-Time Strategy Row Filters
+- **Changes:** Added load-time row filters to `adaptive_strategy_supervised.py` for turn/contact/visible-enemy/outcome/search-best/finish/search-gap selection, documented the flags, and trained/evaluated `runs/adaptive-midgame-decisive-policyhead-v0/` on GPU.
+- **Status:** Completed
+- **Next Steps:** Do not promote `policyhead-v0` or sweep its CE/LR. Keep `adaptive-midgame-contact-searchwin-imitation-v3` as the active base and use the new filters for source/target outcome-Q or executor data selection.
+- **Context:** `policyhead-v0` used broad fixed-v5/search-win, draw contrast, and Expander protection rows with `update_scope=policy-heads`, KL `3.0`, CE `0.20`, and `search-best-win` CE gating. It regressed same-seed fixed-v5 128-row min from base `10.94%` to `8.59%` and Expander 128-row min from `75.78%` to `74.22%`, so policy-head-only decisive imitation is ruled out for promotion.
