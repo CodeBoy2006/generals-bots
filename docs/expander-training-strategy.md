@@ -9090,3 +9090,111 @@ Do not continue ratio sweeps. The next step should be conditional:
 Active base remains:
   runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
 ```
+
+## 2026-06-19: Finish-Gated Policy Adapter Probe
+
+Added evaluator support for loading a second adaptive checkpoint as a policy
+adapter:
+
+```text
+evaluate_adaptive_policy.py
+  --policy-adapter-path <adapter.eqx>
+  --policy-adapter-scale <scale>
+  --policy-adapter-finish-threshold <p>
+```
+
+The adapter uses the same network template as the base policy. At inference,
+the evaluator computes:
+
+```text
+centered_delta = adapter_logits - base_logits
+base_logits += scale * gate * centered_delta
+```
+
+where `centered_delta` is centered over legal actions only. With no finish
+threshold, `scale=1.0` reproduces the adapter checkpoint's policy logits up to a
+constant shift. With `--policy-adapter-finish-threshold`, the gate is a hard
+on/off switch from the adapter strategy finish probability; multi-horizon
+finish heads use the last horizon.
+
+Smoke:
+
+```text
+base:
+  safe-v3
+adapter:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-p0mix-v0/
+scale:
+  0.5
+finish threshold:
+  0.5
+result:
+  GPU load/JIT path works
+```
+
+Fixed-v5 `max250`, 256 games/seat, seed `88340`:
+
+```text
+safe-v3 baseline:
+  min 10.55%
+
+p0mix full policy:
+  p0 win 13.67%, draw 47.66%
+  p1 win 12.50%, draw 49.61%
+  min 12.50%
+
+p0mix adapter, scale=0.5:
+  p0 win 10.94%, draw 50.39%
+  p1 win 11.33%, draw 49.61%
+  min 10.94%
+
+p0mix adapter, scale=1.0:
+  p0 win 13.67%, draw 47.66%
+  p1 win 12.50%, draw 49.61%
+  min 12.50%
+
+p0mix hard finish-gated adapter, scale=1.0, threshold=0.5:
+  p0 win 12.11%, draw 50.00%
+  p1 win 13.28%, draw 48.05%
+  min 12.11%
+```
+
+The `scale=1.0` no-gate result confirms the adapter delta implementation
+matches direct p0mix policy behavior. The finish-gated version preserves most
+of the fixed-v5 gain without using the adapter everywhere.
+
+Expander 8/12/16, 128 games/row, seed `88260`:
+
+```text
+p0mix full policy:
+  min 70.31%
+  weak row: 16p1 70.31%
+
+p0mix hard finish-gated adapter, scale=1.0, threshold=0.5:
+  8p0 73.44%, 8p1 72.66%
+  12p0 77.34%, 12p1 86.72%
+  16p0 83.59%, 16p1 81.25%
+  min 72.66%
+```
+
+Conclusion:
+
+```text
+finish-gated policy adapter is the first conditional adapter probe that keeps a
+fixed-v5 improvement while recovering most Expander regression from the
+unconditional p0mix policy.
+
+It is still not a promotion candidate:
+  fixed-v5 min 12.11% is only modestly above safe-v3 10.55%
+  Expander min 72.66% remains below the recent safe-v3 smoke 73.44%
+
+Next step:
+  train a learned adapter gate on rollout replacement outcomes using features
+  that already exist at inference time:
+    finish probability
+    outcome/draw logits
+    policy delta margin
+    seat
+    contact/visible enemy features
+  This should replace threshold sweeps.
+```

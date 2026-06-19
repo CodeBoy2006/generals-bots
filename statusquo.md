@@ -1058,3 +1058,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop static p0/domain ratio sweeps. Implement a conditional gate or adapter/delta policy head that only activates in fixed-v5-like midgame/contact finish states.
 - **Context:** p0-only fixed-v5 data kept `30561` rows with `4170` search-win rows. Unbalanced p0mix-v0 improved fixed-v5 max250 256-row min to `12.50%` but dropped Expander min to `70.31%`. Domain-balanced p0domain-v0 protected Expander slightly better at `71.09%` but fixed-v5 min was only `10.94%`. Active base remains safe-v3.
+
+## [2026-06-19 21:47] Finish-Gated Policy Adapter Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --policy-adapter-path/--policy-adapter-scale/--policy-adapter-finish-threshold`, loading a second adaptive checkpoint as a centered legal-logit delta with optional hard finish gating. Documented README/manual usage and GPU p0mix adapter results.
+- **Status:** Completed
+- **Next Steps:** Train a learned adapter gate from rollout replacement outcomes using finish/outcome, policy-delta, seat, and contact features. Do not sweep static thresholds as the main path.
+- **Context:** `scale=1.0` no-gate reproduced p0mix fixed-v5 behavior (`12.50%` min), validating the delta implementation. Hard finish-gated p0mix adapter reached fixed-v5 max250 256-row min `12.11%` and Expander 128-row min `72.66%`, recovering most Expander loss from full p0mix (`70.31%`) but still below promotion.
