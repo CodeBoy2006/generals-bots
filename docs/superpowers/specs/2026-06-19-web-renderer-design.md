@@ -315,7 +315,7 @@ First acceptance:
 - Launch server.
 - Open browser.
 - Watch PPO 0 vs PPO 1 auto-tick on an 8x8 generated map.
-- Restart after terminal or max-step limit.
+- Restart after terminal state or after an explicitly configured max-step limit.
 
 ### Phase 4: Human Interaction
 

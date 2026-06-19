@@ -150,6 +150,31 @@ def test_auto_tick_pauses_while_source_is_selected_and_passes_when_idle():
     assert idle_snapshot["last_message"] == "Auto pass"
 
 
+def test_default_web_session_does_not_finish_at_500_steps_without_winner():
+    session = _human_session()
+    session.step_count = 500
+
+    snapshot = session.snapshot()
+
+    assert snapshot["game_done"] is False
+    assert snapshot["winner"] is None
+
+
+def test_explicit_web_session_max_steps_still_finishes_without_winner():
+    session = WebGameSession.for_testing(
+        grid=_basic_grid(),
+        names=["Human", "PPO Model"],
+        agents=(FixedAgent([1, 0, 0, 0, 0]),),
+        max_steps=3,
+    )
+    session.step_count = 3
+
+    snapshot = session.snapshot()
+
+    assert snapshot["game_done"] is True
+    assert snapshot["winner"] is None
+
+
 def test_machine_tick_uses_both_agents_and_advances_time():
     session = WebGameSession.for_testing(
         grid=_basic_grid(),

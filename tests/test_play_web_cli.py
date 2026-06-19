@@ -72,7 +72,26 @@ def test_parse_web_args_accepts_human_model_path_and_server_options(monkeypatch)
     assert config.machine_vs_machine is False
     assert config.human_player == 1
     assert config.auto_tick is False
+    assert config.max_steps is None
     assert config.preview_top_k == 5
+
+
+def test_parse_web_args_accepts_optional_max_steps_limit(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["play_web.py", "policy.eqx", "--max-steps", "42"])
+
+    args = parse_args()
+    config = args_to_config(args)
+
+    assert config.max_steps == 42
+
+
+def test_parse_web_args_treats_zero_max_steps_as_unlimited(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["play_web.py", "policy.eqx", "--max-steps", "0"])
+
+    args = parse_args()
+    config = args_to_config(args)
+
+    assert config.max_steps is None
 
 
 def test_static_browser_assets_and_real_asset_mounts_exist():

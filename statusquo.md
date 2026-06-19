@@ -333,3 +333,9 @@
 - **Status:** Completed
 - **Next Steps:** Use `examples/play_web.py` to continue playtesting longer games and tune any queue affordances that feel unclear.
 - **Context:** Auto tick now consumes one queued human action per due tick, pauses only when the human has a selection and the queue is empty, and otherwise auto-passes as before.
+
+## [2026-06-19 22:17] Web Unlimited Match Length
+- **Changes:** Removed the browser renderer's default 500-step cap, made `--max-steps 0` equivalent to unlimited, preserved explicit positive max-step limits, and documented the new web default.
+- **Status:** Completed
+- **Next Steps:** Start `examples/play_web.py` normally for unlimited browser matches, or pass `--max-steps N` only for bounded smoke tests.
+- **Context:** The pygame play script and training/evaluation utilities keep their existing max-step defaults; this change is scoped to the browser session path.

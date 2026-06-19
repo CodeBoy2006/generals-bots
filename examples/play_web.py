@@ -49,7 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--human-player", type=int, choices=(0, 1), default=0)
     parser.add_argument("--auto-tick", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tick-rate", type=float, default=2.0)
-    parser.add_argument("--max-steps", type=int, default=500)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Maximum steps before ending the browser match. Use 0 or omit for no limit.",
+    )
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--preview-top-k", type=int, default=3)
     parser.add_argument("--no-ai-preview", dest="ai_preview", action="store_false")
@@ -88,8 +93,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--port must be positive")
     if args.tick_rate <= 0:
         parser.error("--tick-rate must be positive")
-    if args.max_steps <= 0:
-        parser.error("--max-steps must be positive")
+    if args.max_steps is not None and args.max_steps < 0:
+        parser.error("--max-steps must be non-negative")
     if not (1 <= args.preview_top_k <= 5):
         parser.error("--preview-top-k must be between 1 and 5")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
@@ -100,6 +105,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("city army range must satisfy min < max")
 
     args.model_path = args.model_0_path or args.model_path
+    if args.max_steps == 0:
+        args.max_steps = None
     args.model_0_policy_input = _resolve_alias(
         parser,
         "--model-0-policy-input",

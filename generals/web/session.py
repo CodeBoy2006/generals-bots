@@ -38,7 +38,7 @@ class WebSessionConfig:
     human_player: int = 0
     auto_tick: bool = True
     tick_rate: float = 2.0
-    max_steps: int = 500
+    max_steps: int | None = None
     seed: int = 43
     preview_top_k: int = 3
     ai_preview: bool = True
@@ -96,7 +96,7 @@ class WebGameSession:
         preview_player: int = 0,
         auto_tick: bool = True,
         tick_rate: float = 2.0,
-        max_steps: int = 500,
+        max_steps: int | None = None,
         preview_top_k: int = 3,
         ai_preview: bool = False,
     ):
@@ -231,6 +231,7 @@ class WebGameSession:
         machine_vs_machine: bool = False,
         auto_tick: bool = True,
         tick_rate: float = 2.0,
+        max_steps: int | None = None,
     ) -> "WebGameSession":
         colors = ["#dc3737", "#285adc"]
         if machine_vs_machine:
@@ -247,6 +248,7 @@ class WebGameSession:
                 preview_player=0,
                 auto_tick=auto_tick,
                 tick_rate=tick_rate,
+                max_steps=max_steps,
                 ai_preview=False,
             )
 
@@ -263,6 +265,7 @@ class WebGameSession:
             preview_player=1 - human_player,
             auto_tick=auto_tick,
             tick_rate=tick_rate,
+            max_steps=max_steps,
             ai_preview=False,
         )
 
@@ -558,7 +561,7 @@ class WebGameSession:
         return bool(self.info.is_done) or self._reached_limit()
 
     def _reached_limit(self) -> bool:
-        return self.step_count >= self.max_steps and int(self.info.winner) < 0
+        return self.max_steps is not None and self.step_count >= self.max_steps and int(self.info.winner) < 0
 
     @staticmethod
     def _direction(source: tuple[int, int], target: tuple[int, int]) -> int | None:
