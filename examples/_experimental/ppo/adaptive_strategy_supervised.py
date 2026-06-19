@@ -206,9 +206,11 @@ def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: i
     return {name: value[selected] for name, value in dataset.items()}
 
 
-def mask_strategy_supervised_grads(grads, keep_outcome: bool):
-    """Keep gradients only for strategy auxiliary heads and optional outcome head."""
+def mask_strategy_supervised_grads(grads, keep_outcome: bool, keep_value_bottleneck: bool = False):
+    """Keep gradients only for selected supervised heads and optional pooled bottleneck."""
     masked = jax.tree.map(lambda leaf: jnp.zeros_like(leaf) if eqx.is_inexact_array(leaf) else leaf, grads)
+    if keep_value_bottleneck:
+        masked = eqx.tree_at(lambda net: net.value_linear1, masked, grads.value_linear1)
     if keep_outcome and grads.outcome_linear2 is not None:
         masked = eqx.tree_at(lambda net: net.outcome_linear2, masked, grads.outcome_linear2)
     if grads.strategy_intent_linear2 is not None:
@@ -322,6 +324,7 @@ def train_step(
     balance_finish_labels: bool,
     balance_outcome_labels: bool,
     freeze_base: bool,
+    train_value_bottleneck: bool,
     multi_horizon_finish: bool,
 ):
     """Train one minibatch of frozen-trunk strategy auxiliary losses."""
@@ -523,7 +526,7 @@ def train_step(
 
     (loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(network)
     if freeze_base:
-        grads = mask_strategy_supervised_grads(grads, outcome_weight > 0.0)
+        grads = mask_strategy_supervised_grads(grads, outcome_weight > 0.0, train_value_bottleneck)
     params = eqx.filter(network, eqx.is_inexact_array)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     return eqx.apply_updates(network, updates), opt_state, loss, metrics
@@ -551,6 +554,7 @@ def train_epoch(
     balance_finish_labels: bool,
     balance_outcome_labels: bool,
     freeze_base: bool,
+    train_value_bottleneck: bool,
     multi_horizon_finish: bool,
 ):
     """Shuffle one full pass over the loaded shards."""
@@ -603,6 +607,7 @@ def train_epoch(
             balance_finish_labels,
             balance_outcome_labels,
             freeze_base,
+            train_value_bottleneck,
             multi_horizon_finish,
         )
         loss_sum += loss
@@ -650,7 +655,7 @@ def parse_args():
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--update-scope", choices=("strategy-heads", "all"), default="strategy-heads")
+    parser.add_argument("--update-scope", choices=("strategy-heads", "strategy-value-heads", "all"), default="strategy-heads")
     parser.add_argument("--intent-weight", type=float, default=0.2)
     parser.add_argument("--finish-weight", type=float, default=0.4)
     parser.add_argument("--belief-weight", type=float, default=0.3)
@@ -693,7 +698,7 @@ def parse_args():
         parser.error("--num-epochs and --minibatch-size must be positive")
     if args.lr <= 0.0:
         parser.error("--lr must be positive")
-    if args.weight_decay != 0.0 and args.update_scope == "strategy-heads":
+    if args.weight_decay != 0.0 and args.update_scope != "all":
         parser.error("--weight-decay must stay 0 because this trainer freezes most parameters with a gradient mask")
     if args.value_loss == "hl-gauss" and args.value_bins <= 1:
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
@@ -781,6 +786,10 @@ def main():
     )
     if args.update_scope == "strategy-heads":
         scope_label = "strategy auxiliary heads" + (" + outcome head" if args.outcome_weight > 0.0 else "")
+    elif args.update_scope == "strategy-value-heads":
+        scope_label = "strategy auxiliary heads + pooled value bottleneck"
+        if args.outcome_weight > 0.0:
+            scope_label += " + outcome head"
     else:
         scope_label = "all trainable network weights with policy KL anchor"
     print(f"Update scope:  {scope_label}")
@@ -838,7 +847,8 @@ def main():
             args.target_weight,
             args.balance_finish_labels,
             args.balance_outcome_labels,
-            args.update_scope == "strategy-heads",
+            args.update_scope in ("strategy-heads", "strategy-value-heads"),
+            args.update_scope == "strategy-value-heads",
             args.finish_head_mode == "multi-horizon",
         )
         jax.block_until_ready(network)

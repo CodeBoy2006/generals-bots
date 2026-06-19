@@ -993,3 +993,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not use this checkpoint for promotion yet. Next attempt should either unfreeze a small value/strategy bottleneck under policy freeze/KL, or collect broader search-best labels with negative and draw-heavy non-winning rows before using finish gates in gameplay.
 - **Context:** Default sandbox hid GPU devices, but escalated checks confirmed RTX 5070 Ti and JAX `cuda:0`; balanced GPU run `adaptive-search-best-outcome-head-gpu-v0` reached finish loss `0.7009`, outcome loss `1.1157`, outcome accuracy `38.3%`. `search_best_outcome` win labels in highgap-v1 are rare (`19%-35%` by stratum). Unbalanced v0 reached finish accuracy `72.0%`, matching draw-majority behavior; balanced CPU v1 reached similar loss and passed a 2-logit finish evaluator load smoke.
+
+## [2026-06-19 19:02] Search-Best Value Bottleneck Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --update-scope strategy-value-heads`, which keeps trunk/policy/action logits frozen while updating strategy heads, optional outcome head, and `value_linear1`. Documented the GPU bottleneck probes and broader contact high-gap dataset.
+- **Status:** Completed
+- **Next Steps:** Treat `adaptive-search-best-bottleneck-gpu-v1` as a calibrated finish/outcome representation probe, not a promotion checkpoint. Next collect fixed-v5 max250 search-best contact rows or wire these signals into a gated Commander/finish probe.
+- **Context:** GPU run `adaptive-search-best-bottleneck-gpu-v1` mixed high-gap decisive rows with 4909 broader contact rows and improved finish accuracy to `62.6%` and outcome accuracy to `59.8%` under search-best labels, versus the frozen-head GPU probe's outcome accuracy `38.3%`. Primitive policy logits remain unchanged.

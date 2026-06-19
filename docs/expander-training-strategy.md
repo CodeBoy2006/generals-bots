@@ -7589,3 +7589,101 @@ weak. The next promotion-oriented version should either unfreeze a small shared
 value/strategy bottleneck with a KL-anchored policy freeze, or collect broader
 search-best labels including negative/draw-heavy non-winning rows before using
 finish gates in gameplay.
+
+## 2026-06-19 Search-best value bottleneck probe
+
+Implemented the middle update scope that the previous probe requested:
+
+```text
+adaptive_strategy_supervised.py:
+  --update-scope strategy-value-heads
+
+Effect:
+  freeze trunk, policy head, action-Q head, and policy logits
+  update strategy auxiliary heads
+  update optional outcome head
+  update shared pooled value bottleneck: value_linear1
+```
+
+This is deliberately not a full policy update. The goal is to check whether
+finish/outcome supervision needs one shared pooled representation layer before
+touching action logits.
+
+Single high-gap shard, GPU:
+
+```text
+run: runs/adaptive-search-best-bottleneck-gpu-v0/
+datasets:
+  runs/adaptive-strategy-search-highgap-v1/*.npz
+labels: search-best
+balance: size-seat, finish labels, outcome labels
+update scope: strategy-value-heads
+device: cuda:0
+result:
+  finish loss: 0.9681 -> 0.6909
+  finish accuracy: 52.1%
+  outcome loss: 1.7825 -> 0.7212
+  outcome accuracy: 53.9%
+  evaluator load smoke: passed with --strategy-finish-outputs 2
+```
+
+Then collected a broader contact/high-gap search-best dataset without requiring
+the whole trajectory to finish as a win:
+
+```text
+run: runs/adaptive-strategy-search-contact-highgap-v0/
+teacher: adaptive-midgame-search-imitation-v1 + rollout-search
+filters:
+  min_save_turn = 80
+  require_contact = true
+  min_visible_enemy_cells = 1
+  min_search_score_gap = 0.25
+  no require-win / no require-finish
+collection:
+  rows kept: 4909
+  shard rows: 941, 1585, 1272, 1111
+  episode outcomes among finished episodes: 125 wins, 1 draw
+search_best_outcome:
+  draw: 4098
+  win: 811
+search_best win rate by stratum:
+  8p0: 16.6%
+  8p1: 14.2%
+  12p0: 17.3%
+  12p1: 18.3%
+  16p0: 16.8%
+  16p1: 16.0%
+```
+
+Mixed old high-gap + broader contact data, GPU:
+
+```text
+run: runs/adaptive-search-best-bottleneck-gpu-v1/
+datasets:
+  runs/adaptive-strategy-search-highgap-v1/*.npz
+  runs/adaptive-strategy-search-contact-highgap-v0/*.npz
+labels: search-best
+balance: size-seat, finish labels, outcome labels
+samples after size-seat balance: 5724
+update scope: strategy-value-heads
+device: cuda:0
+result:
+  finish loss: 0.8175 -> 0.6658
+  finish accuracy: 21.5% -> 62.6%
+  outcome loss: 1.2538 -> 0.6680
+  outcome accuracy: 38.6% -> 59.8%
+```
+
+Interpretation: unfreezing the pooled value bottleneck is useful. The frozen
+last-layer search-best probe plateaued around outcome accuracy `38%`; the
+value-bottleneck mixed run reaches `59.8%` while keeping primitive policy logits
+unchanged. The broader contact dataset is also healthier as representation data:
+it has more rows and more local draw/negative labels, even though search-best
+wins are rarer than in the decisive-only high-gap shard.
+
+Conclusion: this is a representation checkpoint, not a promotion checkpoint.
+The next gameplay-oriented step should consume these calibrated finish/outcome
+signals in a gated Commander/finish probe, or collect fixed-v5 max250 search-best
+contact rows so the same bottleneck can learn the 8x8-vs-v5 short-finish
+problem directly. Do not run another direct action-CE or spatial rerank scale
+sweep from this checkpoint.
