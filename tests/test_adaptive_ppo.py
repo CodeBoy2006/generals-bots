@@ -1137,6 +1137,22 @@ def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
 
     assert jnp.allclose(dataset["action_weight"], jnp.array([0.0, 1.0, 0.0, 1.0]))
 
+    draw_search_win = load_strategy_dataset(
+        [path],
+        require_outcome_draw=True,
+        require_search_best_win=True,
+    )
+    assert draw_search_win["obs"].shape[0] == 1
+    assert int(draw_search_win["teacher_action"][0]) == 1
+
+    nonwin_search_win = load_strategy_dataset(
+        [path],
+        require_outcome_nonwin=True,
+        require_search_best_win=True,
+    )
+    assert nonwin_search_win["obs"].shape[0] == 1
+    assert int(nonwin_search_win["teacher_action"][0]) == 1
+
 
 def test_accepted_replacement_weights_prefer_outcome_then_score():
     from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights

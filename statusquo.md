@@ -1112,3 +1112,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not sweep LR/epochs on this mixed filtered data. Next useful step is stronger data selection: isolate base-draw/search-win or true search-controlled winning windows with clearer finish labels before another main-policy update.
 - **Context:** `repr-v0` used `update_scope=all`, KL `10.0`, CE `0.05`, finish/outcome/belief/intent losses, and high-gap midgame/contact rows. It regressed fixed-v5 max250 128-row seed `86640` from base min `10.94%` to `7.81%`; Expander smoke 64-row seed `86680` min was `71.88%`.
+
+## [2026-06-20 00:28] Draw/Search-Win Contrast Filter Probe
+- **Changes:** Added `adaptive_strategy_supervised.py --require-outcome-draw/--require-outcome-nonwin`, documented the filters, extended the loader test, and trained/evaluated ignored GPU run `runs/adaptive-midgame-drawsearch-repr-v0/`.
+- **Status:** Completed
+- **Next Steps:** Do not sweep the small balanced contrast run. Collect more draw/search-win rows or mix the contrast rows as a weighted component with larger decisive trajectory data while protecting Expander with KL/protection rows.
+- **Context:** Existing shards contain useful contrast (`2,234` draw/search-win rows after high-gap/contact filters), but `size-seat-domain` balancing reduced training to `312` samples. `drawsearch-repr-v0` barely learned the all-win search label (`outcome acc 8.2%`) and fixed-v5 max250 seed `86640` regressed from base min `10.94%` to `9.38%`.

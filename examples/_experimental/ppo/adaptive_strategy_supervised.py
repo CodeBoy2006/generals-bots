@@ -88,6 +88,8 @@ def load_strategy_dataset(
     min_visible_enemy_cells: int = 0,
     min_visible_enemy_density: float = 0.0,
     require_outcome_win: bool = False,
+    require_outcome_draw: bool = False,
+    require_outcome_nonwin: bool = False,
     require_search_best_win: bool = False,
     require_finish_within_250: bool = False,
     require_win_or_finish_within_250: bool = False,
@@ -170,6 +172,12 @@ def load_strategy_dataset(
         if require_outcome_win:
             known = require_field(shard, path, "outcome_known").astype(np.float32) > 0.0
             add_row_filter("outcome=win", (shard["outcome"].astype(np.int32) == OUTCOME_WIN) & known)
+        if require_outcome_draw:
+            known = require_field(shard, path, "outcome_known").astype(np.float32) > 0.0
+            add_row_filter("outcome=draw", (shard["outcome"].astype(np.int32) == OUTCOME_DRAW) & known)
+        if require_outcome_nonwin:
+            known = require_field(shard, path, "outcome_known").astype(np.float32) > 0.0
+            add_row_filter("outcome!=win", (shard["outcome"].astype(np.int32) != OUTCOME_WIN) & known)
         if require_search_best_win:
             add_row_filter(
                 "search_best=win",
@@ -843,6 +851,8 @@ def parse_args():
     parser.add_argument("--min-visible-enemy-cells", type=int, default=0)
     parser.add_argument("--min-visible-enemy-density", type=float, default=0.0)
     parser.add_argument("--require-outcome-win", action="store_true")
+    parser.add_argument("--require-outcome-draw", action="store_true")
+    parser.add_argument("--require-outcome-nonwin", action="store_true")
     parser.add_argument("--require-search-best-win", action="store_true")
     parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
@@ -957,6 +967,10 @@ def parse_args():
         parser.error("--min-search-score-gap must be non-negative")
     if args.require_outcome_win and args.require_win_or_finish_within_250:
         parser.error("--require-outcome-win conflicts with --require-win-or-finish-within-250")
+    if args.require_outcome_win and (args.require_outcome_draw or args.require_outcome_nonwin):
+        parser.error("--require-outcome-win conflicts with draw/non-win outcome filters")
+    if args.require_outcome_draw and args.require_win_or_finish_within_250:
+        parser.error("--require-outcome-draw conflicts with --require-win-or-finish-within-250")
     if args.input_channels <= 0:
         parser.error("--input-channels must be positive")
     if args.init_input_channels is not None and args.init_input_channels <= 0:
@@ -1026,6 +1040,8 @@ def main():
         args.min_visible_enemy_cells,
         args.min_visible_enemy_density,
         args.require_outcome_win,
+        args.require_outcome_draw,
+        args.require_outcome_nonwin,
         args.require_search_best_win,
         args.require_finish_within_250,
         args.require_win_or_finish_within_250,

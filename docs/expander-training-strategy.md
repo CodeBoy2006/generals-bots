@@ -10067,6 +10067,8 @@ Added training-time row filters to `adaptive_strategy_supervised.py`:
 --min-visible-enemy-cells
 --min-visible-enemy-density
 --require-outcome-win
+--require-outcome-draw
+--require-outcome-nonwin
 --require-search-best-win
 --require-finish-within-250
 --require-win-or-finish-within-250
@@ -10370,4 +10372,108 @@ The useful next step is data-quality, not a LR/epoch sweep: collect or isolate
 true search-controlled winning windows with stronger finish labels, especially
 states where the base draws but the teacher/search wins, then train the main
 policy on that contrast.
+```
+
+## 2026-06-20 Draw/Search-Win Contrast Filters and Probe
+
+Added two composable row filters to `adaptive_strategy_supervised.py`:
+
+```text
+--require-outcome-draw
+--require-outcome-nonwin
+```
+
+They use known trajectory outcome labels and can be combined with
+`--require-search-best-win` to isolate states where the recorded policy failed
+to win, but rollout-search found a winning continuation. A read-only shard count
+after the standard high-gap/contact filters found:
+
+```text
+fixed-v5 v1:
+  draw + search_best_win:    1,331
+  nonwin + search_best_win:  1,819
+
+fixed-v5 draw v0:
+  draw + search_best_win:      337
+
+Expander 12/16:
+  draw + search_best_win:      430
+  nonwin + search_best_win:    628
+
+Expander safev3:
+  draw + search_best_win:      136
+  nonwin + search_best_win:    606
+```
+
+Focused representation probe:
+
+```text
+run:
+  runs/adaptive-midgame-drawsearch-repr-v0/
+
+filters:
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+  search_gap >= 0.25
+  outcome = draw
+  search_best = win
+
+training:
+  update_scope = all
+  policy_kl = 10.0
+  action_ce = 0.10
+  action_ce_weight_mode = search-best-win
+  finish = 0.50, balanced, multi-horizon
+  outcome = 0.40, balanced, label_source=search-best
+  belief = 0.25
+  intent = 0.20
+  lr = 2e-6
+  epochs = 8
+```
+
+Training data and metrics:
+
+```text
+row filters:
+  kept 2,234 / 91,725 rows
+  sampled 2,234 rows
+  size-seat-domain balance -> 312 samples
+
+epoch 1 -> 8:
+  loss     2.1317 -> 2.0599
+  intent   78.9%  -> 79.3%
+  finish   42.3%  -> 43.5%
+  outcome   4.3%  ->  8.2%
+  KL       0.0186 -> 0.0174
+  ActCE    3.2210 -> 3.3478
+  ActAcc   26.2%  -> 25.8%
+```
+
+Gameplay against fixed v5 sample, max250, 128 games/seat, seed 86640:
+
+```text
+base v3 / feature-control:
+  p0 11.72%
+  p1 10.94%
+  min 10.94%
+
+drawsearch-repr-v0:
+  p0 11.72%
+  p1  9.38%
+  min  9.38%
+```
+
+Conclusion:
+
+```text
+Do not promote `adaptive-midgame-drawsearch-repr-v0`.
+
+The new filters are useful and verified, but this particular training recipe is
+data-starved after size-seat-domain balancing. The model barely learns the
+search-win outcome label and loses fixed-v5 p1. Do not sweep lr/epochs here.
+Next useful experiment: either collect more draw/search-win rows, train without
+domain balancing but with explicit Expander KL/protection rows, or use these
+contrast rows as a small weighted component inside a larger decisive trajectory
+dataset.
 ```
