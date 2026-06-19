@@ -999,3 +999,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat `adaptive-search-best-bottleneck-gpu-v1` as a calibrated finish/outcome representation probe, not a promotion checkpoint. Next collect fixed-v5 max250 search-best contact rows or wire these signals into a gated Commander/finish probe.
 - **Context:** GPU run `adaptive-search-best-bottleneck-gpu-v1` mixed high-gap decisive rows with 4909 broader contact rows and improved finish accuracy to `62.6%` and outcome accuracy to `59.8%` under search-best labels, versus the frozen-head GPU probe's outcome accuracy `38.3%`. Primitive policy logits remain unchanged.
+
+## [2026-06-19 19:13] Fixed-V5 Search-Best Contact Data
+- **Changes:** Collected GPU fixed-v5 max250 contact/high-gap search-best shards under `runs/adaptive-strategy-search-fixed-v5-contact-highgap-v0/`, trained `adaptive-search-best-bottleneck-fixed-v5-v0`, and documented the results.
+- **Status:** Completed
+- **Next Steps:** Use the fixed-v5 search-best rows for a gate/candidate model or recollect with longer search rollout horizon. Do not treat the bottleneck checkpoint as promotion because primitive policy logits are unchanged.
+- **Context:** The old best fixed-v5 imitation v5 checkpoint does not deserialize under the current U-Net value-head template, so collection used loadable `adaptive-midgame-search-imitation-v1` as search prior against fixed v5. The new dataset kept 7525 rows with search-best labels `946` win / `6578` draw / `1` loss; fixed-v5 bottleneck training reached finish accuracy `57.8%`, outcome accuracy `58.8%`, and passed a GPU evaluator load smoke.

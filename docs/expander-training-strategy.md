@@ -7687,3 +7687,112 @@ signals in a gated Commander/finish probe, or collect fixed-v5 max250 search-bes
 contact rows so the same bottleneck can learn the 8x8-vs-v5 short-finish
 problem directly. Do not run another direct action-CE or spatial rerank scale
 sweep from this checkpoint.
+
+## 2026-06-19 Fixed-v5 search-best contact data
+
+Next we targeted the unresolved 8x8 fixed-v5 `max250` gate directly. The first
+attempt used the previous best fixed-v5 imitation checkpoint as the search prior:
+
+```text
+runs/adaptive-fixed-v5-imitation-v5/ckpts/generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx
+```
+
+That checkpoint no longer deserializes under the current U-Net template: the
+saved value-head leaf has old `(128, 64)` shape while the current template built
+from `channels=64,96,128,64` expects `(64, 128)`. Rather than spend this turn on
+legacy template compatibility, the data collection used the current-loadable
+search-imitation U-Net:
+
+```text
+teacher prior:
+  runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx
+opponent:
+  /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+mode:
+  fixed-v5 sample opponent, max250 truncation
+search:
+  top_k=4, rollout_steps=16, rollouts/action=1
+filters:
+  turn >= 80
+  visible contact
+  visible_enemy_cells >= 1
+  search_score_gap >= 0.25
+```
+
+A small probe confirmed the label is useful before scaling:
+
+```text
+run: runs/adaptive-strategy-search-fixed-v5-probe-v0/
+rows: 99
+trajectory outcome: loss 83, win 16
+search_best_outcome: draw 70, win 29
+turn range: 80..128, median 98
+```
+
+Scaled GPU collection:
+
+```text
+run: runs/adaptive-strategy-search-fixed-v5-contact-highgap-v0/
+raw: 4 shards x 32 envs x 260 steps = 33280 rows
+kept rows by shard: 1707, 2144, 1900, 1774
+total kept rows: 7525
+trajectory outcome:
+  loss: 3366
+  draw: 2997
+  win: 1162
+search_best_outcome:
+  loss: 1
+  draw: 6578
+  win: 946
+search_best_outcome by seat:
+  p0: draw 3318, win 437
+  p1: loss 1, draw 3260, win 509
+turn min / median / p90 / max:
+  80 / 147 / 227 / 250
+visible enemy count:
+  mean 7.04, median 7
+```
+
+This is the first fixed-v5 search-best shard with a meaningful number of local
+win labels. It is still draw-dominant, which is exactly the short-finish regime
+we need to model.
+
+Trained a fixed-v5-specific bottleneck representation checkpoint from the
+previous Expander/search-best bottleneck checkpoint:
+
+```text
+run: runs/adaptive-search-best-bottleneck-fixed-v5-v0/
+init:
+  runs/adaptive-search-best-bottleneck-gpu-v1/generals-adaptive-search-best-bottleneck-gpu-v1.eqx
+dataset:
+  runs/adaptive-strategy-search-fixed-v5-contact-highgap-v0/*.npz
+label_source:
+  search-best
+balance:
+  size-seat, finish labels, outcome labels
+update scope:
+  strategy-value-heads
+device:
+  cuda:0
+result:
+  finish loss: 0.6865 -> 0.6641
+  finish accuracy: 51.6% -> 57.8%
+  outcome loss: 0.7071 -> 0.7107
+  outcome accuracy: 50.4% -> 58.8%
+  intent accuracy: 56.6% -> 60.3%
+  belief loss: 0.1151 -> 0.0865
+```
+
+The outcome loss is noisy because the minibatch label-balancing changes the
+effective class prior, but the accuracy and auxiliary losses improve. A GPU
+evaluator load smoke against fixed v5 passed with `--strategy-finish-outputs 2`;
+it used only one game/seat and is not a strength measurement.
+
+Conclusion: fixed-v5 contact search-best data now exists and is viable for
+finish/outcome representation learning. This checkpoint still does not change
+primitive policy logits, so it is not a promotion candidate. The next useful
+promotion-oriented step is to use these fixed-v5 search-best rows to train a
+gate/candidate model that can decide when to invoke a command/worker correction,
+or to collect the same fixed-v5 data with a longer `search_rollout_steps` budget
+to increase the local win-label density. Do not spend the next round on
+fixed-v5 action CE or spatial rerank scale sweeps.
