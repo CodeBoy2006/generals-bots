@@ -1052,3 +1052,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep safe-v3 as the active base. Treat `policyhead-fixed-v0` as a diagnostic only; next useful direction is a gated/adapter-style policy delta for fixed-v5-like midgame/contact states or cleaner p0 decisive trajectories, not stronger global CE/KL sweeps.
 - **Context:** Mixed-domain policy-head v0 reached fixed-v5 max250 128-row min `7.81%` and Expander min `71.88%`. Fixed-v5-only policyhead v0 reached matched 256-row fixed-v5 min `12.11%` vs safe-v3 `10.55%`, with 128-row Expander min `72.66%`. Stronger lr `1e-5` policyhead-fixed-v1 regressed fixed-v5 256-row min to `8.98%`, so pushing the output head harder is not reliable.
+
+## [2026-06-19 21:38] p0-Focused Policy-Head Mix Probe
+- **Changes:** Derived ignored p0-only fixed-v5 safe-v3 shards under `runs/adaptive-midgame-contact-searchwin-fixed-v5-safev3-p0-v0/`, trained/evaluated unbalanced `policyhead-p0mix-v0` and domain-balanced `policyhead-p0domain-v0`, and documented the GPU results.
+- **Status:** Completed
+- **Next Steps:** Stop static p0/domain ratio sweeps. Implement a conditional gate or adapter/delta policy head that only activates in fixed-v5-like midgame/contact finish states.
+- **Context:** p0-only fixed-v5 data kept `30561` rows with `4170` search-win rows. Unbalanced p0mix-v0 improved fixed-v5 max250 256-row min to `12.50%` but dropped Expander min to `70.31%`. Domain-balanced p0domain-v0 protected Expander slightly better at `71.09%` but fixed-v5 min was only `10.94%`. Active base remains safe-v3.

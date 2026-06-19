@@ -8958,3 +8958,135 @@ Next useful step:
   only in fixed-v5-like midgame/contact states, or collect cleaner p0 decisive
   trajectories. Avoid more global CE/KL sweeps.
 ```
+
+## 2026-06-19: p0-Focused Policy-Head Static Mix Probe
+
+The fixed-v5 safe-v3 shard was not p0-scarce:
+
+```text
+fixed-v5-safev3-v0:
+  p0 rows 30561, search-win 4170, trajectory-win 5485
+  p1 rows 31463, search-win 4020, trajectory-win 4723
+```
+
+So the weak p0 rows are not explained by row count alone. I derived a p0-only
+fixed-v5 shard to test whether removing fixed-v5 p1 imitation pressure helps:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-fixed-v5-safev3-p0-v0/
+source:
+  fixed-v5-safev3-v0
+filter:
+  seat == 0
+rows:
+  30561
+search-best win:
+  4170
+```
+
+Unbalanced p0 fixed-v5 + Expander protection:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-p0mix-v0/
+data:
+  fixed-v5-safev3-p0-v0 + expander-safev3-v0
+balance:
+  none
+samples:
+  53922
+lr:
+  2e-6
+final:
+  KL 0.0002
+  action CE 2.8185 -> 2.7862
+  outcome acc 42.2% -> 46.9%
+```
+
+Matched fixed-v5 `max250`, 256 games/seat, seed `88340`:
+
+```text
+safe-v3 baseline:
+  p0 win 10.55%, draw 50.00%
+  p1 win 11.33%, draw 50.39%
+  min 10.55%
+
+policyhead-fixed-v0:
+  p0 win 12.11%, draw 48.83%
+  p1 win 12.50%, draw 48.05%
+  min 12.11%
+
+p0mix-v0:
+  p0 win 13.67%, draw 47.66%
+  p1 win 12.50%, draw 49.61%
+  min 12.50%
+```
+
+Expander 8/12/16, 128 games/row, seed `88260`:
+
+```text
+p0mix-v0:
+  8p0 73.44%, 8p1 71.88%
+  12p0 77.34%, 12p1 88.28%
+  16p0 80.47%, 16p1 70.31%
+  min 70.31%
+```
+
+The p0-focused unbalanced mix improved the fixed-v5 gate, especially p0, but
+the Expander 16p1 row fell too far. This is not a promotion candidate.
+
+Domain-balanced p0 fixed-v5 + Expander protection:
+
+```text
+run:
+  runs/adaptive-midgame-contact-searchwin-safev3-policyhead-p0domain-v0/
+data:
+  fixed-v5-safev3-p0-v0 + expander-safev3-v0
+balance:
+  size-seat-domain
+samples:
+  20601
+lr:
+  2e-6
+final:
+  KL 0.0001
+  action CE 2.7493 -> 2.7333
+```
+
+Matched fixed-v5 `max250`, 256 games/seat, seed `88340`:
+
+```text
+p0domain-v0:
+  p0 win 12.50%, draw 50.78%
+  p1 win 10.94%, draw 50.78%
+  min 10.94%
+```
+
+Expander 8/12/16, 128 games/row, seed `88260`:
+
+```text
+p0domain-v0:
+  8p0 74.22%, 8p1 71.09%
+  12p0 77.34%, 12p1 82.03%
+  16p0 82.81%, 16p1 78.91%
+  min 71.09%
+```
+
+Conclusion:
+
+```text
+p0 fixed-v5 rows have useful signal, but static mixing cannot separate the
+fixed-v5 max250 finish behavior from Expander generalization. Unbalanced mixing
+gets the best fixed-v5 result so far in this subline (12.50% min) but hurts
+Expander; domain balance protects some Expander rows but loses most fixed-v5
+gain.
+
+Do not continue ratio sweeps. The next step should be conditional:
+  1. train a gate that detects fixed-v5-like midgame/contact finish states, or
+  2. add a small adapter/delta policy head whose contribution is gated by
+     finish/draw-risk or opponent/contact features.
+
+Active base remains:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+```
