@@ -1100,3 +1100,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote `policyhead-v0` or sweep its CE/LR. Keep `adaptive-midgame-contact-searchwin-imitation-v3` as the active base and use the new filters for source/target outcome-Q or executor data selection.
 - **Context:** `policyhead-v0` used broad fixed-v5/search-win, draw contrast, and Expander protection rows with `update_scope=policy-heads`, KL `3.0`, CE `0.20`, and `search-best-win` CE gating. It regressed same-seed fixed-v5 128-row min from base `10.94%` to `8.59%` and Expander 128-row min from `75.78%` to `74.22%`, so policy-head-only decisive imitation is ruled out for promotion.
+
+## [2026-06-20 00:19] High-Gap Plan-Q Gate Probe
+- **Changes:** Added `adaptive_plan_q_supervised.py --strategy-finish-outputs/--init-strategy-finish-outputs` for multi-horizon strategy checkpoints, documented the flags, and logged GPU training/eval for `adaptive-plan-q-source-target-highgap-mid100-v0` plus `adaptive-command-gate-highgap-mid100-v0`.
+- **Status:** Completed
+- **Next Steps:** Stop this inference-time source/target replacement route. Use midgame decisive trajectories to update the U-Net main policy/representation, or train a plan-conditioned executor only after command proposal quality is stronger.
+- **Context:** Source/target Q proposal stayed weak offline (`pair top1 7.0%`, pair corr `+0.021`). The gate fit replacement labels moderately (`23,753` examples, `8.42%` positives, final weighted acc `69.2%`), but fixed-v5 max250 seed `86640` collapsed from gate-off min `10.94%` to gate-on min `0.00%`.

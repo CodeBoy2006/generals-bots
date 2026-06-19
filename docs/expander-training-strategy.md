@@ -10187,3 +10187,91 @@ useful direction is not a CE/LR sweep: use high-gap decisive rows to train
 source/target outcome-Q or a target-conditioned executor with explicit
 replacement outcome labels, while keeping the safe v3 policy as the active base.
 ```
+
+## 2026-06-20 High-Gap Plan-Q Source/Target Gate Probe
+
+Added `adaptive_plan_q_supervised.py --strategy-finish-outputs` and
+`--init-strategy-finish-outputs` so Plan-Q supervision can load multi-horizon
+strategy checkpoints such as safe v3:
+
+```text
+base:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+
+dataset:
+  runs/adaptive-plan-q-model-worker-highgap-mid100-v0/*.npz
+
+source/target Q output:
+  runs/adaptive-plan-q-source-target-highgap-mid100-v0/
+
+gate output:
+  runs/adaptive-command-gate-highgap-mid100-v0/
+```
+
+The source/target Q trainer used frozen strategy heads only:
+
+```text
+source_q_rank_weight = 0.5
+target_q_rank_weight = 1.0
+plan_pair_rank_weight = 1.0
+q_target_outcome_weight = 0.75
+q_rank_temperature = 0.05
+gap_weighting = true
+epochs = 96
+```
+
+Final offline metrics stayed weak:
+
+```text
+source Q rank accuracy: 23.7%
+target Q rank accuracy: 25.8%
+pair top1 accuracy:      7.0%
+pair score corr:        +0.021
+mean plan gap:           0.6197
+```
+
+The command gate was trained on explicit replacement labels from the same
+high-gap Plan-Q shards:
+
+```text
+examples: 23753
+positive: 8.42%
+hidden_dim: 64
+source x target candidates: 4 x 4
+include_noncomparable_negatives: true
+
+epoch 80:
+  loss 0.5821
+  weighted accuracy 69.2%
+  P+ 0.589
+  P- 0.409
+```
+
+Gameplay against fixed v5 sample, max250, 128 games/seat, seed 86640:
+
+```text
+feature model, gate off:
+  p0 15/49/64, win 11.72%, draw 50.00%
+  p1 14/50/64, win 10.94%, draw 50.00%
+  min 10.94%
+
+command gate threshold 0.5, 4x4 candidates:
+  p0 0/65/63, win 0.00%, draw 49.22%
+  p1 0/53/75, win 0.00%, draw 58.59%
+  min 0.00%
+```
+
+Conclusion:
+
+```text
+Do not promote `adaptive-plan-q-source-target-highgap-mid100-v0` or
+`adaptive-command-gate-highgap-mid100-v0`.
+
+This closes the current inference-time source/target replacement route. The
+high-gap shard has real outcome contrast, and the gate can fit some offline
+labels, but the learned source/target proposal is too weak and replacement
+control collapses fixed-v5 gameplay. Do not sweep gate thresholds here. The next
+useful route should train the U-Net main policy/representation from midgame
+decisive trajectories or train a plan-conditioned executor only after command
+quality is independently stronger.
+```

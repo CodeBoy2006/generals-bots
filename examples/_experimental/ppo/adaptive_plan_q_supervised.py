@@ -832,6 +832,8 @@ def parse_args():
     parser.add_argument("--init-outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--init-strategy-aux", action="store_true")
+    parser.add_argument("--strategy-finish-outputs", type=int, default=2)
+    parser.add_argument("--init-strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-model-path", required=True)
@@ -939,6 +941,8 @@ def parse_args():
         parser.error("--plan-policy-weight requires a positive --policy-kl-weight")
     if not args.strategy_aux:
         parser.error("Plan-Q supervision requires --strategy-aux")
+    if args.strategy_finish_outputs <= 0 or args.init_strategy_finish_outputs <= 0:
+        parser.error("--strategy-finish-outputs and --init-strategy-finish-outputs must be positive")
     if (
         args.source_weight > 0.0
         or args.target_weight > 0.0
@@ -1018,6 +1022,8 @@ def main():
         init_outcome_head=args.init_outcome_head,
         strategy_aux=args.strategy_aux,
         init_strategy_aux=args.init_strategy_aux,
+        strategy_finish_outputs=args.strategy_finish_outputs,
+        init_strategy_finish_outputs=args.init_strategy_finish_outputs,
         strategy_spatial_aux=args.strategy_spatial_aux,
         init_strategy_spatial_aux=args.init_strategy_spatial_aux,
         global_context=args.global_context,

@@ -901,6 +901,7 @@ uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
 ```
 
 This trainer defaults to frozen trunk/policy updates and only moves the source/target strategy heads. It is a data-quality and representation probe until the Plan-Q shards include longer-horizon fixed-v5 outcome labels.
+When the init checkpoint uses multi-horizon finishability, pass both `--strategy-finish-outputs 3` and `--init-strategy-finish-outputs 3` so the Plan-Q trainer builds the same auxiliary-head template as the serialized model.
 
 For outcome/Q proposal-map supervision, the trainer also accepts
 `--source-q-mse-weight`, `--target-q-mse-weight`, `--source-q-rank-weight`,
