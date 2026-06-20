@@ -42,7 +42,12 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
-from adaptive_search_distill import adaptive_rollout_search_candidates, adaptive_score_observation, outcome_class_from_winner
+from adaptive_search_distill import (
+    adaptive_adapter_logits,
+    adaptive_rollout_search_candidates,
+    adaptive_score_observation,
+    outcome_class_from_winner,
+)
 from adaptive_strategy_aux import weak_intent_label
 from adaptive_teacher_imitation import (
     fixed_policy_teacher_logits,
@@ -65,6 +70,8 @@ from train_adaptive import (
 TEACHER_KINDS = ("adaptive", "fixed", "expander", "search", "fixed-search")
 TEACHER_KIND_TO_ID = {name: index for index, name in enumerate(TEACHER_KINDS)}
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
+POLICY_ADAPTER_MODES = ("delta", "blend", "replace")
+POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODES)}
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -127,6 +134,7 @@ def teacher_logits_for_batch(
     teacher_kind_id: int,
     teacher_network,
     fixed_teacher_network,
+    teacher_adapter_network,
     obs_arr,
     masks,
     active,
@@ -135,14 +143,32 @@ def teacher_logits_for_batch(
     teacher_input_channels: int,
     fixed_teacher_grid_size: int,
     pad_size: int,
+    teacher_adapter_scale: float = 0.0,
+    teacher_adapter_mode: int = 0,
+    teacher_adapter_min_grid_size: int = 0,
+    teacher_adapter_max_grid_size: int = 0,
 ):
     """Return adaptive-space logits for one teacher kind."""
     if teacher_kind_id in (TEACHER_KIND_TO_ID["adaptive"], TEACHER_KIND_TO_ID["search"]):
         teacher_obs_arr = jax.vmap(lambda obs: teacher_obs_from_student_obs(obs, teacher_input_channels))(obs_arr)
-        return jax.vmap(lambda obs, mask, active_mask: teacher_network.logits_value(obs, mask, active_mask)[0])(
+        return jax.vmap(
+            lambda obs, mask, active_mask, size: adaptive_adapter_logits(
+                teacher_network,
+                teacher_adapter_network,
+                obs,
+                mask,
+                active_mask,
+                size,
+                teacher_adapter_scale,
+                teacher_adapter_mode,
+                teacher_adapter_min_grid_size,
+                teacher_adapter_max_grid_size,
+            )
+        )(
             teacher_obs_arr,
             masks,
             active,
+            effective_sizes,
         )
     if teacher_kind_id in (TEACHER_KIND_TO_ID["fixed"], TEACHER_KIND_TO_ID["fixed-search"]):
         del effective_sizes
@@ -260,6 +286,7 @@ def collect_strategy_step(
     pool,
     teacher_network,
     fixed_teacher_network,
+    teacher_adapter_network,
     key,
     truncation,
     opponent_id,
@@ -274,6 +301,10 @@ def collect_strategy_step(
     fog_memory_enabled=False,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     fixed_teacher_grid_size: int = 0,
+    teacher_adapter_scale: float = 0.0,
+    teacher_adapter_mode: int = 0,
+    teacher_adapter_min_grid_size: int = 0,
+    teacher_adapter_max_grid_size: int = 0,
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
@@ -358,6 +389,7 @@ def collect_strategy_step(
         teacher_kind_id,
         teacher_network,
         fixed_teacher_network,
+        teacher_adapter_network,
         obs_arr,
         masks,
         active,
@@ -366,6 +398,10 @@ def collect_strategy_step(
         teacher_input_channels,
         fixed_teacher_grid_size,
         pad_size,
+        teacher_adapter_scale,
+        teacher_adapter_mode,
+        teacher_adapter_min_grid_size,
+        teacher_adapter_max_grid_size,
     )
     key, teacher_key, search_key, opponent_key = jrandom.split(key, 4)
     teacher_keys = jrandom.split(teacher_key, num_envs)
@@ -426,6 +462,11 @@ def collect_strategy_step(
                 fog_memory_enabled=fog_memory_enabled,
                 previous_fog_memory_p0=previous_fog_p0,
                 previous_fog_memory_p1=previous_fog_p1,
+                adapter_network=teacher_adapter_network,
+                adapter_scale=teacher_adapter_scale,
+                adapter_mode=teacher_adapter_mode,
+                adapter_min_grid_size=teacher_adapter_min_grid_size,
+                adapter_max_grid_size=teacher_adapter_max_grid_size,
             )
         )(
             states,
@@ -592,6 +633,7 @@ def collect_strategy_rollout(
     pool,
     teacher_network,
     fixed_teacher_network,
+    teacher_adapter_network,
     key,
     num_steps,
     truncation,
@@ -607,6 +649,10 @@ def collect_strategy_rollout(
     fog_memory_enabled=False,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     fixed_teacher_grid_size: int = 0,
+    teacher_adapter_scale: float = 0.0,
+    teacher_adapter_mode: int = 0,
+    teacher_adapter_min_grid_size: int = 0,
+    teacher_adapter_max_grid_size: int = 0,
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
@@ -627,6 +673,7 @@ def collect_strategy_rollout(
             pool,
             teacher_network,
             fixed_teacher_network,
+            teacher_adapter_network,
             key,
             truncation,
             opponent_id,
@@ -641,6 +688,10 @@ def collect_strategy_rollout(
             fog_memory_enabled,
             teacher_input_channels,
             fixed_teacher_grid_size,
+            teacher_adapter_scale,
+            teacher_adapter_mode,
+            teacher_adapter_min_grid_size,
+            teacher_adapter_max_grid_size,
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,
@@ -664,6 +715,7 @@ def collect_mixed_strategy_rollout(
     pool,
     teacher_network,
     fixed_teacher_network,
+    teacher_adapter_network,
     key,
     num_steps,
     truncation,
@@ -680,6 +732,10 @@ def collect_mixed_strategy_rollout(
     fog_memory_enabled=False,
     teacher_input_channels: int = ADAPTIVE_INPUT_CHANNELS,
     fixed_teacher_grid_size: int = 0,
+    teacher_adapter_scale: float = 0.0,
+    teacher_adapter_mode: int = 0,
+    teacher_adapter_min_grid_size: int = 0,
+    teacher_adapter_max_grid_size: int = 0,
     opponent_policy_network=None,
     opponent_policy_mode: int = 1,
     opponent_policy_grid_size: int = 0,
@@ -699,6 +755,7 @@ def collect_mixed_strategy_rollout(
         pool,
         teacher_network,
         fixed_teacher_network,
+        teacher_adapter_network,
         p0_key,
         num_steps,
         truncation,
@@ -714,6 +771,10 @@ def collect_mixed_strategy_rollout(
         fog_memory_enabled,
         teacher_input_channels,
         fixed_teacher_grid_size,
+        teacher_adapter_scale,
+        teacher_adapter_mode,
+        teacher_adapter_min_grid_size,
+        teacher_adapter_max_grid_size,
         opponent_policy_network,
         opponent_policy_mode,
         opponent_policy_grid_size,
@@ -731,6 +792,7 @@ def collect_mixed_strategy_rollout(
         pool,
         teacher_network,
         fixed_teacher_network,
+        teacher_adapter_network,
         p1_key,
         num_steps,
         truncation,
@@ -746,6 +808,10 @@ def collect_mixed_strategy_rollout(
         fog_memory_enabled,
         teacher_input_channels,
         fixed_teacher_grid_size,
+        teacher_adapter_scale,
+        teacher_adapter_mode,
+        teacher_adapter_min_grid_size,
+        teacher_adapter_max_grid_size,
         opponent_policy_network,
         opponent_policy_mode,
         opponent_policy_grid_size,
@@ -1042,6 +1108,16 @@ def parse_args():
     parser.add_argument("--teacher-strategy-aux", action="store_true")
     parser.add_argument("--teacher-strategy-spatial-aux", action="store_true")
     parser.add_argument("--teacher-strategy-finish-outputs", type=int, default=2)
+    parser.add_argument("--teacher-drop-mismatched-init-leaves", action="store_true")
+    parser.add_argument(
+        "--teacher-adapter-model-path",
+        default=None,
+        help="Optional adaptive policy-head adapter composed into adaptive/search teacher logits.",
+    )
+    parser.add_argument("--teacher-adapter-scale", type=float, default=0.0)
+    parser.add_argument("--teacher-adapter-mode", choices=POLICY_ADAPTER_MODES, default="delta")
+    parser.add_argument("--teacher-adapter-min-grid-size", type=int, default=0)
+    parser.add_argument("--teacher-adapter-max-grid-size", type=int, default=0)
     parser.add_argument("--fixed-teacher-model-path", default=None)
     parser.add_argument("--fixed-teacher-channels", default=None)
     parser.add_argument("--fixed-teacher-input-channels", type=int, default=9)
@@ -1135,6 +1211,22 @@ def parse_args():
         parser.error("--teacher-strategy-finish-outputs must be positive")
     if args.teacher_strategy_spatial_aux and not args.teacher_strategy_aux:
         parser.error("--teacher-strategy-spatial-aux requires --teacher-strategy-aux")
+    if args.teacher_adapter_scale < 0.0:
+        parser.error("--teacher-adapter-scale must be non-negative")
+    if args.teacher_adapter_model_path is not None and args.teacher_adapter_scale <= 0.0:
+        parser.error("--teacher-adapter-model-path requires --teacher-adapter-scale > 0")
+    if args.teacher_adapter_scale > 0.0 and args.teacher_adapter_model_path is None:
+        parser.error("--teacher-adapter-scale requires --teacher-adapter-model-path")
+    if args.teacher_adapter_model_path is not None and args.teacher_kind not in ("adaptive", "search"):
+        parser.error("--teacher-adapter-model-path requires --teacher-kind adaptive or search")
+    if args.teacher_adapter_min_grid_size < 0 or args.teacher_adapter_max_grid_size < 0:
+        parser.error("--teacher-adapter-min-grid-size/max-grid-size must be non-negative")
+    if (
+        args.teacher_adapter_min_grid_size > 0
+        and args.teacher_adapter_max_grid_size > 0
+        and args.teacher_adapter_min_grid_size > args.teacher_adapter_max_grid_size
+    ):
+        parser.error("--teacher-adapter-min-grid-size must be <= --teacher-adapter-max-grid-size")
     if args.fixed_teacher_input_channels <= 0 or args.opponent_input_channels <= 0:
         parser.error("policy input channel counts must be positive")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
@@ -1173,6 +1265,7 @@ def main():
     teacher_global_context = args.teacher_global_context or args.teacher_scoreboard_history
     teacher_kind_id = TEACHER_KIND_TO_ID[args.teacher_kind]
     teacher_policy_mode_id = POLICY_MODE_NAME_TO_ID[args.teacher_policy_mode]
+    teacher_adapter_mode_id = POLICY_ADAPTER_MODE_TO_ID[args.teacher_adapter_mode]
     opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
     fixed_teacher_grid_size = args.grid_sizes[0]
     opponent_policy_grid_size = args.grid_sizes[0]
@@ -1189,6 +1282,17 @@ def main():
             f"top_k={args.search_top_k}, rollout_steps={args.search_rollout_steps}, "
             f"rollouts/action={args.search_rollouts_per_action}"
         )
+    if args.teacher_adapter_model_path is not None:
+        size_label = ""
+        if args.teacher_adapter_min_grid_size > 0 or args.teacher_adapter_max_grid_size > 0:
+            min_label = args.teacher_adapter_min_grid_size if args.teacher_adapter_min_grid_size > 0 else "-inf"
+            max_label = args.teacher_adapter_max_grid_size if args.teacher_adapter_max_grid_size > 0 else "inf"
+            size_label = f", size=[{min_label},{max_label}]"
+        print(
+            "Teacher adapter: "
+            f"{args.teacher_adapter_model_path} mode={args.teacher_adapter_mode} "
+            f"scale={args.teacher_adapter_scale:g}{size_label}"
+        )
     print(f"Rollouts:      {args.num_shards} shards x {args.num_steps} steps")
     print(f"Output:        {args.output_dir}")
     if args.scoreboard_history:
@@ -1204,6 +1308,7 @@ def main():
 
     teacher_network = None
     fixed_teacher_network = None
+    teacher_adapter_network = None
     teacher_input_channels = ADAPTIVE_INPUT_CHANNELS
     if args.teacher_kind in ("adaptive", "search"):
         teacher_input_channels = (
@@ -1235,7 +1340,34 @@ def main():
             init_global_context=teacher_global_context,
             network_arch=args.teacher_network_arch,
             init_network_arch=args.teacher_network_arch,
+            drop_mismatched_init_leaves=args.teacher_drop_mismatched_init_leaves,
         )
+        if args.teacher_adapter_model_path is not None:
+            teacher_adapter_network = load_or_create_adaptive_network(
+                teacher_key,
+                pad_size=args.pad_to,
+                init_model_path=args.teacher_adapter_model_path,
+                channels=args.teacher_channels,
+                input_channels=teacher_input_channels,
+                init_input_channels=teacher_input_channels,
+                value_head_sizes=args.teacher_value_head_sizes if args.teacher_value_heads == "per-size" else (),
+                init_value_head_sizes=args.teacher_value_head_sizes if args.teacher_value_heads == "per-size" else (),
+                value_bins=teacher_value_bins,
+                init_value_bins=teacher_value_bins,
+                outcome_head=args.teacher_outcome_head,
+                init_outcome_head=args.teacher_outcome_head,
+                strategy_aux=args.teacher_strategy_aux,
+                init_strategy_aux=args.teacher_strategy_aux,
+                strategy_spatial_aux=args.teacher_strategy_spatial_aux,
+                init_strategy_spatial_aux=args.teacher_strategy_spatial_aux,
+                strategy_finish_outputs=args.teacher_strategy_finish_outputs,
+                init_strategy_finish_outputs=args.teacher_strategy_finish_outputs,
+                global_context=teacher_global_context,
+                init_global_context=teacher_global_context,
+                network_arch=args.teacher_network_arch,
+                init_network_arch=args.teacher_network_arch,
+                drop_mismatched_init_leaves=args.teacher_drop_mismatched_init_leaves,
+            )
         teacher_input_channels = adaptive_network_input_channels(teacher_network)
     elif args.teacher_kind in ("fixed", "fixed-search"):
         fixed_teacher_network = PolicyValueNetwork(
@@ -1303,6 +1435,12 @@ def main():
         "teacher_strategy_aux": args.teacher_strategy_aux,
         "teacher_strategy_spatial_aux": args.teacher_strategy_spatial_aux,
         "teacher_strategy_finish_outputs": args.teacher_strategy_finish_outputs,
+        "teacher_drop_mismatched_init_leaves": args.teacher_drop_mismatched_init_leaves,
+        "teacher_adapter_model_path": args.teacher_adapter_model_path,
+        "teacher_adapter_scale": args.teacher_adapter_scale,
+        "teacher_adapter_mode": args.teacher_adapter_mode,
+        "teacher_adapter_min_grid_size": args.teacher_adapter_min_grid_size,
+        "teacher_adapter_max_grid_size": args.teacher_adapter_max_grid_size,
         "fixed_teacher_model_path": args.fixed_teacher_model_path,
         "teacher_policy_mode": args.teacher_policy_mode,
         "opponent": args.opponent,
@@ -1347,6 +1485,7 @@ def main():
             pool,
             teacher_network,
             fixed_teacher_network,
+            teacher_adapter_network,
             rollout_key,
             args.num_steps,
             args.truncation,
@@ -1363,6 +1502,10 @@ def main():
             args.fog_memory,
             teacher_input_channels,
             fixed_teacher_grid_size,
+            args.teacher_adapter_scale,
+            teacher_adapter_mode_id,
+            args.teacher_adapter_min_grid_size,
+            args.teacher_adapter_max_grid_size,
             opponent_policy_network,
             opponent_policy_mode,
             opponent_policy_grid_size,

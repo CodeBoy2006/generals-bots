@@ -1238,3 +1238,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not run gameplay eval or threshold sweeps for this legacy gate. Keep the ungated v4 + legacy Plan-Q prefix adapter as current best, and move fixed-v5 work toward better enter/exit labels or a real plan-conditioned executor.
 - **Context:** The gate data had `3890` rows, `943` changed adapter actions, and `275` positives (`29.16%`). The old value-head schema required loading with a shared value-head template. Training failed to separate labels: `lr=1e-3` ended with P+ `0.872` / P- `0.871`, and `lr=1e-4` ended with loss `0.7035`, acc `46.4%`, P+ `0.458` / P- `0.465`.
+
+## [2026-06-20 16:11] Wrapper-Aligned Search Data
+- **Changes:** Added adapter-aware search teacher support to `adaptive_search_distill.py` and `adaptive_strategy_dataset.py`, including teacher adapter path/scale/mode/size-gate flags and mismatched legacy leaf loading. Updated README, Chinese manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Do not promote `adaptive-wrapper-searchwin-policy-v0/v1/v2`. Use the new collector for larger wrapper-aligned data, but move the target toward finish/outcome/belief or multi-step executor labels rather than tiny one-step search-best CE.
+- **Context:** GPU collection `adaptive-wrapper-searchwin-v0` used `v4 + legacy Plan-Q adapter` against fixed-v5 and kept `436` turn>=80/contact/search-win/high-gap rows (`p0=250`, `p1=186`, mean gap `1038.24`). v0 from v4 init scored fixed-v5 256-row min `9.77%`. v1 from legacy init improved 256-row seed `97400` to `14.45%` vs legacy `12.11%`, but 512-row seed `97420` was `11.52%` vs legacy `11.72%`. v2 balanced was `12.11%` at 256-row.

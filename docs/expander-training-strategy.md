@@ -12975,3 +12975,159 @@ The current best remains the ungated v4 + legacy Plan-Q prefix adapter. Further
 fixed-v5 work needs better enter/exit labels or a true plan-conditioned executor,
 not a binary gate over the existing legacy delta.
 ```
+
+## 2026-06-20 16:11 - Wrapper-Aligned Search Data Probe
+
+Added adapter-aware search teacher support to the strategy dataset collector.
+This lets data collection use the same deployed wrapper as evaluation:
+
+```text
+base:
+  adaptive-unet-ppo-v4
+
+adapter:
+  adaptive-legacy-planq-prefix-policy-v0
+
+composition:
+  mode replace
+  scale 1.0
+  max grid size 8
+```
+
+New collector flags:
+
+```text
+adaptive_strategy_dataset.py:
+  --teacher-adapter-model-path
+  --teacher-adapter-scale
+  --teacher-adapter-mode delta|blend|replace
+  --teacher-adapter-min-grid-size
+  --teacher-adapter-max-grid-size
+  --teacher-drop-mismatched-init-leaves
+```
+
+The adapter is composed into both:
+
+```text
+1. teacher_logits saved for KL anchoring
+2. rollout-search prior and rollout policy
+```
+
+This fixes the previous deployment mismatch where offline search data came from
+a single checkpoint but evaluation used `v4 + adapter`.
+
+GPU collection:
+
+```text
+run:
+  runs/adaptive-wrapper-searchwin-v0/
+
+teacher:
+  v4 + legacy Plan-Q adapter
+
+opponent:
+  fixed v5 sample
+
+filters:
+  turn >= 80
+  contact
+  search_score_gap >= 0.25
+  search_best_outcome == win
+
+search:
+  top_k 4
+  rollout_steps 16
+  rollouts/action 1
+
+kept:
+  shard0 191 / 8192
+  shard1 245 / 8192
+  total 436
+
+seat:
+  p0 250
+  p1 186
+
+trajectory labels:
+  win 272
+  draw-risk 117
+
+mean search gap:
+  1038.24
+```
+
+Training/eval:
+
+```text
+v0, init v4 base:
+  runs/adaptive-wrapper-searchwin-policy-v0/
+  policy-head only
+  fixed-v5 max250 256-row seed97400:
+    p0 10.55%
+    p1 9.77%
+    min 9.77%
+
+same-seed legacy Plan-Q baseline:
+  p0 12.11%
+  p1 12.89%
+  min 12.11%
+```
+
+The v0 failure was expected after inspection: initializing from v4 and using
+replace mode discards the legacy adapter's existing behavior.
+
+```text
+v1, init legacy Plan-Q adapter:
+  runs/adaptive-wrapper-searchwin-policy-v1-legacyinit/
+  policy-head only
+  lr 5e-5
+  policy_kl 2.0
+  action_ce 0.2
+
+fixed-v5 max250 256-row seed97400:
+  p0 15.23%
+  p1 14.45%
+  min 14.45%
+
+same-seed legacy baseline:
+  min 12.11%
+
+fixed-v5 max250 512-row seed97420:
+  p0 14.26%
+  p1 11.52%
+  min 11.52%
+
+same-seed legacy baseline:
+  p0 15.23%
+  p1 11.72%
+  min 11.72%
+```
+
+The v1 256-row signal did not confirm at 512 rows. It is essentially equal to
+legacy at larger sample size and slightly worse on p1.
+
+```text
+v2, legacy init + size-seat oversample:
+  runs/adaptive-wrapper-searchwin-policy-v2-legacyinit-balanced/
+
+fixed-v5 max250 256-row seed97400:
+  p0 13.67%
+  p1 12.11%
+  min 12.11%
+```
+
+Interpretation:
+
+```text
+The wrapper-aligned collector is useful infrastructure and should replace
+single-checkpoint search data when the deployed policy is a base+adapter wrapper.
+
+The tiny 436-row search-best CE refinement is not enough to improve the current
+legacy Plan-Q adapter. The next attempt should use the same collector but either:
+  1. collect substantially more wrapper-aligned search-win data with p1 balance,
+  2. train finish/outcome/belief heads from these rows instead of primitive CE,
+  3. use accepted changed-action or multi-step executor labels rather than one
+     search-best primitive action.
+
+Do not promote v0/v1/v2.
+```

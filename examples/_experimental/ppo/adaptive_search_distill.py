@@ -728,6 +728,117 @@ def adaptive_policy_action(
     return adaptive_index_to_action(index, pad_size)
 
 
+def policy_adapter_delta_logits(
+    policy_logits: jnp.ndarray,
+    adapter_logits: jnp.ndarray,
+    scale: jnp.ndarray | float,
+) -> jnp.ndarray:
+    """Add a centered legal delta from a separately trained policy-head adapter."""
+    legal = policy_logits > -1.0e8
+    raw_delta = adapter_logits - policy_logits
+    legal_count = jnp.maximum(jnp.sum(legal), 1)
+    legal_mean = jnp.sum(jnp.where(legal, raw_delta, 0.0)) / legal_count
+    centered_delta = jnp.where(legal, raw_delta - legal_mean, 0.0)
+    return policy_logits + scale * centered_delta
+
+
+def policy_adapter_blend_logits(
+    policy_logits: jnp.ndarray,
+    adapter_logits: jnp.ndarray,
+    scale: jnp.ndarray | float,
+) -> jnp.ndarray:
+    """Interpolate legal logits between the base policy and adapter policy."""
+    legal = policy_logits > -1.0e8
+    weight = jnp.clip(jnp.asarray(scale, dtype=policy_logits.dtype), 0.0, 1.0)
+    blended = (1.0 - weight) * policy_logits + weight * adapter_logits
+    return jnp.where(legal, blended, policy_logits)
+
+
+def adaptive_adapter_logits(
+    network,
+    adapter_network,
+    obs_arr: jnp.ndarray,
+    mask: jnp.ndarray,
+    active: jnp.ndarray,
+    effective_size: int,
+    adapter_scale: float = 0.0,
+    adapter_mode: int = 0,
+    adapter_min_grid_size: int = 0,
+    adapter_max_grid_size: int = 0,
+) -> jnp.ndarray:
+    """Return base logits optionally composed with a policy-head adapter."""
+    logits, _ = network.logits_value(obs_arr, mask, active)
+    if adapter_network is None or adapter_scale <= 0.0:
+        return logits
+    size_allowed = (adapter_min_grid_size <= 0 or effective_size >= adapter_min_grid_size) & (
+        adapter_max_grid_size <= 0 or effective_size <= adapter_max_grid_size
+    )
+    adapter_logits, _ = adapter_network.logits_value(obs_arr, mask, active)
+    adapted = jax.lax.switch(
+        adapter_mode,
+        (
+            lambda _: policy_adapter_delta_logits(logits, adapter_logits, adapter_scale),
+            lambda _: policy_adapter_blend_logits(logits, adapter_logits, adapter_scale),
+            lambda _: adapter_logits,
+        ),
+        None,
+    )
+    return jnp.where(size_allowed, adapted, logits)
+
+
+def adaptive_adapter_policy_action(
+    network,
+    adapter_network,
+    obs,
+    effective_size,
+    key,
+    policy_mode,
+    pad_size: int,
+    global_context: bool = False,
+    scoreboard_history: jnp.ndarray | None = None,
+    fog_memory: AdaptiveFogMemory | None = None,
+    adapter_scale: float = 0.0,
+    adapter_mode: int = 0,
+    adapter_min_grid_size: int = 0,
+    adapter_max_grid_size: int = 0,
+):
+    """Dispatch an adaptive action with the same optional adapter composition used at eval."""
+    obs_arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size,
+        pad_size,
+        include_global_context=global_context,
+        scoreboard_history=scoreboard_history,
+        fog_memory=fog_memory,
+    )
+    mask = compute_adaptive_valid_move_mask(
+        obs.armies,
+        obs.owned_cells,
+        obs.mountains,
+        effective_size,
+        pad_size,
+    )
+    logits = adaptive_adapter_logits(
+        network,
+        adapter_network,
+        obs_arr,
+        mask,
+        active,
+        effective_size,
+        adapter_scale,
+        adapter_mode,
+        adapter_min_grid_size,
+        adapter_max_grid_size,
+    )
+    index = jax.lax.cond(
+        policy_mode == 0,
+        lambda _: jnp.argmax(logits),
+        lambda _: jrandom.categorical(key, logits),
+        None,
+    )
+    return adaptive_index_to_action(index, pad_size)
+
+
 def adaptive_obs_to_array_with_context(
     obs,
     effective_size,
@@ -782,6 +893,46 @@ def adaptive_policy_action_with_context(
     )
 
 
+def adaptive_adapter_policy_action_with_context(
+    network,
+    adapter_network,
+    obs,
+    effective_size,
+    key,
+    policy_mode,
+    pad_size: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    previous_scoreboard: jnp.ndarray,
+    fog_memory: AdaptiveFogMemory | None = None,
+    adapter_scale: float = 0.0,
+    adapter_mode: int = 0,
+    adapter_min_grid_size: int = 0,
+    adapter_max_grid_size: int = 0,
+):
+    """Dispatch an adapter-composed adaptive action with optional scoreboard history."""
+    history_context = None
+    if scoreboard_history_enabled:
+        current_scoreboard = adaptive_scoreboard_features(obs, effective_size)
+        history_context = adaptive_scoreboard_history_context(previous_scoreboard, current_scoreboard)
+    return adaptive_adapter_policy_action(
+        network,
+        adapter_network,
+        obs,
+        effective_size,
+        key,
+        policy_mode,
+        pad_size,
+        global_context=global_context,
+        scoreboard_history=history_context,
+        fog_memory=fog_memory,
+        adapter_scale=adapter_scale,
+        adapter_mode=adapter_mode,
+        adapter_min_grid_size=adapter_min_grid_size,
+        adapter_max_grid_size=adapter_max_grid_size,
+    )
+
+
 @eqx.filter_jit
 def adaptive_rollout_search_candidates(
     network,
@@ -805,6 +956,11 @@ def adaptive_rollout_search_candidates(
     fog_memory_enabled=False,
     previous_fog_memory_p0=None,
     previous_fog_memory_p1=None,
+    adapter_network=None,
+    adapter_scale: float = 0.0,
+    adapter_mode: int = 0,
+    adapter_min_grid_size: int = 0,
+    adapter_max_grid_size: int = 0,
 ):
     """Return adaptive top-k prior candidates and short rollout-search scores."""
     if previous_scoreboard_p0 is None:
@@ -844,7 +1000,18 @@ def adaptive_rollout_search_candidates(
         fog_memory=player_fog_memory,
     )
     mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
-    logits, _ = network.logits_value(obs_arr, mask, active)
+    logits = adaptive_adapter_logits(
+        network,
+        adapter_network,
+        obs_arr,
+        mask,
+        active,
+        effective_size,
+        adapter_scale,
+        adapter_mode,
+        adapter_min_grid_size,
+        adapter_max_grid_size,
+    )
     prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
     candidate_actions = jax.vmap(lambda idx: adaptive_index_to_action(idx, pad_size))(candidate_indices)
 
@@ -867,8 +1034,9 @@ def adaptive_rollout_search_candidates(
         None,
     )
     key, opponent_key = jrandom.split(key)
-    opponent_first_action = adaptive_policy_action_with_context(
+    opponent_first_action = adaptive_adapter_policy_action_with_context(
         network,
+        adapter_network,
         opponent_obs,
         effective_size,
         opponent_key,
@@ -883,6 +1051,10 @@ def adaptive_rollout_search_candidates(
             None,
         ),
         fog_memory=opponent_fog_memory if fog_memory_enabled else None,
+        adapter_scale=adapter_scale,
+        adapter_mode=adapter_mode,
+        adapter_min_grid_size=adapter_min_grid_size,
+        adapter_max_grid_size=adapter_max_grid_size,
     )
 
     def rollout_result(
@@ -902,8 +1074,9 @@ def adaptive_rollout_search_candidates(
             current_p1 = adaptive_scoreboard_features(obs_p1, effective_size)
             current_fog_p0 = update_adaptive_fog_memory(fog_memory_p0, obs_p0) if fog_memory_enabled else fog_memory_p0
             current_fog_p1 = update_adaptive_fog_memory(fog_memory_p1, obs_p1) if fog_memory_enabled else fog_memory_p1
-            action_p0 = adaptive_policy_action_with_context(
+            action_p0 = adaptive_adapter_policy_action_with_context(
                 network,
+                adapter_network,
                 obs_p0,
                 effective_size,
                 k0,
@@ -913,9 +1086,14 @@ def adaptive_rollout_search_candidates(
                 scoreboard_history_enabled,
                 previous_p0,
                 fog_memory=current_fog_p0 if fog_memory_enabled else None,
+                adapter_scale=adapter_scale,
+                adapter_mode=adapter_mode,
+                adapter_min_grid_size=adapter_min_grid_size,
+                adapter_max_grid_size=adapter_max_grid_size,
             )
-            action_p1 = adaptive_policy_action_with_context(
+            action_p1 = adaptive_adapter_policy_action_with_context(
                 network,
+                adapter_network,
                 obs_p1,
                 effective_size,
                 k1,
@@ -925,6 +1103,10 @@ def adaptive_rollout_search_candidates(
                 scoreboard_history_enabled,
                 previous_p1,
                 fog_memory=current_fog_p1 if fog_memory_enabled else None,
+                adapter_scale=adapter_scale,
+                adapter_mode=adapter_mode,
+                adapter_min_grid_size=adapter_min_grid_size,
+                adapter_max_grid_size=adapter_max_grid_size,
             )
             next_state, _ = game.step(rollout_state, jnp.stack([action_p0, action_p1]))
             already_done = game.get_info(rollout_state).is_done
