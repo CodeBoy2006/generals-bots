@@ -766,7 +766,7 @@ def search_q_rank_metrics(
     score_gaps: jnp.ndarray,
     temperature: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Fit action-Q values to search top-k score rankings without policy CE."""
+    """Fit candidate action values or policy logits to search top-k score rankings."""
     action_count = action_q_values.shape[1]
     valid = (candidate_indices >= 0) & (candidate_indices < action_count) & (prior_scores > -9999.0)
     valid_count = jnp.sum(valid.astype(jnp.float32), axis=1)
@@ -862,6 +862,7 @@ def train_step(
     value_target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    search_policy_rank_weight: float,
     prefix_pairwise_margin_weight: float,
     prefix_pairwise_margin: float,
     q_kl_weight: float,
@@ -1010,7 +1011,16 @@ def train_step(
         teacher_action_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         prefix_pairwise_margin_loss = jnp.asarray(0.0, dtype=jnp.float32)
         prefix_pairwise_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
-        if policy_kl_weight > 0.0 or action_ce_weight > 0.0 or prefix_pairwise_margin_weight > 0.0:
+        search_policy_rank_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        search_policy_rank_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        search_policy_target_entropy = jnp.asarray(0.0, dtype=jnp.float32)
+        search_policy_weight_mean = jnp.asarray(0.0, dtype=jnp.float32)
+        if (
+            policy_kl_weight > 0.0
+            or action_ce_weight > 0.0
+            or prefix_pairwise_margin_weight > 0.0
+            or search_policy_rank_weight > 0.0
+        ):
             student_logits = jax.vmap(lambda o, m, a: net.logits_value(o, m, a)[0])(obs, masks, active)
             masked_teacher_logits = jnp.where(teacher_legal, teacher_logits, -1.0e9)
             teacher_log_probs = jax.nn.log_softmax(masked_teacher_logits, axis=-1)
@@ -1039,6 +1049,20 @@ def train_step(
                 prefix_pairwise_accuracy = jnp.sum(
                     ((accepted_logits > base_logits).astype(jnp.float32)) * pair_weights
                 ) / pair_normalizer
+            if search_policy_rank_weight > 0.0:
+                (
+                    search_policy_rank_loss,
+                    search_policy_rank_accuracy,
+                    search_policy_target_entropy,
+                    search_policy_weight_mean,
+                ) = search_q_rank_metrics(
+                    student_logits,
+                    search_candidate_indices,
+                    search_prior_scores,
+                    search_scores,
+                    search_score_gaps,
+                    search_q_temperature,
+                )
 
         q_policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
         q_action_ce = jnp.asarray(0.0, dtype=jnp.float32)
@@ -1114,6 +1138,7 @@ def train_step(
             + value_target_weight * value_target_loss
             + policy_kl_weight * policy_kl
             + action_ce_weight * action_ce
+            + search_policy_rank_weight * search_policy_rank_loss
             + prefix_pairwise_margin_weight * prefix_pairwise_margin_loss
             + q_kl_weight * q_policy_kl
             + q_action_ce_weight * q_action_ce
@@ -1130,6 +1155,7 @@ def train_step(
             "value_target_loss": value_target_loss,
             "policy_kl": policy_kl,
             "action_ce": action_ce,
+            "search_policy_rank_loss": search_policy_rank_loss,
             "prefix_pairwise_margin_loss": prefix_pairwise_margin_loss,
             "q_policy_kl": q_policy_kl,
             "q_action_ce": q_action_ce,
@@ -1142,17 +1168,20 @@ def train_step(
             "outcome_accuracy": outcome_accuracy,
             "value_target_mae": value_target_mae,
             "teacher_action_accuracy": teacher_action_accuracy,
+            "search_policy_rank_accuracy": search_policy_rank_accuracy,
             "prefix_pairwise_accuracy": prefix_pairwise_accuracy,
             "q_action_accuracy": q_action_accuracy,
             "search_q_rank_accuracy": search_q_rank_accuracy,
             "search_q_value_accuracy": search_q_value_accuracy,
             "search_q_target_entropy": search_q_target_entropy,
+            "search_policy_target_entropy": search_policy_target_entropy,
             "source_accuracy": source_accuracy,
             "target_accuracy": target_accuracy,
             "finish_weight_mean": jnp.mean(finish_weights),
             "outcome_weight_mean": jnp.mean(outcome_weights),
             "value_target_weight_mean": jnp.mean(outcome_weights),
             "action_weight_mean": jnp.mean(action_weights),
+            "search_policy_weight_mean": search_policy_weight_mean,
             "prefix_weight_mean": jnp.mean(prefix_weights),
             "search_q_weight_mean": search_q_weight_mean,
             "search_q_value_weight_mean": search_q_value_weight_mean,
@@ -1187,6 +1216,7 @@ def train_epoch(
     value_target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    search_policy_rank_weight: float,
     prefix_pairwise_margin_weight: float,
     prefix_pairwise_margin: float,
     q_kl_weight: float,
@@ -1251,6 +1281,7 @@ def train_epoch(
             value_target_weight,
             policy_kl_weight,
             action_ce_weight,
+            search_policy_rank_weight,
             prefix_pairwise_margin_weight,
             prefix_pairwise_margin,
             q_kl_weight,
@@ -1380,6 +1411,12 @@ def parse_args():
     parser.add_argument("--balance-outcome-labels", action="store_true")
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--search-policy-rank-weight",
+        type=float,
+        default=0.0,
+        help="Fit policy logits directly to rollout-search top-k soft score rankings.",
+    )
     parser.add_argument(
         "--prefix-pairwise-margin-weight",
         type=float,
@@ -1520,6 +1557,7 @@ def parse_args():
             args.value_target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.search_policy_rank_weight,
             args.prefix_pairwise_margin_weight,
             args.prefix_negative_weight,
             args.q_kl_weight,
@@ -1695,6 +1733,7 @@ def main():
         f"value={args.value_target_weight:g}, "
         f"balance_finish={args.balance_finish_labels}, balance_outcome={args.balance_outcome_labels}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
+        f"search_policy_rank={args.search_policy_rank_weight:g}, "
         f"action_ce_mode={args.action_ce_weight_mode}, "
         f"prefix_pair={args.prefix_pairwise_margin_weight:g}, "
         f"prefix_adv_weight={args.prefix_advantage_weighting}, prefix_step_decay={args.prefix_step_decay:g}, "
@@ -1767,6 +1806,7 @@ def main():
             args.value_target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.search_policy_rank_weight,
             args.prefix_pairwise_margin_weight,
             args.prefix_pairwise_margin,
             args.q_kl_weight,
@@ -1797,6 +1837,8 @@ def main():
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"ActW {float(metrics['action_weight_mean']):.3f} | "
+            f"SP {float(metrics['search_policy_rank_loss']):.4f}/{float(metrics['search_policy_rank_accuracy']) * 100:5.1f}% | "
+            f"SPw {float(metrics['search_policy_weight_mean']):.3f} | "
             f"Pair {float(metrics['prefix_pairwise_margin_loss']):.4f}/{float(metrics['prefix_pairwise_accuracy']) * 100:5.1f}% | "
             f"PW {float(metrics['prefix_weight_mean']):.3f} | "
             f"QKL {float(metrics['q_policy_kl']):.4f} | "

@@ -14100,3 +14100,181 @@ rows, and report both:
   fixed-v5 max500 256/512-row
   Expander 8/12/16 max750 256/512-row
 ```
+
+### 2026-06-20 19:41 - Online-Search Policy-Rank and Context-Gated Adapter
+
+Data collection:
+
+```text
+fixed-v5 max500 trace v1h8:
+  path: runs/adaptive-online-search-fixed-v5-max500-v1h8/
+  model: v4 base + legacy Plan-Q prefix v0 adapter
+  grid: 8
+  truncation: 500
+  warmup: 80
+  search: top_k=4, rollout_steps=16, contact-only
+  rows: 569
+  seats: p0 281, p1 288
+  time: 80..175, mean 122.99
+  search_action_changed: 62.0%
+  mean gap: 24.84
+  best_outcome:
+    draw: 464
+    win: 105
+
+Expander trace v1h8:
+  path: runs/adaptive-online-search-expander-midgame-v1h8/
+  model: v4 base + legacy Plan-Q prefix v0 adapter, size-gated to 8
+  grids: 8,12,16
+  truncation: 750
+  warmup: 80
+  search: top_k=4, rollout_steps=16, contact-only
+  rows: 624
+  sizes: 8 163, 12 278, 16 183
+  seats: p0 348, p1 276
+  time: 80..151, mean 114.85
+  search_action_changed: 69.1%
+  mean gap: 27.41
+  best_outcome:
+    draw: 434
+    win: 190
+```
+
+Trainer changes:
+
+```text
+adaptive_strategy_supervised.py:
+  added --search-policy-rank-weight
+
+Meaning:
+  policy logits now can learn the online-search top-k soft score distribution
+  directly. This differs from --search-q-rank-weight, which only trains the
+  strategy-Q auxiliary head.
+
+evaluate_adaptive_policy.py:
+  added --policy-adapter-min-turn
+  added --policy-adapter-require-contact
+
+Meaning:
+  policy adapters can be contained to the same midgame/contact distribution
+  used by online-search trace collection.
+```
+
+Mixed policy-rank distillation:
+
+```text
+path:
+  runs/adaptive-online-search-policy-rank-v1/
+
+data:
+  fixed-v5 max500 v1h8 + Expander v1h8
+
+loss:
+  policy_kl=1.0
+  search_policy_rank=1.0
+  action_ce=0.10 on search-changed rows
+  pairwise margin=0.20
+  no strategy aux
+
+offline:
+  SP loss: 3.3297 -> 3.1493
+  SP accuracy: about 29-30%
+
+fixed-v5 max500 128-row seed99760:
+  p0 22.66%
+  p1 18.75%
+  min 18.75%
+
+Conclusion:
+  offline policy-rank is learnable but did not improve gameplay on this shard.
+  Do not promote policy-rank v1. Keep the loss for larger/better trace shards.
+```
+
+Mixed strategy-aux distillation v1:
+
+```text
+path:
+  runs/adaptive-online-search-distill-v1/
+
+fixed-v5 max500 128-row seed99620:
+  v4 baseline:
+    p0 25.00%
+    p1 17.97%
+    min 17.97%
+  distill v1:
+    p0 25.00%
+    p1 21.09%
+    min 21.09%
+
+Expander 8/12/16 max750 128-row seed99640:
+  v4 baseline min: 76.56%
+  distill v1 min: 71.88%
+
+Conclusion:
+  small fixed-v5 gain is not worth the Expander regression. Do not promote.
+```
+
+Fixed-v5-only policy adapter:
+
+```text
+path:
+  runs/adaptive-online-search-fixedv5-policy-adapter-v1/
+
+data:
+  fixed-v5 max500 v1h8 only
+
+loss:
+  policy_kl=0.5
+  action_ce=0.6 on search-changed rows
+  pairwise margin=1.0
+  no strategy aux
+
+as full checkpoint, fixed-v5 max500 128-row seed99700:
+  p0 21.88%
+  p1 21.09%
+  min 21.09%
+
+as context-gated adapter on v4:
+  flags:
+    --policy-adapter-mode replace
+    --policy-adapter-max-grid-size 8
+    --policy-adapter-min-turn 80
+    --policy-adapter-require-contact
+
+  fixed-v5 max500 128-row seed99700:
+    adapter:
+      p0 23.44%
+      p1 26.56%
+      min 23.44%
+      adapter_used about 70%
+      adapter_action_diff about 10%
+    v4 baseline:
+      p0 25.78%
+      p1 26.56%
+      min 25.78%
+
+Conclusion:
+  turn/contact gating contains the adapter and reduces random policy damage, but
+  the adapter labels are still not strong enough to beat v4. Do not run 256/512
+  confirmations for this checkpoint.
+```
+
+Interpretation:
+
+```text
+The planner/wrapper remains much stronger than all static distillation attempts.
+The failure pattern is now very specific:
+
+  online search changes only a small number of midgame decisions
+  static policy-head training changes a broader decision surface
+  hard action labels remain noisy
+  top-k policy-rank is learnable offline but weak in gameplay
+
+Next useful data step:
+  collect trace rows with final long-episode outcome after following the wrapper
+  action, so the trainer can learn draw->win conversion rather than short-horizon
+  score preference only.
+
+Next useful model step:
+  train a gate/adapter on final conversion labels, not on raw search action labels.
+```

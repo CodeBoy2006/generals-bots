@@ -123,6 +123,7 @@ def _policy_action(
     policy_adapter_gate_threshold: float,
     policy_adapter_mode: int,
     policy_adapter_commit_active,
+    policy_adapter_context_allowed=True,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     adapter_trigger = jnp.asarray(0.0, dtype=logits.dtype)
@@ -181,6 +182,7 @@ def _policy_action(
             adapter_trigger = jnp.where(finish_probability >= policy_adapter_finish_threshold, 1.0, 0.0)
             adapter_gate = adapter_trigger
         adapter_gate = jnp.where(policy_adapter_commit_active > 0, 1.0, adapter_gate)
+        adapter_gate = jnp.where(policy_adapter_context_allowed, adapter_gate, 0.0)
         adapter_weight = policy_adapter_scale * adapter_gate
         adapted_logits = jax.lax.switch(
             policy_adapter_mode,
@@ -1295,6 +1297,8 @@ def evaluate_batch(
     policy_adapter_mode=0,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
+    policy_adapter_min_turn=0,
+    policy_adapter_require_contact=False,
     policy_adapter_commit_steps=0,
     online_search_top_k=0,
     online_search_rollout_steps=16,
@@ -1327,7 +1331,7 @@ def evaluate_batch(
         (policy_adapter_min_grid_size <= 0 or effective_size >= policy_adapter_min_grid_size)
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
-    effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    size_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
     online_search_size_allowed = (
         (online_search_min_grid_size <= 0 or effective_size >= online_search_min_grid_size)
         and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
@@ -1420,12 +1424,16 @@ def evaluate_batch(
         opponent_keys = jrandom.split(opponent_key, num_envs)
         pre_infos = jax.vmap(game.get_info)(states)
         active_decisions = (~pre_infos.is_done).astype(jnp.float32)
+        adapter_visible_contact = jnp.sum(policy_obs.opponent_cells.reshape(num_envs, -1), axis=-1) > 0
+        adapter_turn_allowed = states.time >= policy_adapter_min_turn
+        adapter_contact_allowed = adapter_visible_contact | (not policy_adapter_require_contact)
+        row_policy_adapter_allowed = adapter_turn_allowed & adapter_contact_allowed
         opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent, k, obs, random_action))(
             opponent_keys,
             opponent_obs,
         )
         policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
-            lambda o, m, a, k, c: _policy_action(
+            lambda o, m, a, k, c, adapter_allowed: _policy_action(
                 network,
                 policy_adapter_network,
                 policy_adapter_feature_network,
@@ -1455,11 +1463,12 @@ def evaluate_batch(
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
                 command_gate_feature_dim,
-                effective_policy_adapter_scale,
+                size_policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
                 c,
+                adapter_allowed,
             )
         )(
             obs_arr,
@@ -1467,6 +1476,7 @@ def evaluate_batch(
             active,
             policy_keys,
             adapter_commit,
+            row_policy_adapter_allowed,
         )
         if online_search_enabled:
             key, search_key = jrandom.split(key)
@@ -1495,7 +1505,7 @@ def evaluate_batch(
                         row_history,
                         fog_memory,
                         row_memory,
-                        effective_policy_adapter_scale,
+                        size_policy_adapter_scale,
                         policy_adapter_mode,
                         policy_adapter_min_grid_size,
                         policy_adapter_max_grid_size,
@@ -1589,6 +1599,8 @@ def evaluate_policy_opponent_batch(
     policy_adapter_mode=0,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
+    policy_adapter_min_turn=0,
+    policy_adapter_require_contact=False,
     policy_adapter_commit_steps=0,
     online_search_top_k=0,
     online_search_rollout_steps=16,
@@ -1621,7 +1633,7 @@ def evaluate_policy_opponent_batch(
         (policy_adapter_min_grid_size <= 0 or effective_size >= policy_adapter_min_grid_size)
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
-    effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    size_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
     online_search_size_allowed = (
         (online_search_min_grid_size <= 0 or effective_size >= online_search_min_grid_size)
         and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
@@ -1714,6 +1726,10 @@ def evaluate_policy_opponent_batch(
         opponent_keys = jrandom.split(opponent_key, num_envs)
         pre_infos = jax.vmap(game.get_info)(states)
         active_decisions = (~pre_infos.is_done).astype(jnp.float32)
+        adapter_visible_contact = jnp.sum(policy_obs.opponent_cells.reshape(num_envs, -1), axis=-1) > 0
+        adapter_turn_allowed = states.time >= policy_adapter_min_turn
+        adapter_contact_allowed = adapter_visible_contact | (not policy_adapter_require_contact)
+        row_policy_adapter_allowed = adapter_turn_allowed & adapter_contact_allowed
         opponent_actions = jax.vmap(
             lambda k, obs: policy_network_action(
                 opponent_network,
@@ -1723,7 +1739,7 @@ def evaluate_policy_opponent_batch(
             )
         )(opponent_keys, opponent_obs)
         policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
-            lambda o, m, a, k, c: _policy_action(
+            lambda o, m, a, k, c, adapter_allowed: _policy_action(
                 network,
                 policy_adapter_network,
                 policy_adapter_feature_network,
@@ -1753,11 +1769,12 @@ def evaluate_policy_opponent_batch(
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
                 command_gate_feature_dim,
-                effective_policy_adapter_scale,
+                size_policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
                 c,
+                adapter_allowed,
             )
         )(
             obs_arr,
@@ -1765,6 +1782,7 @@ def evaluate_policy_opponent_batch(
             active,
             policy_keys,
             adapter_commit,
+            row_policy_adapter_allowed,
         )
         if online_search_enabled:
             key, search_key = jrandom.split(key)
@@ -1794,7 +1812,7 @@ def evaluate_policy_opponent_batch(
                         row_history,
                         fog_memory,
                         row_memory,
-                        effective_policy_adapter_scale,
+                        size_policy_adapter_scale,
                         policy_adapter_mode,
                         policy_adapter_min_grid_size,
                         policy_adapter_max_grid_size,
@@ -1956,6 +1974,17 @@ def parse_args():
         type=int,
         default=0,
         help="If positive, only enable Policy Adapter inference on grid sizes up to this value.",
+    )
+    parser.add_argument(
+        "--policy-adapter-min-turn",
+        type=int,
+        default=0,
+        help="Only enable Policy Adapter inference at or after this game turn.",
+    )
+    parser.add_argument(
+        "--policy-adapter-require-contact",
+        action="store_true",
+        help="Only enable Policy Adapter inference when the learner currently sees an enemy cell.",
     )
     parser.add_argument("--policy-adapter-gate-path", default=None)
     parser.add_argument("--policy-adapter-gate-threshold", type=float, default=-1.0)
@@ -2193,6 +2222,8 @@ def parse_args():
         and args.policy_adapter_min_grid_size > args.policy_adapter_max_grid_size
     ):
         parser.error("--policy-adapter-min-grid-size must be <= --policy-adapter-max-grid-size")
+    if args.policy_adapter_min_turn < 0:
+        parser.error("--policy-adapter-min-turn must be non-negative")
     if args.online_search_top_k < 0:
         parser.error("--online-search-top-k must be non-negative")
     if args.online_search_top_k > 0 and args.policy_adapter_gate_threshold >= 0.0:
@@ -2478,6 +2509,10 @@ def main():
             min_label = args.policy_adapter_min_grid_size if args.policy_adapter_min_grid_size > 0 else "-inf"
             max_label = args.policy_adapter_max_grid_size if args.policy_adapter_max_grid_size > 0 else "inf"
             gate_label += f", size=[{min_label},{max_label}]"
+        if args.policy_adapter_min_turn > 0:
+            gate_label += f", turn>={args.policy_adapter_min_turn}"
+        if args.policy_adapter_require_contact:
+            gate_label += ", contact"
         print(f"Policy adapter: {args.policy_adapter_path}")
         print(f"Policy adapter: mode={args.policy_adapter_mode}, scale={args.policy_adapter_scale:g}{gate_label}")
         if args.policy_adapter_feature_model_path is not None:
@@ -2573,6 +2608,8 @@ def main():
                     policy_adapter_mode,
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
+                    args.policy_adapter_min_turn,
+                    args.policy_adapter_require_contact,
                     args.policy_adapter_commit_steps,
                     args.online_search_top_k,
                     args.online_search_rollout_steps,
@@ -2631,6 +2668,8 @@ def main():
                     policy_adapter_mode,
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
+                    args.policy_adapter_min_turn,
+                    args.policy_adapter_require_contact,
                     args.policy_adapter_commit_steps,
                     args.online_search_top_k,
                     args.online_search_rollout_steps,
@@ -2723,6 +2762,8 @@ def main():
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,
         "policy_adapter_min_grid_size": args.policy_adapter_min_grid_size,
         "policy_adapter_max_grid_size": args.policy_adapter_max_grid_size,
+        "policy_adapter_min_turn": args.policy_adapter_min_turn,
+        "policy_adapter_require_contact": args.policy_adapter_require_contact,
         "policy_adapter_gate_path": args.policy_adapter_gate_path,
         "policy_adapter_gate_threshold": args.policy_adapter_gate_threshold,
         "policy_adapter_gate_hidden_dim": args.policy_adapter_gate_hidden_dim,
