@@ -93,6 +93,7 @@ def _policy_action(
     network,
     policy_adapter_network,
     policy_adapter_feature_network,
+    late_policy_adapter_network,
     plan_worker_network,
     command_gate_network,
     obs_arr,
@@ -125,8 +126,11 @@ def _policy_action(
     policy_adapter_finish_threshold: float,
     policy_adapter_gate_threshold: float,
     policy_adapter_mode: int,
+    late_policy_adapter_scale: float,
+    late_policy_adapter_mode: int,
     policy_adapter_commit_active,
     policy_adapter_context_allowed=True,
+    late_policy_adapter_context_allowed=True,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     adapter_trigger = jnp.asarray(0.0, dtype=logits.dtype)
@@ -224,9 +228,37 @@ def _policy_action(
         legal = base_logits_for_adapter > -1.0e8
         base_top = jnp.argmax(jnp.where(legal, base_logits_for_adapter, -1.0e9))
         adapted_top = jnp.argmax(jnp.where(legal, adapted_logits, -1.0e9))
-        adapter_used = (adapter_gate > 0.0).astype(logits.dtype)
-        adapter_action_diff = adapter_used * (adapted_top != base_top).astype(logits.dtype)
+        primary_adapter_used = (adapter_gate > 0.0).astype(logits.dtype)
+        adapter_used = jnp.maximum(adapter_used, primary_adapter_used)
+        adapter_action_diff = jnp.maximum(
+            adapter_action_diff,
+            primary_adapter_used * (adapted_top != base_top).astype(logits.dtype),
+        )
         logits = adapted_logits
+    if late_policy_adapter_scale > 0.0:
+        base_logits_for_late_adapter = logits
+        late_adapter_logits, _ = late_policy_adapter_network.logits_value(obs_arr, mask, active)
+        late_adapter_gate = jnp.where(late_policy_adapter_context_allowed, 1.0, 0.0)
+        late_adapter_weight = late_policy_adapter_scale * late_adapter_gate
+        late_adapted_logits = jax.lax.switch(
+            late_policy_adapter_mode,
+            (
+                lambda _: policy_adapter_delta_logits(logits, late_adapter_logits, late_adapter_weight),
+                lambda _: policy_adapter_blend_logits(logits, late_adapter_logits, late_adapter_weight),
+                lambda _: jnp.where(late_adapter_gate > 0.0, late_adapter_logits, logits),
+            ),
+            None,
+        )
+        legal = base_logits_for_late_adapter > -1.0e8
+        base_top = jnp.argmax(jnp.where(legal, base_logits_for_late_adapter, -1.0e9))
+        late_top = jnp.argmax(jnp.where(legal, late_adapted_logits, -1.0e9))
+        late_adapter_used = (late_adapter_gate > 0.0).astype(logits.dtype)
+        adapter_used = jnp.maximum(adapter_used, late_adapter_used)
+        adapter_action_diff = jnp.maximum(
+            adapter_action_diff,
+            late_adapter_used * (late_top != base_top).astype(logits.dtype),
+        )
+        logits = late_adapted_logits
     if strategy_q_rerank_scale > 0.0:
         logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
     if strategy_target_rerank_scale > 0.0:
@@ -1410,6 +1442,7 @@ def evaluate_batch(
     network,
     policy_adapter_network,
     policy_adapter_feature_network,
+    late_policy_adapter_network,
     plan_worker_network,
     command_gate_network,
     states,
@@ -1449,6 +1482,12 @@ def evaluate_batch(
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
     policy_adapter_mode=0,
+    late_policy_adapter_scale=0.0,
+    late_policy_adapter_mode=0,
+    late_policy_adapter_min_grid_size=0,
+    late_policy_adapter_max_grid_size=0,
+    late_policy_adapter_min_turn=0,
+    late_policy_adapter_require_contact=False,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
     policy_adapter_min_turn=0,
@@ -1489,6 +1528,11 @@ def evaluate_batch(
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
     size_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    late_policy_adapter_size_allowed = (
+        (late_policy_adapter_min_grid_size <= 0 or effective_size >= late_policy_adapter_min_grid_size)
+        and (late_policy_adapter_max_grid_size <= 0 or effective_size <= late_policy_adapter_max_grid_size)
+    )
+    size_late_policy_adapter_scale = late_policy_adapter_scale if late_policy_adapter_size_allowed else 0.0
     online_search_size_allowed = (
         (online_search_min_grid_size <= 0 or effective_size >= online_search_min_grid_size)
         and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
@@ -1585,15 +1629,19 @@ def evaluate_batch(
         adapter_turn_allowed = states.time >= policy_adapter_min_turn
         adapter_contact_allowed = adapter_visible_contact | (not policy_adapter_require_contact)
         row_policy_adapter_allowed = adapter_turn_allowed & adapter_contact_allowed
+        late_adapter_turn_allowed = states.time >= late_policy_adapter_min_turn
+        late_adapter_contact_allowed = adapter_visible_contact | (not late_policy_adapter_require_contact)
+        row_late_policy_adapter_allowed = late_adapter_turn_allowed & late_adapter_contact_allowed
         opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent, k, obs, random_action))(
             opponent_keys,
             opponent_obs,
         )
         policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
-            lambda o, m, a, k, c, adapter_allowed: _policy_action(
+            lambda o, m, a, k, c, adapter_allowed, late_adapter_allowed: _policy_action(
                 network,
                 policy_adapter_network,
                 policy_adapter_feature_network,
+                late_policy_adapter_network,
                 plan_worker_network,
                 command_gate_network,
                 o,
@@ -1626,8 +1674,11 @@ def evaluate_batch(
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
+                size_late_policy_adapter_scale,
+                late_policy_adapter_mode,
                 c,
                 adapter_allowed,
+                late_adapter_allowed,
             )
         )(
             obs_arr,
@@ -1636,6 +1687,7 @@ def evaluate_batch(
             policy_keys,
             adapter_commit,
             row_policy_adapter_allowed,
+            row_late_policy_adapter_allowed,
         )
         if online_search_enabled:
             key, search_key = jrandom.split(key)
@@ -1723,6 +1775,7 @@ def evaluate_policy_opponent_batch(
     network,
     policy_adapter_network,
     policy_adapter_feature_network,
+    late_policy_adapter_network,
     plan_worker_network,
     command_gate_network,
     opponent_network,
@@ -1763,6 +1816,12 @@ def evaluate_policy_opponent_batch(
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
     policy_adapter_mode=0,
+    late_policy_adapter_scale=0.0,
+    late_policy_adapter_mode=0,
+    late_policy_adapter_min_grid_size=0,
+    late_policy_adapter_max_grid_size=0,
+    late_policy_adapter_min_turn=0,
+    late_policy_adapter_require_contact=False,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
     policy_adapter_min_turn=0,
@@ -1803,6 +1862,11 @@ def evaluate_policy_opponent_batch(
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
     size_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    late_policy_adapter_size_allowed = (
+        (late_policy_adapter_min_grid_size <= 0 or effective_size >= late_policy_adapter_min_grid_size)
+        and (late_policy_adapter_max_grid_size <= 0 or effective_size <= late_policy_adapter_max_grid_size)
+    )
+    size_late_policy_adapter_scale = late_policy_adapter_scale if late_policy_adapter_size_allowed else 0.0
     online_search_size_allowed = (
         (online_search_min_grid_size <= 0 or effective_size >= online_search_min_grid_size)
         and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
@@ -1899,6 +1963,9 @@ def evaluate_policy_opponent_batch(
         adapter_turn_allowed = states.time >= policy_adapter_min_turn
         adapter_contact_allowed = adapter_visible_contact | (not policy_adapter_require_contact)
         row_policy_adapter_allowed = adapter_turn_allowed & adapter_contact_allowed
+        late_adapter_turn_allowed = states.time >= late_policy_adapter_min_turn
+        late_adapter_contact_allowed = adapter_visible_contact | (not late_policy_adapter_require_contact)
+        row_late_policy_adapter_allowed = late_adapter_turn_allowed & late_adapter_contact_allowed
         opponent_actions = jax.vmap(
             lambda k, obs: policy_network_action(
                 opponent_network,
@@ -1908,10 +1975,11 @@ def evaluate_policy_opponent_batch(
             )
         )(opponent_keys, opponent_obs)
         policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
-            lambda o, m, a, k, c, adapter_allowed: _policy_action(
+            lambda o, m, a, k, c, adapter_allowed, late_adapter_allowed: _policy_action(
                 network,
                 policy_adapter_network,
                 policy_adapter_feature_network,
+                late_policy_adapter_network,
                 plan_worker_network,
                 command_gate_network,
                 o,
@@ -1944,8 +2012,11 @@ def evaluate_policy_opponent_batch(
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
+                size_late_policy_adapter_scale,
+                late_policy_adapter_mode,
                 c,
                 adapter_allowed,
+                late_adapter_allowed,
             )
         )(
             obs_arr,
@@ -1954,6 +2025,7 @@ def evaluate_policy_opponent_batch(
             policy_keys,
             adapter_commit,
             row_policy_adapter_allowed,
+            row_late_policy_adapter_allowed,
         )
         if online_search_enabled:
             key, search_key = jrandom.split(key)
@@ -2176,6 +2248,13 @@ def parse_args():
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
     parser.add_argument("--policy-adapter-mode", choices=POLICY_ADAPTER_MODE_NAMES, default="delta")
     parser.add_argument(
+        "--late-policy-adapter-path",
+        default=None,
+        help="Optional second policy adapter composed after the primary adapter.",
+    )
+    parser.add_argument("--late-policy-adapter-scale", type=float, default=0.0)
+    parser.add_argument("--late-policy-adapter-mode", choices=POLICY_ADAPTER_MODE_NAMES, default="delta")
+    parser.add_argument(
         "--conversion-policy-scale",
         type=float,
         default=0.0,
@@ -2214,6 +2293,29 @@ def parse_args():
         type=int,
         default=0,
         help="After an adapter gate/finish trigger, force the adapter for this many following policy turns.",
+    )
+    parser.add_argument(
+        "--late-policy-adapter-min-grid-size",
+        type=int,
+        default=0,
+        help="If positive, only enable the late Policy Adapter on grid sizes at least this value.",
+    )
+    parser.add_argument(
+        "--late-policy-adapter-max-grid-size",
+        type=int,
+        default=0,
+        help="If positive, only enable the late Policy Adapter on grid sizes up to this value.",
+    )
+    parser.add_argument(
+        "--late-policy-adapter-min-turn",
+        type=int,
+        default=0,
+        help="Only enable the late Policy Adapter at or after this game turn.",
+    )
+    parser.add_argument(
+        "--late-policy-adapter-require-contact",
+        action="store_true",
+        help="Only enable the late Policy Adapter when the learner currently sees an enemy cell.",
     )
     parser.add_argument(
         "--online-search-top-k",
@@ -2415,6 +2517,22 @@ def parse_args():
         parser.error("--policy-adapter-scale requires --policy-adapter-path")
     if args.policy_adapter_path is not None and args.policy_adapter_scale <= 0.0:
         parser.error("--policy-adapter-path requires --policy-adapter-scale > 0")
+    if args.late_policy_adapter_scale < 0.0:
+        parser.error("--late-policy-adapter-scale must be non-negative")
+    if args.late_policy_adapter_scale > 0.0 and args.late_policy_adapter_path is None:
+        parser.error("--late-policy-adapter-scale requires --late-policy-adapter-path")
+    if args.late_policy_adapter_path is not None and args.late_policy_adapter_scale <= 0.0:
+        parser.error("--late-policy-adapter-path requires --late-policy-adapter-scale > 0")
+    if args.late_policy_adapter_min_grid_size < 0 or args.late_policy_adapter_max_grid_size < 0:
+        parser.error("--late-policy-adapter-min/max-grid-size must be non-negative")
+    if (
+        args.late_policy_adapter_min_grid_size > 0
+        and args.late_policy_adapter_max_grid_size > 0
+        and args.late_policy_adapter_min_grid_size > args.late_policy_adapter_max_grid_size
+    ):
+        parser.error("--late-policy-adapter-min-grid-size must be <= --late-policy-adapter-max-grid-size")
+    if args.late_policy_adapter_min_turn < 0:
+        parser.error("--late-policy-adapter-min-turn must be non-negative")
     if args.policy_adapter_feature_model_path is not None and args.policy_adapter_path is None:
         parser.error("--policy-adapter-feature-model-path requires --policy-adapter-path")
     policy_adapter_feature_strategy_aux = (
@@ -2667,6 +2785,35 @@ def main():
                 init_network_arch=args.network_arch,
                 drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
             )
+    late_policy_adapter_network = None
+    if args.late_policy_adapter_path is not None:
+        late_policy_adapter_network = load_or_create_adaptive_network(
+            net_key,
+            pad_size=args.pad_to,
+            init_model_path=args.late_policy_adapter_path,
+            channels=args.channels,
+            input_channels=input_channels,
+            init_input_channels=input_channels,
+            value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+            value_bins=value_bins,
+            value_min=args.value_min,
+            value_max=args.value_max,
+            value_sigma=args.value_sigma,
+            outcome_head=args.outcome_head,
+            strategy_aux=args.strategy_aux,
+            strategy_spatial_aux=args.strategy_spatial_aux,
+            strategy_finish_outputs=args.strategy_finish_outputs,
+            init_strategy_finish_outputs=args.strategy_finish_outputs,
+            global_context=network_global_context,
+            init_global_context=network_global_context,
+            context_residual=args.context_residual,
+            init_context_residual=args.context_residual,
+            pyramid_context=args.pyramid_context,
+            init_pyramid_context=args.pyramid_context,
+            network_arch=args.network_arch,
+            init_network_arch=args.network_arch,
+            drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
+        )
     plan_worker_network = None
     if args.strategy_plan_worker_path is not None:
         plan_worker_input_channels = input_channels + 3
@@ -2717,6 +2864,7 @@ def main():
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
     policy_adapter_mode = POLICY_ADAPTER_MODE_TO_ID[args.policy_adapter_mode]
+    late_policy_adapter_mode = POLICY_ADAPTER_MODE_TO_ID[args.late_policy_adapter_mode]
     conversion_policy_mode = POLICY_ADAPTER_MODE_TO_ID[args.conversion_policy_mode]
     opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
     rows = []
@@ -2846,6 +2994,21 @@ def main():
             print(f"Policy adapter gate: feature_dim={command_gate_feature_dim}")
         if args.policy_adapter_commit_steps > 0:
             print(f"Policy adapter commit: {args.policy_adapter_commit_steps} steps")
+    if args.late_policy_adapter_path is not None:
+        gate_label = ""
+        if args.late_policy_adapter_min_grid_size > 0 or args.late_policy_adapter_max_grid_size > 0:
+            min_label = args.late_policy_adapter_min_grid_size if args.late_policy_adapter_min_grid_size > 0 else "-inf"
+            max_label = args.late_policy_adapter_max_grid_size if args.late_policy_adapter_max_grid_size > 0 else "inf"
+            gate_label += f", size=[{min_label},{max_label}]"
+        if args.late_policy_adapter_min_turn > 0:
+            gate_label += f", turn>={args.late_policy_adapter_min_turn}"
+        if args.late_policy_adapter_require_contact:
+            gate_label += ", contact"
+        print(f"Late adapter: {args.late_policy_adapter_path}")
+        print(
+            f"Late adapter: mode={args.late_policy_adapter_mode}, "
+            f"scale={args.late_policy_adapter_scale:g}{gate_label}"
+        )
     if args.online_search_top_k > 0:
         if args.online_search_min_grid_size > 0 or args.online_search_max_grid_size > 0:
             min_label = args.online_search_min_grid_size if args.online_search_min_grid_size > 0 else "-inf"
@@ -2915,6 +3078,7 @@ def main():
                         network,
                         policy_adapter_network,
                         policy_adapter_feature_network,
+                        late_policy_adapter_network,
                         plan_worker_network,
                         command_gate_network,
                         states,
@@ -2954,6 +3118,12 @@ def main():
                         args.policy_adapter_finish_threshold,
                         args.policy_adapter_gate_threshold,
                         policy_adapter_mode,
+                        args.late_policy_adapter_scale,
+                        late_policy_adapter_mode,
+                        args.late_policy_adapter_min_grid_size,
+                        args.late_policy_adapter_max_grid_size,
+                        args.late_policy_adapter_min_turn,
+                        args.late_policy_adapter_require_contact,
                         args.policy_adapter_min_grid_size,
                         args.policy_adapter_max_grid_size,
                         args.policy_adapter_min_turn,
@@ -2979,6 +3149,7 @@ def main():
                         network,
                         policy_adapter_network,
                         policy_adapter_feature_network,
+                        late_policy_adapter_network,
                         plan_worker_network,
                         command_gate_network,
                         opponent_network,
@@ -3019,6 +3190,12 @@ def main():
                         args.policy_adapter_finish_threshold,
                         args.policy_adapter_gate_threshold,
                         policy_adapter_mode,
+                        args.late_policy_adapter_scale,
+                        late_policy_adapter_mode,
+                        args.late_policy_adapter_min_grid_size,
+                        args.late_policy_adapter_max_grid_size,
+                        args.late_policy_adapter_min_turn,
+                        args.late_policy_adapter_require_contact,
                         args.policy_adapter_min_grid_size,
                         args.policy_adapter_max_grid_size,
                         args.policy_adapter_min_turn,
@@ -3069,7 +3246,11 @@ def main():
             rows.append(row)
             elapsed = time.time() - t0
             adapter_label = ""
-            if args.policy_adapter_path is not None:
+            if (
+                args.policy_adapter_path is not None
+                or args.late_policy_adapter_path is not None
+                or args.conversion_policy_scale > 0.0
+            ):
                 adapter_label = (
                     f", adapter_used={row.adapter_used_rate * 100:.2f}%, "
                     f"adapter_diff={row.adapter_action_diff_rate * 100:.2f}%, "
@@ -3133,6 +3314,13 @@ def main():
         "policy_adapter_feature_strategy_finish_outputs": policy_adapter_feature_strategy_finish_outputs,
         "policy_adapter_scale": args.policy_adapter_scale,
         "policy_adapter_mode": args.policy_adapter_mode,
+        "late_policy_adapter_path": args.late_policy_adapter_path,
+        "late_policy_adapter_scale": args.late_policy_adapter_scale,
+        "late_policy_adapter_mode": args.late_policy_adapter_mode,
+        "late_policy_adapter_min_grid_size": args.late_policy_adapter_min_grid_size,
+        "late_policy_adapter_max_grid_size": args.late_policy_adapter_max_grid_size,
+        "late_policy_adapter_min_turn": args.late_policy_adapter_min_turn,
+        "late_policy_adapter_require_contact": args.late_policy_adapter_require_contact,
         "conversion_policy_head": args.conversion_policy_head,
         "conversion_policy_scale": args.conversion_policy_scale,
         "conversion_policy_mode": args.conversion_policy_mode,

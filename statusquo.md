@@ -1496,3 +1496,15 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote these single-shard prefix checkpoints. Collect more strict max500 executed-prefix shards from the static-v1 + online-search teacher and add independent prefix validation before another training run.
 - **Context:** The strict shard kept `56/1024` origin rows, p0/p1 `28/28`, with `425/448` valid prefix steps and 100% win plan outcomes. Prefix policy v0 reached fixed-v5 max500 256-row min `37.50%` versus same-seed static v1 `38.67%`; aggressive v1 dropped to 128-row min `30.47%`. The prefix data path is usable, but the first shard is too small to beat static v1.
+
+## [2026-06-21 00:50] Multi-Shard Prefix Policy v2
+- **Changes:** Collected `runs/adaptive-online-search-prefix-max500-v1/`, trained `runs/adaptive-online-search-prefix-policy-v2-multishard/` from v0 + v1-train prefix shards with independent v1 validation, and evaluated fixed-v5 max500 same-seed gates.
+- **Status:** Completed
+- **Next Steps:** Do not promote v2. Implement or use a true two-adapter wrapper next: v4 base, static v1 as the 8x opening/base adapter, and prefix/option adapter as a second late-game intervention. Avoid CE/pairwise weight sweeps on the current prefix rows.
+- **Context:** Combined strict prefix data now has `164` origin rows and `1235` non-pass valid prefix steps. Prefix v2 best beat static v1 at 128 games/seat seed `122500` (`42.97%` vs `39.06%` min), but at 256 games/seat seed `122520` it only matched within noise (`34.38%` vs `33.98%` min) and stayed p0-limited. Static-v1 base plus late prefix v2 also failed 256-row confirmation (`32.81%` min).
+
+## [2026-06-21 00:55] Two-Adapter Evaluator Hook
+- **Changes:** Added `evaluate_adaptive_policy.py --late-policy-adapter-*` flags to compose a second policy adapter after the primary adapter, documented the CLI in README/Chinese manual, and recorded the fixed-v5 max500 wrapper result.
+- **Status:** Completed
+- **Next Steps:** Keep the hook. Do not promote prefix v2 as the late adapter; train a p0/p1-balanced option adapter or a learned false-positive-penalized gate before retesting the two-adapter deployment shape.
+- **Context:** CPU smoke passed. True wrapper `v4 + static v1 max8 replace + prefix v2 late replace turn>=80/contact` scored fixed-v5 max500 256 games/seat seed `122520`: p0 `32.81%`, p1 `41.02%`, min `32.81%`, below same-seed static v1 min `33.98%`.

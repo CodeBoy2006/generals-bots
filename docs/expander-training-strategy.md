@@ -16757,3 +16757,199 @@ Next useful move:
   static-v1 + online-search teacher, then train with independent prefix
   validation.  Do not continue CE-strength scans on the current single shard.
 ```
+
+### 2026-06-21 00:50 - Multi-Shard Max500 Prefix Policy v2
+
+Collected one additional strict max500 executed-prefix shard and reused the
+existing `v1-train` shard to test whether more clean prefix data is enough to
+beat the static v1 adapter.
+
+Data:
+
+```text
+train:
+  runs/adaptive-online-search-prefix-max500-v0/
+  runs/adaptive-online-search-prefix-max500-v1-train/
+
+validation:
+  runs/adaptive-online-search-prefix-max500-v1/
+
+strict conversion origins:
+  v0:       56, p0/p1 28/28
+  v1-train: 71, p0/p1 37/34
+  v1-val:   37, p0/p1 32/5
+
+combined prefix:
+  origins: 164
+  valid prefix steps: 1252 / 1312
+  non-pass valid prefix steps: 1235
+  mean plan_advantage: 165.86
+  turn range: 80..143
+```
+
+Training:
+
+```text
+checkpoint:
+  runs/adaptive-online-search-prefix-policy-v2-multishard/
+
+init:
+  adaptive-online-search-conversion-adapter-v1
+
+loss:
+  update_scope=policy-heads
+  policy_kl=1.0
+  action_ce=0.25
+  pairwise=0.25
+  prefix_advantage_weighting=true
+  prefix_step_decay=8
+  balance=size-seat-oversample
+
+train samples:
+  1250 after oversampling
+
+validation:
+  282 prefix samples
+  final action accuracy: ~31.0%
+  best pairwise accuracy: 0.39%
+  best checkpoint selected epoch 21
+```
+
+Gameplay, full v2 adapter over `adaptive-unet-ppo-v4`:
+
+```text
+fixed-v5 max500, 128 games/seat, seed122500:
+  prefix v2 best:
+    p0 50.78%
+    p1 42.97%
+    min 42.97%
+
+  static v1 same seed:
+    p0 42.19%
+    p1 39.06%
+    min 39.06%
+
+fixed-v5 max500, 256 games/seat, seed122520:
+  prefix v2 best:
+    p0 34.38%
+    p1 41.41%
+    min 34.38%
+
+  static v1 same seed:
+    p0 33.98%
+    p1 39.06%
+    min 33.98%
+
+final epoch, 128 games/seat, seed122500:
+  p0 46.09%
+  p1 39.84%
+  min 39.84%
+```
+
+Two-stage diagnostic, using static v1 as the base policy and prefix v2 only
+after `turn>=80 && contact`:
+
+```text
+128 games/seat, seed122500:
+  p0 42.97%
+  p1 41.41%
+  min 41.41%
+  adapter_diff ~2.5%
+
+256 games/seat, seed122520:
+  p0 32.81%
+  p1 41.02%
+  min 32.81%
+  adapter_diff ~2.4%
+```
+
+Decision:
+
+```text
+Do not promote prefix v2.  The 128-row signal was real enough to test, but
+256-row confirmation only matches static v1 within noise and remains p0-limited.
+The independent prefix validation metric is also weak: pairwise accuracy is too
+sparse to select checkpoints, while final CE/loss is not sufficient for gameplay.
+
+The useful signal is architectural: static v1 remains the better opening/base
+policy, and prefix supervision may help only as a low-rate midgame intervention.
+The next high-value implementation should support a true two-adapter wrapper:
+  v4 base
+  + static v1 replace for 8x fixed-v5 domain
+  + prefix/option adapter as a second late-game residual or replace head
+with explicit activation statistics and same-seed max500 gates.  Do not spend
+more time on CE/pairwise weight sweeps for the current prefix dataset.
+```
+
+### 2026-06-21 00:55 - Two-Adapter Evaluator Hook
+
+Implemented evaluator support for a second policy adapter composed after the
+primary policy adapter:
+
+```text
+primary adapter:
+  --policy-adapter-path
+  --policy-adapter-scale
+  --policy-adapter-mode
+  existing size/turn/contact/gate controls
+
+late adapter:
+  --late-policy-adapter-path
+  --late-policy-adapter-scale
+  --late-policy-adapter-mode
+  --late-policy-adapter-min-grid-size
+  --late-policy-adapter-max-grid-size
+  --late-policy-adapter-min-turn
+  --late-policy-adapter-require-contact
+```
+
+The intended deployment shape is now directly testable:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+primary adapter:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+  mode=replace
+  max_grid_size=8
+
+late adapter:
+  runs/adaptive-online-search-prefix-policy-v2-multishard/
+    generals-adaptive-online-search-prefix-policy-v2-multishard.best.eqx
+  mode=replace
+  max_grid_size=8
+  min_turn=80
+  require_contact=true
+```
+
+Smoke:
+
+```text
+CPU 2-game max5 fixed-v5 smoke passed.
+```
+
+Gameplay:
+
+```text
+fixed-v5 max500, 256 games/seat, seed122520:
+  two-adapter wrapper:
+    p0 32.81%
+    p1 41.02%
+    min 32.81%
+
+  static v1 same seed:
+    p0 33.98%
+    p1 39.06%
+    min 33.98%
+```
+
+Decision:
+
+```text
+The evaluator hook is useful and should stay.  Prefix v2 still does not promote:
+it improves p1 but worsens p0 enough to lose the min row.  Future prefix/option
+training should optimize for p0/p1-balanced late interventions or train a gate
+with false-positive penalty; do not deploy prefix v2 as a late adapter.
+```
