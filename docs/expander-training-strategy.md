@@ -12835,3 +12835,69 @@ deployment-shaped gating can learn where an adapter is locally search-consistent
 the missing piece is stronger candidate behavior and longer enter/exit-plan
 labels, not a better threshold.
 ```
+
+## 2026-06-20 15:48 - Policy Adapter Commit Probe
+
+Implemented an evaluator-only enter-plan diagnostic:
+
+```text
+flag:
+  evaluate_adaptive_policy.py --policy-adapter-commit-steps N
+
+behavior:
+  after a learned adapter gate or finish-threshold trigger,
+  force the adapter for the next N policy turns
+```
+
+GPU smoke:
+
+```text
+device:
+  cuda:0, RTX 5070 Ti
+
+run:
+  v4 base
+  a1mix adapter
+  a1mix learned gate threshold 0.5
+  commit steps 4
+```
+
+Fixed-v5 max250 result:
+
+```text
+256 games/seat, seed97120:
+  p0:
+    wins 21 / losses 81 / draws 154
+    win 8.20%
+    draw 60.16%
+
+  p1:
+    wins 25 / losses 96 / draws 135
+    win 9.77%
+    draw 52.73%
+
+  min:
+    8.20%
+```
+
+Comparison:
+
+```text
+a1mix learned gate, no commit, 256-row seed97020:
+  min 12.11%
+
+current best legacy Plan-Q v0 same seed family:
+  min 14.06%
+```
+
+Interpretation:
+
+```text
+Committed adapter forcing is worse than the non-committed learned gate. This
+rules out the simplest enter-plan continuation heuristic. Keep the flag as a
+diagnostic switch, but do not run a 512-row confirmation or sweep commit length.
+
+The next useful route is still better decisive trajectory labels or a true
+plan-conditioned executor, not extending a weak adapter decision for several
+turns.
+```

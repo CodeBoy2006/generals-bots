@@ -117,8 +117,10 @@ def _policy_action(
     policy_adapter_finish_threshold: float,
     policy_adapter_gate_threshold: float,
     policy_adapter_mode: int,
+    policy_adapter_commit_active,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
+    adapter_trigger = jnp.asarray(0.0, dtype=logits.dtype)
     needs_aux = (
         strategy_q_rerank_scale > 0.0
         or strategy_q_replace_threshold >= 0.0
@@ -155,14 +157,17 @@ def _policy_action(
                 command_gate_feature_dim,
             )
             gate_probability = jax.nn.sigmoid(command_gate_network(adapter_features))
-            adapter_gate = jnp.where(gate_probability >= policy_adapter_gate_threshold, 1.0, 0.0)
+            adapter_trigger = jnp.where(gate_probability >= policy_adapter_gate_threshold, 1.0, 0.0)
+            adapter_gate = adapter_trigger
         elif policy_adapter_finish_threshold >= 0.0:
             adapter_feature_network = (
                 policy_adapter_feature_network if policy_adapter_feature_network is not None else policy_adapter_network
             )
             adapter_aux = adapter_feature_network.strategy_auxiliary(obs_arr, mask, active)
             finish_probability = strategy_finish_probability(adapter_aux.finish_logits)
-            adapter_gate = jnp.where(finish_probability >= policy_adapter_finish_threshold, 1.0, 0.0)
+            adapter_trigger = jnp.where(finish_probability >= policy_adapter_finish_threshold, 1.0, 0.0)
+            adapter_gate = adapter_trigger
+        adapter_gate = jnp.where(policy_adapter_commit_active > 0, 1.0, adapter_gate)
         adapter_weight = policy_adapter_scale * adapter_gate
         logits = jax.lax.switch(
             policy_adapter_mode,
@@ -321,7 +326,7 @@ def _policy_action(
             worker_supported = jnp.asarray(True)
         use_worker = (jrandom.uniform(worker_key) < worker_probability) & worker_supported
         index = jnp.where(use_worker, worker_index, index)
-    return adaptive_index_to_action(index, network.pad_size)
+    return adaptive_index_to_action(index, network.pad_size), adapter_trigger
 
 
 def strategy_q_rerank_logits(
@@ -816,6 +821,7 @@ def evaluate_batch(
     policy_adapter_mode=0,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
+    policy_adapter_commit_steps=0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -837,9 +843,10 @@ def evaluate_batch(
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
     effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    initial_adapter_commit = jnp.zeros((num_envs,), dtype=jnp.int32)
 
     def body(carry, _):
-        states, key, history, memory = carry
+        states, key, history, memory, adapter_commit = carry
         obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
         policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
@@ -920,8 +927,8 @@ def evaluate_batch(
 
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
-        policy_actions = jax.vmap(
-            lambda o, m, a, k: _policy_action(
+        policy_actions, adapter_triggers = jax.vmap(
+            lambda o, m, a, k, c: _policy_action(
                 network,
                 policy_adapter_network,
                 policy_adapter_feature_network,
@@ -955,12 +962,14 @@ def evaluate_batch(
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
+                c,
             )
         )(
             obs_arr,
             masks,
             active,
             policy_keys,
+            adapter_commit,
         )
         opponent_keys = jrandom.split(opponent_key, num_envs)
         opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent, k, obs, random_action))(
@@ -976,9 +985,20 @@ def evaluate_batch(
             new_states,
         )
         final_memory = current_memory
-        return (final_states, key, current_scoreboard, final_memory), infos
+        decayed_commit = jnp.maximum(adapter_commit - 1, 0)
+        next_adapter_commit = jnp.where(
+            adapter_triggers > 0.0,
+            jnp.asarray(policy_adapter_commit_steps, dtype=jnp.int32),
+            decayed_commit,
+        )
+        return (final_states, key, current_scoreboard, final_memory, next_adapter_commit), infos
 
-    (states, key, _, _), _ = jax.lax.scan(body, (states, key, initial_history, initial_fog_memory), None, length=max_steps)
+    (states, key, _, _, _), _ = jax.lax.scan(
+        body,
+        (states, key, initial_history, initial_fog_memory, initial_adapter_commit),
+        None,
+        length=max_steps,
+    )
     return jax.vmap(game.get_info)(states)
 
 
@@ -1027,6 +1047,7 @@ def evaluate_policy_opponent_batch(
     policy_adapter_mode=0,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
+    policy_adapter_commit_steps=0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1048,9 +1069,10 @@ def evaluate_policy_opponent_batch(
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
     effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    initial_adapter_commit = jnp.zeros((num_envs,), dtype=jnp.int32)
 
     def body(carry, _):
-        states, key, history, memory = carry
+        states, key, history, memory, adapter_commit = carry
         obs_p0 = jax.vmap(lambda s: game.get_observation(s, 0))(states)
         obs_p1 = jax.vmap(lambda s: game.get_observation(s, 1))(states)
         policy_obs = jax.lax.cond(policy_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
@@ -1132,8 +1154,8 @@ def evaluate_policy_opponent_batch(
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
-        policy_actions = jax.vmap(
-            lambda o, m, a, k: _policy_action(
+        policy_actions, adapter_triggers = jax.vmap(
+            lambda o, m, a, k, c: _policy_action(
                 network,
                 policy_adapter_network,
                 policy_adapter_feature_network,
@@ -1167,12 +1189,14 @@ def evaluate_policy_opponent_batch(
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
+                c,
             )
         )(
             obs_arr,
             masks,
             active,
             policy_keys,
+            adapter_commit,
         )
         opponent_actions = jax.vmap(
             lambda k, obs: policy_network_action(opponent_network, k, crop_observation(obs, effective_size), opponent_policy_mode)
@@ -1186,9 +1210,20 @@ def evaluate_policy_opponent_batch(
             new_states,
         )
         final_memory = current_memory
-        return (final_states, key, current_scoreboard, final_memory), infos
+        decayed_commit = jnp.maximum(adapter_commit - 1, 0)
+        next_adapter_commit = jnp.where(
+            adapter_triggers > 0.0,
+            jnp.asarray(policy_adapter_commit_steps, dtype=jnp.int32),
+            decayed_commit,
+        )
+        return (final_states, key, current_scoreboard, final_memory, next_adapter_commit), infos
 
-    (states, key, _, _), _ = jax.lax.scan(body, (states, key, initial_history, initial_fog_memory), None, length=max_steps)
+    (states, key, _, _, _), _ = jax.lax.scan(
+        body,
+        (states, key, initial_history, initial_fog_memory, initial_adapter_commit),
+        None,
+        length=max_steps,
+    )
     return jax.vmap(game.get_info)(states)
 
 
@@ -1309,6 +1344,12 @@ def parse_args():
     parser.add_argument("--policy-adapter-gate-path", default=None)
     parser.add_argument("--policy-adapter-gate-threshold", type=float, default=-1.0)
     parser.add_argument("--policy-adapter-gate-hidden-dim", type=int, default=32)
+    parser.add_argument(
+        "--policy-adapter-commit-steps",
+        type=int,
+        default=0,
+        help="After an adapter gate/finish trigger, force the adapter for this many following policy turns.",
+    )
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -1501,6 +1542,10 @@ def parse_args():
         parser.error("--policy-adapter-gate-path requires --policy-adapter-gate-threshold")
     if args.policy_adapter_gate_hidden_dim <= 0:
         parser.error("--policy-adapter-gate-hidden-dim must be positive")
+    if args.policy_adapter_commit_steps < 0:
+        parser.error("--policy-adapter-commit-steps must be non-negative")
+    if args.policy_adapter_commit_steps > 0 and args.policy_adapter_gate_threshold < 0.0 and args.policy_adapter_finish_threshold < 0.0:
+        parser.error("--policy-adapter-commit-steps requires a policy-adapter gate or finish threshold")
     if args.policy_adapter_min_grid_size < 0 or args.policy_adapter_max_grid_size < 0:
         parser.error("--policy-adapter-min-grid-size/max-grid-size must be non-negative")
     if (
@@ -1779,6 +1824,8 @@ def main():
         if args.policy_adapter_gate_threshold >= 0.0:
             print(f"Policy adapter gate: {args.policy_adapter_gate_path}")
             print(f"Policy adapter gate: feature_dim={command_gate_feature_dim}")
+        if args.policy_adapter_commit_steps > 0:
+            print(f"Policy adapter commit: {args.policy_adapter_commit_steps} steps")
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -1851,6 +1898,7 @@ def main():
                     policy_adapter_mode,
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
+                    args.policy_adapter_commit_steps,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -1897,6 +1945,7 @@ def main():
                     policy_adapter_mode,
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
+                    args.policy_adapter_commit_steps,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -1970,6 +2019,7 @@ def main():
         "policy_adapter_gate_path": args.policy_adapter_gate_path,
         "policy_adapter_gate_threshold": args.policy_adapter_gate_threshold,
         "policy_adapter_gate_hidden_dim": args.policy_adapter_gate_hidden_dim,
+        "policy_adapter_commit_steps": args.policy_adapter_commit_steps,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

@@ -1226,3 +1226,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not threshold-sweep the a1mix gate. Use the result to justify stronger enter/exit-plan labels or better candidate behavior; current best remains the legacy Plan-Q prefix wrapper.
 - **Context:** The A1+terminal gate data had `3890` rows, `179` changed actions, and `52` positives (`29.05%` of changed-action examples), avoiding the old sparse-gate failure. The learned gate improved same-seed fixed-v5 max250 256-row min from a1mix ungated `10.55%` to `12.11%`, but 512-row confirmation was only `10.94%` min and same-seed legacy Plan-Q v0 was stronger at `14.06%`.
+
+## [2026-06-20 15:48] Policy Adapter Commit Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --policy-adapter-commit-steps` so gated policy adapters can be forced for a short fixed horizon after a learned gate or finish-threshold trigger. Updated README, Chinese manual, and strategy notes with the diagnostic behavior and GPU result.
+- **Status:** Completed
+- **Next Steps:** Do not sweep commit length or run a 512-row confirmation for this path. Continue with stronger decisive trajectory labels or a true plan-conditioned executor instead of forcing a weak adapter decision for multiple turns.
+- **Context:** GPU smoke used `cuda:0`. `v4 base + a1mix adapter + a1mix learned gate threshold 0.5 + commit4` scored fixed-v5 max250 256-row seed `97120` at p0 `8.20%`, p1 `9.77%`, min `8.20%`, below the non-commit gate (`12.11%`) and current legacy Plan-Q wrapper (`14.06%`).
