@@ -12010,3 +12010,121 @@ Next useful route:
   command policy that decides when to enter/exits a plan, rather than forcing
   centered Worker logits into every state.
 ```
+
+### 2026-06-20: Prefix Main-Policy Supervision
+
+Implemented the first direct main-policy route for executed Plan-Q prefixes.
+
+Collector change:
+
+```text
+adaptive_plan_q_dataset.py:
+  --save-worker-prefix-steps now also saves worker_prefix_teacher_logits
+```
+
+This records the warm-start policy logits for every saved prefix state, so
+prefix imitation can use a true per-state KL anchor instead of reusing the
+pre-plan state's logits.
+
+Trainer change:
+
+```text
+adaptive_strategy_supervised.py:
+  added --dataset-format plan-q-prefix
+```
+
+The loader flattens:
+
+```text
+worker_prefix_obs
+worker_prefix_legal_mask
+worker_prefix_active
+worker_prefix_teacher_logits
+worker_prefix_action_index
+worker_prefix_plan_outcome
+worker_prefix_source_index / target_index
+```
+
+into the existing strategy-supervised schema. It drops pass labels by default,
+uses saved prefix logits for `policy_kl`, and uses the executed prefix action
+for small `action_ce`. `--require-outcome-win` on this format means the selected
+best source-target plan won in the short counterfactual rollout.
+
+GPU smoke:
+
+```text
+runs/adaptive-plan-q-prefix-logits-smoke-v0/
+  8 base rows
+  32 valid prefix steps
+  worker_prefix_teacher_logits shape (8, 4, 2049)
+
+runs/adaptive-prefix-policy-smoke-v0/
+  loaded plan-q-prefix format
+  12 non-pass samples
+  KL starts at 0.0000 against saved logits
+```
+
+High-quality prefix collection:
+
+```text
+run:
+  runs/adaptive-plan-q-prefix-logits-belief-win-v0/
+
+settings:
+  candidate_source main-stack
+  candidate_target belief
+  require_best_plan_win
+  warmup 80
+  plan_rollout_steps 48
+  plan_worker_steps 12
+  save_worker_prefix_steps 12
+
+data:
+  194 best-plan-win states
+  2328 valid non-pass prefix steps
+  shard mean_gap range 0.809 -> 1.123
+```
+
+Main-policy probe:
+
+```text
+run:
+  runs/adaptive-prefix-policy-belief-win-v0/
+
+loss:
+  policy_kl 1.0
+  action_ce 0.3
+  finish 0.1
+  outcome 0.1
+  update_scope policy-heads
+
+fixed-v5 max250 128-row, seed 95300:
+  init p0/p1/min: 8.59 / 10.94 / 8.59
+  probe p0/p1/min: 13.28 / 13.28 / 13.28
+  draw also decreased from ~55-57% to 50-55%
+```
+
+Expander smoke:
+
+```text
+Expander 8/12/16 64-row, seed 95320:
+  init min 57.81
+  probe min 51.56
+```
+
+Conclusion:
+
+```text
+Executed winning prefixes contain a real anti-draw / fixed-v5 signal when they
+train the main policy directly. The same single-source CE update causes
+multi-size Expander regression, especially 12/16 rows, so this checkpoint is not
+a promotion candidate.
+
+Do next:
+  mix plan-q-prefix rows with Expander/adaptive preservation rows
+  or add size/seat protected loss before further fixed-v5 prefix CE
+
+Do not do next:
+  promote the prefix CE checkpoint
+  keep scaling pure 8x8 winning-prefix action CE without preservation data
+```

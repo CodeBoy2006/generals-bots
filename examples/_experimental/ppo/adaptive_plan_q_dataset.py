@@ -529,6 +529,7 @@ def plan_action_to_index(action: jnp.ndarray, pad_size: int) -> jnp.ndarray:
 
 
 def collect_best_plan_worker_prefix(
+    network,
     fixed_opponent_network,
     state,
     effective_size,
@@ -592,6 +593,7 @@ def collect_best_plan_worker_prefix(
             effective_size,
             pad_size,
         )
+        teacher_logits = network.logits_value(obs_arr, mask, active)[0]
         worker_action = plan_worker_action(
             rollout_state,
             learner_player,
@@ -633,6 +635,7 @@ def collect_best_plan_worker_prefix(
             obs_arr,
             mask,
             active,
+            teacher_logits,
             action_index,
             valid,
             rollout_state.time,
@@ -644,7 +647,7 @@ def collect_best_plan_worker_prefix(
         jnp.arange(worker_prefix_steps),
         length=worker_prefix_steps,
     )
-    obs_arr, masks, active, action_indices, valid, times = prefix
+    obs_arr, masks, active, teacher_logits, action_indices, valid, times = prefix
     source_prefix = jnp.full((worker_prefix_steps,), source_index, dtype=jnp.int32)
     target_prefix = jnp.full((worker_prefix_steps,), target_index, dtype=jnp.int32)
     outcome_prefix = jnp.full((worker_prefix_steps,), best_plan_outcome, dtype=jnp.int8)
@@ -653,6 +656,7 @@ def collect_best_plan_worker_prefix(
         obs_arr,
         masks,
         active,
+        teacher_logits,
         action_indices,
         valid,
         times,
@@ -987,6 +991,7 @@ def collect_plan_q_step(
     prefix_keys = jrandom.split(prefix_key, num_envs)
     worker_prefix_outputs = jax.vmap(
         lambda state, size, sample_key, prev_scoreboard, memory, plans: collect_best_plan_worker_prefix(
+            network,
             fixed_opponent_network,
             state,
             size,
@@ -1297,6 +1302,7 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         worker_prefix_obs,
         worker_prefix_masks,
         worker_prefix_active,
+        worker_prefix_teacher_logits,
         worker_prefix_action_indices,
         worker_prefix_valid,
         worker_prefix_time,
@@ -1349,6 +1355,11 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
             "worker_prefix_obs": flat(worker_prefix_obs).astype(np.float16),
             "worker_prefix_legal_mask": flat(worker_prefix_masks).astype(np.bool_),
             "worker_prefix_active": flat(worker_prefix_active).astype(np.bool_),
+            "worker_prefix_teacher_logits": (
+                np.clip(flat(worker_prefix_teacher_logits), -1.0e4, 1.0e4).astype(np.float16)
+                if logit_dtype == "float16"
+                else flat(worker_prefix_teacher_logits).astype(np.float32)
+            ),
             "worker_prefix_action_index": flat(worker_prefix_action_indices).astype(np.int32),
             "worker_prefix_valid": flat(worker_prefix_valid).astype(np.bool_),
             "worker_prefix_time": flat(worker_prefix_time).astype(np.int16),

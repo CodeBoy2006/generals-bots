@@ -25,11 +25,13 @@ import optax
 from adaptive_common import parse_grid_sizes
 from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_network
 from adaptive_search_distill import binary_cross_entropy_with_logits
+from adaptive_strategy_aux import STRATEGY_INTENT_FINISH
 from generals.agents.ppo_policy_agent import parse_policy_channels
 
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
+DATASET_FORMAT_MODES = ("strategy", "plan-q-prefix")
 ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win")
 BALANCE_STRATA_MODES = (
     "none",
@@ -334,6 +336,217 @@ def load_strategy_dataset(
     arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
     if max_samples is not None:
         arrays = {name: value[:max_samples] for name, value in arrays.items()}
+    dataset = {name: jnp.asarray(value) for name, value in arrays.items()}
+    if return_stats:
+        return dataset, load_stats
+    return dataset
+
+
+def heatmaps_from_indices(indices: np.ndarray, active: np.ndarray) -> np.ndarray:
+    """Build one-hot spatial maps from flattened cell indices."""
+    indices = indices.astype(np.int32)
+    num_samples, height, width = active.shape
+    heatmaps = np.zeros((num_samples, height * width), dtype=np.float32)
+    valid = (indices >= 0) & (indices < height * width)
+    if np.any(valid):
+        heatmaps[np.arange(num_samples)[valid], indices[valid]] = 1.0
+    return heatmaps.reshape(num_samples, height, width) * active.astype(np.float32)
+
+
+def load_plan_q_prefix_strategy_dataset(
+    paths: list[Path],
+    max_samples: int | None = None,
+    max_samples_per_shard: int | None = None,
+    seed: int = 0,
+    finish_head_mode: str = "binary",
+    action_ce_weight_mode: str = "all",
+    action_ce_path_contains: tuple[str, ...] = (),
+    min_row_turn: int = 0,
+    max_row_turn: int | None = None,
+    require_outcome_win: bool = False,
+    require_outcome_draw: bool = False,
+    require_outcome_nonwin: bool = False,
+    min_search_score_gap: float = 0.0,
+    drop_pass_labels: bool = True,
+    return_stats: bool = False,
+) -> dict[str, jnp.ndarray] | tuple[dict[str, jnp.ndarray], dict]:
+    """Load best-command prefix rows as main-policy supervised examples.
+
+    Plan-Q prefix shards store states reached while executing the best scored
+    source-target command.  This adapter turns those prefix states into the
+    same schema as strategy shards, using saved base-policy logits as the KL
+    anchor and the executed worker action as the small imitation target.
+    """
+    rng = np.random.default_rng(seed)
+    chunks: dict[str, list[np.ndarray]] = {
+        "obs": [],
+        "legal_mask": [],
+        "active": [],
+        "intent": [],
+        "finish": [],
+        "finish_weight": [],
+        "outcome": [],
+        "outcome_weight": [],
+        "enemy_general": [],
+        "source_heatmap": [],
+        "target_heatmap": [],
+        "teacher_logits": [],
+        "teacher_action": [],
+        "action_weight": [],
+        "grid_size": [],
+        "seat": [],
+        "domain": [],
+        "search_candidate_indices": [],
+        "search_prior_scores": [],
+        "search_scores": [],
+        "search_outcomes": [],
+        "search_score_gap": [],
+    }
+    load_stats = {
+        "rows": 0,
+        "kept": 0,
+        "sampled": 0,
+        "filters": [],
+    }
+    domain_to_id: dict[str, int] = {}
+    required = (
+        "worker_prefix_obs",
+        "worker_prefix_legal_mask",
+        "worker_prefix_active",
+        "worker_prefix_teacher_logits",
+        "worker_prefix_action_index",
+        "worker_prefix_valid",
+        "worker_prefix_time",
+        "worker_prefix_source_index",
+        "worker_prefix_target_index",
+        "worker_prefix_plan_outcome",
+        "worker_prefix_plan_q",
+        "grid_size",
+        "seat",
+    )
+
+    for path in paths:
+        shard = np.load(path)
+        missing = [name for name in required if name not in shard]
+        if missing:
+            raise KeyError(f"{path} is missing Plan-Q prefix field {missing[0]}")
+        base_obs = shard["worker_prefix_obs"].astype(np.float32)
+        if base_obs.shape[1] == 0:
+            continue
+        num_rows, prefix_steps = base_obs.shape[:2]
+        total_prefix = num_rows * prefix_steps
+        active = shard["worker_prefix_active"].astype(np.bool_)
+        labels = shard["worker_prefix_action_index"].astype(np.int32)
+        valid = shard["worker_prefix_valid"].astype(np.bool_)
+        times = shard["worker_prefix_time"].astype(np.int32)
+        outcomes = shard["worker_prefix_plan_outcome"].astype(np.int32)
+        logits = shard["worker_prefix_teacher_logits"].astype(np.float32)
+        pass_index = logits.shape[-1] - 1
+        keep = valid.copy()
+
+        def add_prefix_filter(name: str, mask: np.ndarray) -> None:
+            nonlocal keep
+            bool_mask = np.asarray(mask, dtype=np.bool_)
+            load_stats["filters"].append({"name": name, "matches": int(np.sum(bool_mask))})
+            keep &= bool_mask
+
+        if drop_pass_labels:
+            add_prefix_filter("non-pass-prefix-action", labels != pass_index)
+        if min_row_turn > 0:
+            add_prefix_filter(f"time>={min_row_turn}", times >= min_row_turn)
+        if max_row_turn is not None:
+            add_prefix_filter(f"time<={max_row_turn}", times <= max_row_turn)
+        if require_outcome_win:
+            add_prefix_filter("plan_outcome=win", outcomes == OUTCOME_WIN)
+        if require_outcome_draw:
+            add_prefix_filter("plan_outcome=draw", outcomes == OUTCOME_DRAW)
+        if require_outcome_nonwin:
+            add_prefix_filter("plan_outcome!=win", outcomes != OUTCOME_WIN)
+        if min_search_score_gap > 0.0:
+            if "plan_q_gap" not in shard:
+                raise KeyError(f"{path} is missing plan_q_gap for --min-search-score-gap")
+            gap = np.repeat(shard["plan_q_gap"].astype(np.float32)[:, None], prefix_steps, axis=1)
+            add_prefix_filter(f"plan_q_gap>={min_search_score_gap:g}", gap >= min_search_score_gap)
+
+        load_stats["rows"] += int(total_prefix)
+        load_stats["kept"] += int(np.sum(keep))
+        flat_keep = keep.reshape(-1)
+        if not np.any(flat_keep):
+            continue
+        selected = np.flatnonzero(flat_keep)
+        if max_samples_per_shard is not None and selected.size > max_samples_per_shard:
+            selected = np.sort(rng.choice(selected, size=max_samples_per_shard, replace=False))
+        load_stats["sampled"] += int(selected.shape[0])
+
+        flat_obs = base_obs.reshape(total_prefix, *base_obs.shape[2:])
+        flat_mask = shard["worker_prefix_legal_mask"].astype(np.bool_).reshape(
+            total_prefix,
+            *shard["worker_prefix_legal_mask"].shape[2:],
+        )
+        flat_active = active.reshape(total_prefix, *active.shape[2:])
+        flat_logits = logits.reshape(total_prefix, logits.shape[-1])
+        flat_labels = labels.reshape(-1)
+        flat_outcomes = outcomes.reshape(-1)
+        flat_sources = shard["worker_prefix_source_index"].astype(np.int32).reshape(-1)
+        flat_targets = shard["worker_prefix_target_index"].astype(np.int32).reshape(-1)
+        row_grid_size = np.repeat(shard["grid_size"].astype(np.int32)[:, None], prefix_steps, axis=1).reshape(-1)
+        row_seat = np.repeat(shard["seat"].astype(np.int32)[:, None], prefix_steps, axis=1).reshape(-1)
+        if "plan_q_gap" in shard:
+            row_gap = np.repeat(shard["plan_q_gap"].astype(np.float32)[:, None], prefix_steps, axis=1).reshape(-1)
+        else:
+            row_gap = np.zeros((total_prefix,), dtype=np.float32)
+
+        active_selected = flat_active[selected]
+        outcome_selected = flat_outcomes[selected]
+        finish_binary = (outcome_selected == OUTCOME_WIN).astype(np.float32)
+        if finish_head_mode == "multi-horizon":
+            finish_targets = np.repeat(finish_binary[:, None], 3, axis=1).astype(np.float32)
+        else:
+            finish_targets = finish_binary.astype(np.int32)
+
+        outcome_known = np.ones((selected.shape[0],), dtype=np.float32)
+        if action_ce_weight_mode == "non-draw":
+            action_weight = outcome_selected != OUTCOME_DRAW
+        elif action_ce_weight_mode in ("wins", "search-best-win"):
+            action_weight = outcome_selected == OUTCOME_WIN
+        else:
+            action_weight = np.ones_like(outcome_selected, dtype=np.bool_)
+        if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
+            action_weight = np.zeros_like(action_weight, dtype=np.bool_)
+
+        domain_name = dataset_domain_name(path)
+        domain_id = domain_to_id.setdefault(domain_name, len(domain_to_id))
+        chunks["obs"].append(flat_obs[selected].astype(np.float32))
+        chunks["legal_mask"].append(flat_mask[selected])
+        chunks["active"].append(active_selected)
+        chunks["intent"].append(
+            np.full((selected.shape[0],), STRATEGY_INTENT_FINISH, dtype=np.int32)
+        )
+        chunks["finish"].append(finish_targets)
+        chunks["finish_weight"].append(outcome_known)
+        chunks["outcome"].append(outcome_selected.astype(np.int32))
+        chunks["outcome_weight"].append(outcome_known)
+        chunks["enemy_general"].append(np.zeros(active_selected.shape, dtype=np.float32))
+        chunks["source_heatmap"].append(heatmaps_from_indices(flat_sources[selected], active_selected))
+        chunks["target_heatmap"].append(heatmaps_from_indices(flat_targets[selected], active_selected))
+        chunks["teacher_logits"].append(flat_logits[selected].astype(np.float32))
+        chunks["teacher_action"].append(flat_labels[selected].astype(np.int32))
+        chunks["action_weight"].append(action_weight.astype(np.float32))
+        chunks["grid_size"].append(row_grid_size[selected].astype(np.int32))
+        chunks["seat"].append(row_seat[selected].astype(np.int32))
+        chunks["domain"].append(np.full((selected.shape[0],), domain_id, dtype=np.int32))
+        chunks["search_candidate_indices"].append(np.zeros((selected.shape[0], 1), dtype=np.int32))
+        chunks["search_prior_scores"].append(np.full((selected.shape[0], 1), -1.0e4, dtype=np.float32))
+        chunks["search_scores"].append(np.full((selected.shape[0], 1), -1.0e4, dtype=np.float32))
+        chunks["search_outcomes"].append(np.full((selected.shape[0], 1), -1, dtype=np.int32))
+        chunks["search_score_gap"].append(row_gap[selected].astype(np.float32))
+
+    if not chunks["obs"]:
+        raise ValueError("row filters kept no Plan-Q prefix strategy samples")
+    arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
+    if max_samples is not None and arrays["obs"].shape[0] > max_samples:
+        indices = np.sort(rng.choice(arrays["obs"].shape[0], size=max_samples, replace=False))
+        arrays = {name: value[indices] for name, value in arrays.items()}
     dataset = {name: jnp.asarray(value) for name, value in arrays.items()}
     if return_stats:
         return dataset, load_stats
@@ -922,6 +1135,12 @@ def train_epoch(
 def parse_args():
     parser = argparse.ArgumentParser(description="Train adaptive strategy auxiliary heads from NPZ shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
+    parser.add_argument(
+        "--dataset-format",
+        choices=DATASET_FORMAT_MODES,
+        default="strategy",
+        help="Read ordinary strategy shards or Plan-Q best-command prefix rows.",
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-shard", type=int, default=None)
     parser.add_argument("--min-row-turn", type=int, default=0)
@@ -1029,6 +1248,11 @@ def parse_args():
     )
     parser.add_argument("--source-weight", type=float, default=0.0)
     parser.add_argument("--target-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--keep-pass-prefix-labels",
+        action="store_true",
+        help="For --dataset-format plan-q-prefix, keep pass labels instead of dropping them.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -1059,6 +1283,15 @@ def parse_args():
         parser.error("--require-outcome-win conflicts with draw/non-win outcome filters")
     if args.require_outcome_draw and args.require_win_or_finish_within_250:
         parser.error("--require-outcome-draw conflicts with --require-win-or-finish-within-250")
+    if args.dataset_format == "plan-q-prefix":
+        if args.require_search_best_win:
+            parser.error("--require-search-best-win is not available for --dataset-format plan-q-prefix")
+        if args.require_finish_within_250 or args.require_win_or_finish_within_250:
+            parser.error("finish-window filters are not available for --dataset-format plan-q-prefix")
+        if args.require_contact or args.min_visible_enemy_cells > 0 or args.min_visible_enemy_density > 0.0:
+            parser.error("contact/visible-enemy filters are not available for --dataset-format plan-q-prefix")
+        if args.label_source != "trajectory":
+            parser.error("--dataset-format plan-q-prefix uses plan outcomes directly; keep --label-source trajectory")
     if args.input_channels <= 0:
         parser.error("--input-channels must be positive")
     if args.init_input_channels is not None and args.init_input_channels <= 0:
@@ -1116,29 +1349,48 @@ def parse_args():
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
-    dataset, load_stats = load_strategy_dataset(
-        paths,
-        args.max_samples,
-        args.max_samples_per_shard,
-        args.seed,
-        args.finish_head_mode,
-        args.action_ce_weight_mode,
-        args.label_source,
-        tuple(args.action_ce_path_contains),
-        args.min_row_turn,
-        args.max_row_turn,
-        args.require_contact,
-        args.min_visible_enemy_cells,
-        args.min_visible_enemy_density,
-        args.require_outcome_win,
-        args.require_outcome_draw,
-        args.require_outcome_nonwin,
-        args.require_search_best_win,
-        args.require_finish_within_250,
-        args.require_win_or_finish_within_250,
-        args.min_search_score_gap,
-        True,
-    )
+    if args.dataset_format == "plan-q-prefix":
+        dataset, load_stats = load_plan_q_prefix_strategy_dataset(
+            paths,
+            args.max_samples,
+            args.max_samples_per_shard,
+            args.seed,
+            args.finish_head_mode,
+            args.action_ce_weight_mode,
+            tuple(args.action_ce_path_contains),
+            args.min_row_turn,
+            args.max_row_turn,
+            args.require_outcome_win,
+            args.require_outcome_draw,
+            args.require_outcome_nonwin,
+            args.min_search_score_gap,
+            not args.keep_pass_prefix_labels,
+            True,
+        )
+    else:
+        dataset, load_stats = load_strategy_dataset(
+            paths,
+            args.max_samples,
+            args.max_samples_per_shard,
+            args.seed,
+            args.finish_head_mode,
+            args.action_ce_weight_mode,
+            args.label_source,
+            tuple(args.action_ce_path_contains),
+            args.min_row_turn,
+            args.max_row_turn,
+            args.require_contact,
+            args.min_visible_enemy_cells,
+            args.min_visible_enemy_density,
+            args.require_outcome_win,
+            args.require_outcome_draw,
+            args.require_outcome_nonwin,
+            args.require_search_best_win,
+            args.require_finish_within_250,
+            args.require_win_or_finish_within_250,
+            args.min_search_score_gap,
+            True,
+        )
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
     if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:
         raise ValueError("--label-source search-best requires shards with search_best_outcome labels")
@@ -1155,6 +1407,7 @@ def main():
     print("Adaptive strategy supervised training")
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
+    print(f"Data format:   {args.dataset_format}")
     print(f"Samples:       {dataset['obs'].shape[0]}")
     print(
         "Row filters:   "

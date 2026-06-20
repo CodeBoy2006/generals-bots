@@ -1190,3 +1190,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop Worker-rerank scale/data sweeps. Use prefix data for main-policy/finish gating or a command policy that learns when to enter and exit a plan.
 - **Context:** Belief/main-stack collection produced `186` winning states and `2176` non-pass prefix labels with mean gap `0.732`; the Worker fit offline (`97.8%` action/useful), but fixed-v5 max250 stayed weak: seed `93900` min `7.81%` vs baseline `4.69%`, and seed `93700` regressed to `9.38%` vs baseline `10.94%`.
+
+## [2026-06-20 13:57] Prefix Main-Policy Supervision
+- **Changes:** Added per-prefix base-policy logits to `adaptive_plan_q_dataset.py --save-worker-prefix-steps`, and added `adaptive_strategy_supervised.py --dataset-format plan-q-prefix` so executed best-command prefixes can train the main policy with saved-logit KL plus small action CE. Updated README and the strategy log with the new prefix main-policy route and GPU probe results.
+- **Status:** Completed
+- **Next Steps:** Do not promote the single-source prefix CE checkpoints. Next mix prefix rows with Expander/adaptive preservation rows or add per-size/seat protected loss so fixed-v5 anti-draw gains do not transfer as 12/16 regressions.
+- **Context:** GPU collection `adaptive-plan-q-prefix-logits-belief-win-v0` produced `194` high-gap best-plan-win states and `2328` non-pass prefix labels with saved `2049`-action logits. The CE/KL prefix probe improved fixed-v5 max250 128-row min from `8.59%` to `13.28%` and lowered draw, but Expander 8/12/16 64-row smoke fell from `57.81%` min to `51.56%`. A conservative CE run preserved p0 poorly (`8.59%` min), so the useful signal is real but needs mixed-batch preservation before larger eval.
