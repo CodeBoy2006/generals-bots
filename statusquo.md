@@ -1334,3 +1334,9 @@
 - **Status:** Completed
 - **Next Steps:** Future gate work should use direct adapter continuation labels (`adapter_improves_continuation` / `adapter_converts_to_win`) or a larger adapter-matching conversion set before running another 512-row gate.
 - **Context:** Documentation now reflects that fixed-v5 diagnostics stay on `max500`, static conversion adapter v1 remains current best, and learned gate v0/improve-v0 are diagnostic artifacts under ignored `runs/`.
+
+## [2026-06-20 21:16] Max500 Adapter-Causal Gate Smoke
+- **Changes:** Collected a direct adapter-vs-base max500 counterfactual shard under `runs/adaptive-online-search-fixed-v5-max500-adaptercf-smoke/` and trained low/high-LR adapter-causal gates under `runs/adaptive-policy-adapter-gate-online-max500-adaptercf-v0/` and `v1/`. No model artifacts were placed in cache directories.
+- **Status:** Completed
+- **Next Steps:** Do not promote the adapter-causal gate. Keep static v1 as the current max500 adapter candidate, and use adapter-vs-base continuation labels for policy/adapter training or richer gate features rather than threshold sweeps.
+- **Context:** The adapter counterfactual shard had strong labels (`894` rows, `adapter_improves=32.2%`, `adapter_converts=16.9%`), but the current 18 gate features separated weakly. Low-LR gate v1 at threshold `0.65` triggered only `13%`-`15%` of moves and scored fixed-v5 max500 128-row min `28.91%`, below same-seed static v1 `40.62%`. The label source is promising; the current gate feature set is not.
