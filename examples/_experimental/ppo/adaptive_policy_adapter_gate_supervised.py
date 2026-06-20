@@ -623,6 +623,12 @@ def parse_args():
         help="For --dataset-format online-search, shard boolean field that marks positive conversion/improvement rows.",
     )
     parser.add_argument(
+        "--online-action-field",
+        choices=ONLINE_ACTION_FIELDS,
+        default="search_action_index",
+        help="For --dataset-format online-search, action-index field the adapter top action should match for positives.",
+    )
+    parser.add_argument(
         "--min-online-score-delta",
         type=float,
         default=0.0,
@@ -824,6 +830,7 @@ def main():
             args.max_examples,
             args.seed,
             args.online_positive_field,
+            args.online_action_field,
             args.min_online_score_delta,
             args.require_online_search_used,
             not args.allow_online_adapter_mismatch,
@@ -918,6 +925,7 @@ def main():
         "max_prefix_plan_time_to_terminal": args.max_prefix_plan_time_to_terminal,
         "max_prefix_step": args.max_prefix_step,
         "online_positive_field": args.online_positive_field,
+        "online_action_field": args.online_action_field,
         "min_online_score_delta": args.min_online_score_delta,
         "require_online_search_used": args.require_online_search_used,
         "allow_online_adapter_mismatch": args.allow_online_adapter_mismatch,
