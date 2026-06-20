@@ -1394,3 +1394,9 @@
 - **Status:** Completed
 - **Next Steps:** Use rpa2 as a high-budget teacher for trace/continuation collection, not as the fast inner-loop gate. Next collect rpa2 max500 conversion traces and train a conditional/planner-aware controller from those labels.
 - **Context:** `adaptive-unet-ppo-v4` must load as shared HL-Gauss value (`--value-loss hl-gauss --value-bins 128`) with U-Net channels `64,96,128,64`; per-size value flags shift the Equinox tree. Correct rpa2 chunked eval at 128 games/seat, `eval_batch_size=32`, seed `104040`: p0 `72.66%`, p1 `56.25%`, min `56.25%`, draw `2.34%/6.25%`.
+
+## [2026-06-20 22:55] rpa2 Max500 Conversion Trace v0
+- **Changes:** Collected `runs/adaptive-online-search-fixed-v5-max500-rpa2-v0/` with high-budget rpa2 online search and 500-step conversion labels, then logged aggregate shard statistics.
+- **Status:** Completed
+- **Next Steps:** Scale this data to at least 2k-5k rows or 250+ conversion positives, then train a conditional search-entry/controller head. Avoid another full replace-policy CE run on this small shard.
+- **Context:** Four GPU shards saved 471 rows with balanced seats (`223/248`), `63.69%` search action changes, `17.41%` search-improves-continuation, and `12.95%` search-converts-to-win (`61` positives). Search continuation wins were `146` vs base continuation wins `138`; the value is in conversion rows, not raw outcome count.

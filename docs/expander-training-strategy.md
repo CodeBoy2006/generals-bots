@@ -15404,3 +15404,85 @@ occasional confirmation, not as the inner loop for every candidate.  The next
 training step should collect rpa2 max500 conversion traces and train a
 conditional/planner-aware controller against those labels.
 ```
+
+### 2026-06-20 22:55 - rpa2 Max500 Conversion Trace v0
+
+Collection:
+
+```text
+output:
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-v0/
+
+base:
+  adaptive-unet-ppo-v4
+
+adapter:
+  adaptive-online-search-conversion-adapter-v1
+
+opponent:
+  fixed 8x8 v5 sample
+
+search:
+  top_k=4
+  rollout_steps=16
+  rollouts_per_action=2
+  min_turn=80
+  require_contact=true
+  max_grid_size=8
+
+conversion labels:
+  conversion_rollout_steps=500
+  truncation=500
+
+batch:
+  num_envs=8
+  num_steps=16
+  num_shards=4
+  learner_seat=mixed
+  seed=104200
+```
+
+Shard output:
+
+```text
+saved rows:
+  shard0 128/128
+  shard1 127/128
+  shard2 112/128
+  shard3 104/128
+  total 471
+
+aggregate:
+  search_used 471 / 471 = 100.00%
+  search_action_changed 300 / 471 = 63.69%
+  search_improves_continuation 82 / 471 = 17.41%
+  search_converts_to_win 61 / 471 = 12.95%
+  search_converts_draw_to_win 19 / 471 = 4.03%
+  mean search_score_gap 4.403
+  median search_score_gap 0.039
+  mean search_continuation_score_delta 4.119
+
+seat balance:
+  p0 rows 223, converts 11.66%, improves 19.28%
+  p1 rows 248, converts 14.11%, improves 15.73%
+
+base continuation outcome:
+  loss 287
+  draw 46
+  win 138
+
+search continuation outcome:
+  loss 276
+  draw 49
+  win 146
+```
+
+Decision:
+
+```text
+This is a useful starter controller/distillation dataset: it is seat-balanced,
+has a high action-change rate, and includes 61 max500 search-conversion wins.
+It is still too small for a main-policy update.  Next scale target should be
+at least 2k-5k rows or 250+ conversion positives, then train a conditional
+search-entry/controller head rather than a full replace-policy CE checkpoint.
+```
