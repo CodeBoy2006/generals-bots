@@ -25,6 +25,7 @@ from adaptive_common import (
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
     adaptive_expander_target_probs,
+    adaptive_index_to_action,
     adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
@@ -41,7 +42,7 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
-from adaptive_search_distill import adaptive_rollout_search_candidates
+from adaptive_search_distill import adaptive_rollout_search_candidates, adaptive_score_observation, outcome_class_from_winner
 from adaptive_strategy_aux import weak_intent_label
 from adaptive_teacher_imitation import (
     fixed_policy_teacher_logits,
@@ -61,7 +62,7 @@ from train_adaptive import (
     teacher_obs_from_student_obs,
 )
 
-TEACHER_KINDS = ("adaptive", "fixed", "expander", "search")
+TEACHER_KINDS = ("adaptive", "fixed", "expander", "search", "fixed-search")
 TEACHER_KIND_TO_ID = {name: index for index, name in enumerate(TEACHER_KINDS)}
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
 
@@ -143,7 +144,7 @@ def teacher_logits_for_batch(
             masks,
             active,
         )
-    if teacher_kind_id == TEACHER_KIND_TO_ID["fixed"]:
+    if teacher_kind_id in (TEACHER_KIND_TO_ID["fixed"], TEACHER_KIND_TO_ID["fixed-search"]):
         del effective_sizes
         return jax.vmap(
             lambda obs: fixed_policy_teacher_logits(fixed_teacher_network, obs, fixed_teacher_grid_size, pad_size)
@@ -155,6 +156,101 @@ def teacher_logits_for_batch(
         )
         return jnp.log(jnp.maximum(probs, 1.0e-8))
     raise ValueError(f"unknown teacher kind id: {teacher_kind_id}")
+
+
+@eqx.filter_jit
+def fixed_rollout_search_candidates(
+    network,
+    state,
+    key,
+    player,
+    top_k,
+    rollout_steps,
+    rollouts_per_action,
+    policy_mode,
+    army_weight,
+    land_weight,
+    prior_weight,
+    terminal_score,
+    fixed_grid_size: int,
+    pad_size: int,
+):
+    """Return top-k rollout-search candidates for an 8x8 fixed-policy teacher.
+
+    The surrounding adaptive dataset uses padded states and adaptive action
+    indices. This adapter keeps the fixed teacher on cropped observations while
+    executing the selected actions in the padded game state.
+    """
+    obs = game.get_observation(state, player)
+    logits = fixed_policy_teacher_logits(network, obs, fixed_grid_size, pad_size)
+    prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
+    candidate_actions = jax.vmap(lambda idx: adaptive_index_to_action(idx, pad_size))(candidate_indices)
+
+    opponent_player = 1 - player
+    opponent_obs = game.get_observation(state, opponent_player)
+    key, opponent_key = jrandom.split(key)
+    opponent_first_action = policy_network_action(
+        network,
+        opponent_key,
+        crop_observation(opponent_obs, fixed_grid_size),
+        policy_mode,
+    )
+
+    def rollout_result(initial_state, rollout_key):
+        def body(carry, _):
+            rollout_state, step_key = carry
+            step_key, k0, k1 = jrandom.split(step_key, 3)
+            obs_p0 = game.get_observation(rollout_state, 0)
+            obs_p1 = game.get_observation(rollout_state, 1)
+            action_p0 = policy_network_action(
+                network,
+                k0,
+                crop_observation(obs_p0, fixed_grid_size),
+                policy_mode,
+            )
+            action_p1 = policy_network_action(
+                network,
+                k1,
+                crop_observation(obs_p1, fixed_grid_size),
+                policy_mode,
+            )
+            next_state, _ = game.step(rollout_state, jnp.stack([action_p0, action_p1]))
+            already_done = game.get_info(rollout_state).is_done
+            final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
+            return (final_state, step_key), None
+
+        (final_state, _), _ = jax.lax.scan((body), (initial_state, rollout_key), None, length=rollout_steps)
+        final_info = game.get_info(final_state)
+        final_obs = game.get_observation(final_state, player)
+        score = adaptive_score_observation(final_info, final_obs, player, army_weight, land_weight, terminal_score)
+        outcome = outcome_class_from_winner(jnp.where(final_info.is_done, final_info.winner, -1), player)
+        return score, outcome
+
+    def candidate_score(action, prior_score, candidate_key):
+        first_actions = jax.lax.cond(
+            player == 0,
+            lambda _: jnp.stack([action, opponent_first_action]),
+            lambda _: jnp.stack([opponent_first_action, action]),
+            None,
+        )
+        next_state, first_info = game.step(state, first_actions)
+        rollout_keys = jrandom.split(candidate_key, rollouts_per_action)
+        scores, outcomes = jax.vmap(lambda rollout_key: rollout_result(next_state, rollout_key))(rollout_keys)
+        best_rollout = jnp.argmax(scores)
+        rollout_outcome = outcomes[best_rollout]
+        first_outcome = outcome_class_from_winner(first_info.winner, player)
+        first_terminal = jnp.where(
+            first_info.winner == player,
+            terminal_score,
+            jnp.where(first_info.winner == opponent_player, -terminal_score, 0.0),
+        )
+        candidate_score = first_terminal + jnp.mean(scores) + prior_weight * prior_score
+        candidate_outcome = jnp.where(first_info.is_done, first_outcome, rollout_outcome)
+        return candidate_score, candidate_outcome
+
+    candidate_keys = jrandom.split(key, top_k)
+    scores, outcomes = jax.vmap(candidate_score)(candidate_actions, prior_scores, candidate_keys)
+    return candidate_actions, candidate_indices, prior_scores, scores, outcomes
 
 
 @eqx.filter_jit
@@ -358,6 +454,44 @@ def collect_strategy_step(
         )
         search_score_gaps = jnp.where(finite_count > 1.0, search_best_scores - second_scores, 0.0)
         search_best_outcomes = jnp.take_along_axis(search_outcomes, best_search_positions[:, None], axis=1)[:, 0]
+    elif teacher_kind_id == TEACHER_KIND_TO_ID["fixed-search"]:
+        search_keys = jrandom.split(search_key, num_envs)
+        search_actions, search_candidate_indices, search_prior_scores, search_scores, search_outcomes = jax.vmap(
+            lambda state, action_key: fixed_rollout_search_candidates(
+                fixed_teacher_network,
+                state,
+                action_key,
+                learner_player,
+                search_top_k,
+                search_rollout_steps,
+                search_rollouts_per_action,
+                teacher_policy_mode_id,
+                search_army_weight,
+                search_land_weight,
+                search_prior_weight,
+                search_terminal_score,
+                fixed_teacher_grid_size,
+                pad_size,
+            )
+        )(states, search_keys)
+        best_search_positions = jnp.argmax(search_scores, axis=-1)
+        learner_actions = jnp.take_along_axis(search_actions, best_search_positions[:, None, None], axis=1)[:, 0]
+        search_best_scores = jnp.take_along_axis(search_scores, best_search_positions[:, None], axis=1)[:, 0]
+        valid_search_candidates = search_prior_scores > -1.0e8
+        finite_count = jnp.sum(valid_search_candidates.astype(jnp.float32), axis=-1)
+        finite_score_sum = jnp.sum(jnp.where(valid_search_candidates, search_scores, 0.0), axis=-1)
+        search_mean_scores = finite_score_sum / jnp.maximum(finite_count, 1.0)
+        candidate_positions = jnp.arange(search_top_k)[None, :]
+        second_scores = jnp.max(
+            jnp.where(
+                valid_search_candidates & (candidate_positions != best_search_positions[:, None]),
+                search_scores,
+                -jnp.inf,
+            ),
+            axis=-1,
+        )
+        search_score_gaps = jnp.where(finite_count > 1.0, search_best_scores - second_scores, 0.0)
+        search_best_outcomes = jnp.take_along_axis(search_outcomes, best_search_positions[:, None], axis=1)[:, 0]
     else:
         learner_actions = prior_actions
         search_candidate_indices = jnp.zeros((num_envs, search_top_k), dtype=jnp.int32)
@@ -371,7 +505,7 @@ def collect_strategy_step(
         search_best_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
     teacher_indices = jax.vmap(lambda action: adaptive_action_to_index(action, pad_size))(learner_actions)
     prior_greedy_indices = jnp.argmax(teacher_logits, axis=-1).astype(jnp.int32)
-    if teacher_kind_id == TEACHER_KIND_TO_ID["search"]:
+    if teacher_kind_id in (TEACHER_KIND_TO_ID["search"], TEACHER_KIND_TO_ID["fixed-search"]):
         teacher_greedy_indices = teacher_indices
     else:
         teacher_greedy_indices = prior_greedy_indices
@@ -979,10 +1113,10 @@ def parse_args():
         parser.error("--truncation must be positive")
     if args.teacher_kind in ("adaptive", "search") and args.teacher_model_path is None:
         parser.error("--teacher-kind adaptive/search requires --teacher-model-path")
-    if args.teacher_kind == "fixed" and args.fixed_teacher_model_path is None:
-        parser.error("--teacher-kind fixed requires --fixed-teacher-model-path")
-    if args.teacher_kind == "fixed" and len(args.grid_sizes) != 1:
-        parser.error("--teacher-kind fixed requires exactly one --grid-sizes value")
+    if args.teacher_kind in ("fixed", "fixed-search") and args.fixed_teacher_model_path is None:
+        parser.error(f"--teacher-kind {args.teacher_kind} requires --fixed-teacher-model-path")
+    if args.teacher_kind in ("fixed", "fixed-search") and len(args.grid_sizes) != 1:
+        parser.error(f"--teacher-kind {args.teacher_kind} requires exactly one --grid-sizes value")
     if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
         parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.teacher_input_channels is not None and args.teacher_input_channels <= 0:
@@ -1021,8 +1155,11 @@ def parse_args():
         parser.error("--terminal-window must be non-negative")
     if args.min_search_score_gap < 0.0:
         parser.error("--min-search-score-gap must be non-negative")
-    if (args.min_search_score_gap > 0.0 or args.require_search_best_win) and args.teacher_kind != "search":
-        parser.error("search score filters require --teacher-kind search")
+    if (args.min_search_score_gap > 0.0 or args.require_search_best_win) and args.teacher_kind not in (
+        "search",
+        "fixed-search",
+    ):
+        parser.error("search score filters require --teacher-kind search or fixed-search")
     if args.draw_only and (args.require_win or args.require_finish_within_250 or args.require_win_or_finish_within_250):
         parser.error("--draw-only conflicts with win/finish save filters")
     return args
@@ -1100,7 +1237,7 @@ def main():
             init_network_arch=args.teacher_network_arch,
         )
         teacher_input_channels = adaptive_network_input_channels(teacher_network)
-    elif args.teacher_kind == "fixed":
+    elif args.teacher_kind in ("fixed", "fixed-search"):
         fixed_teacher_network = PolicyValueNetwork(
             teacher_key,
             grid_size=fixed_teacher_grid_size,

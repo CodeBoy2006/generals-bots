@@ -1160,3 +1160,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop primitive action CE and short 8-only fixed-v5 PPO for this gate. Move next to cleaner counterfactual execution labels: advantage-labeled changed actions, command-gated executor positives, or source-target outcome-Q where positives are tied to later wins rather than single-step teacher choices.
 - **Context:** Full-trunk decisive trajectory imitation hurt Expander (`65.62%` min). Policy-head variants preserved Expander but fixed-v5 gains were 128-row false positives (`v2` 256-row min `8.20%`, `v3` 256-row min `7.03%`). Current search-win shards already store search-best actions as `teacher_action_index` in ~`96.7%`-`99.98%` of valid rows. 8-only PPO with EMA, last iterate, and draw penalty all stayed below the safe-v3 fixed-v5 gate; draw penalty did not reduce draw enough.
+
+## [2026-06-20 12:44] Fixed-v5 Search Strategy Teacher
+- **Changes:** Added `adaptive_strategy_dataset.py --teacher-kind fixed-search` so an 8x8 fixed `PolicyValueNetwork` teacher can produce rollout-search top-k labels in adaptive padded action space. Updated README, Chinese manual, and the strategy log with GPU A1 fixed-v5 rollout-search collection/training results.
+- **Status:** Completed
+- **Next Steps:** Do not promote the A1 policy-head checkpoints or sweep action CE. Use fixed-search data for finish/value/command labels, command-gated executor positives, or advantage-labeled changed actions; revisit the legacy fixed-v5 imitation checkpoint only if a loader adapter is worth the time.
+- **Context:** A1 collection wrote `2,168` high-gap/search-win rows under ignored `runs/adaptive-fixed-v5-searchwin-a1-v1/`. Best smoke was base-KL policy-head v2 at fixed-v5 max250 128-row min `12.50%`, but Expander 128-row min regressed to `70.31%`. Starting from `adaptive-fixed-v5-imitation-v5` iter 30 failed on an old value-head shape mismatch.

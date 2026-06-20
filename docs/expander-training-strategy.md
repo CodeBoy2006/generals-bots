@@ -11302,3 +11302,150 @@ Next useful direction:
   command-gated executor where positives are "changed action later wins" rather
   than "teacher/search picked this single action".
 ```
+
+### 2026-06-20: Fixed-v5 Rollout-Search Strategy Teacher
+
+This round added a true fixed-v5 rollout-search data source for strategy shards.
+The previous fixed-v5 search-win shards used safe-v3 as the search prior; this
+new path lets the dataset collector query a fixed 8x8 `PolicyValueNetwork`
+teacher, score its top-k actions with short rollouts, and store the best action
+as an adaptive padded action index.
+
+Implementation:
+
+```text
+adaptive_strategy_dataset.py:
+  teacher_kind += fixed-search
+  fixed_rollout_search_candidates(...)
+
+fixed-search behavior:
+  crop padded observation to fixed teacher grid
+  run fixed_policy_teacher_logits
+  map top-k fixed action indices back to adaptive action indices
+  execute candidates in the padded GameState
+  save search_candidate_indices / scores / outcomes / gap
+
+validation:
+  py_compile passed
+  smoke shard wrote 32 rows under runs/adaptive-fixed-search-dataset-smoke/
+```
+
+A1 fixed-v5 rollout-search collection:
+
+```text
+run:
+  runs/adaptive-fixed-v5-searchwin-a1-v1/
+
+teacher:
+  /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+
+opponent:
+  same raw fixed-v5 policy
+
+collection:
+  num_envs 32
+  shards 16
+  steps/shard 256
+  grid_sizes 8
+  top_k 4
+  rollout_steps 8
+  rollouts/action 1
+  turn >= 80
+  contact
+  visible_enemy_cells >= 1
+  search_best_outcome == win
+  search_score_gap >= 500
+
+rows:
+  total 2168
+  p0 1263
+  p1 905
+  sample wins 1557
+  sample draws 377
+  mean search gap 1058.7
+  turn range 80-250
+```
+
+Policy-head-only probes from safe-v3:
+
+```text
+runs/adaptive-fixed-v5-search-a1-policyhead-v0/
+  init: adaptive-midgame-contact-searchwin-imitation-v3
+  update_scope: policy-heads
+  policy_kl: 1.0
+  action_ce: 0.30
+
+fixed-v5 max250, 128 games/seat:
+  p0 11.72%
+  p1 11.72%
+  min 11.72%
+  draw 50.78% / 45.31%
+
+Expander adaptive, 128 games/row:
+  min 74.22%
+
+runs/adaptive-fixed-v5-search-a1-policyhead-v1/
+  same init and data
+  policy_kl: 0.30
+  action_ce: 0.60
+
+fixed-v5 max250, 128 games/seat:
+  min 9.38%
+
+Expander adaptive, 128 games/row:
+  min 75.00%
+```
+
+Base-KL relabel probe:
+
+```text
+data:
+  runs/adaptive-fixed-v5-searchwin-a1-v1-basekl/
+
+change:
+  replaced fixed-v5 teacher_logits with safe-v3 logits
+  kept fixed-v5 rollout-search best action labels
+
+run:
+  runs/adaptive-fixed-v5-search-a1-basekl-policyhead-v2/
+
+training:
+  update_scope: policy-heads
+  policy_kl: 1.0
+  action_ce: 0.30
+
+fixed-v5 max250, 128 games/seat:
+  p0 12.50%
+  p1 12.50%
+  min 12.50%
+  draw 50.00% / 57.81%
+
+Expander adaptive, 128 games/row:
+  min 70.31%
+```
+
+Attempting to start from `adaptive-fixed-v5-imitation-v5` iter 30 failed before
+training because the legacy fixed-v5 imitation checkpoint stores the older value
+head shape (`size_value_linear1[0].weight` on disk is `(128,64)` while the
+current loader expects `(64,128)`). Revisit only if a legacy checkpoint adapter
+is worth the time.
+
+Conclusion:
+
+```text
+fixed-search is a useful data source.
+It creates direct v5 + rollout-search labels without using safe-v3 as the
+search prior, and the collector is now available for future shards.
+
+Do not promote any A1 policy-head checkpoint.
+Best fixed-v5 smoke was v2 at 12.50% min, but it regressed Expander to 70.31%.
+The result confirms the pattern from earlier runs: primitive action CE can move
+the head but does not reliably transfer rollout-search strength into gameplay.
+
+Next useful use of fixed-search data:
+  finish/value/command labels
+  command-gated executor positives
+  advantage-labeled changed actions
+  legacy-loader experiment only if we need to fine-tune the fixed-v5 imitation
+  checkpoint directly
+```
