@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jrandom
+import numpy as np
 
 from generals.agents.ppo_policy_agent import DEFAULT_POLICY_CHANNELS, PolicyChannels, parse_policy_channels
 
@@ -962,6 +963,7 @@ def load_or_create_adaptive_network(
     init_pyramid_context: bool | None = None,
     network_arch: str = "cnn",
     init_network_arch: str | None = None,
+    drop_mismatched_init_leaves: bool = False,
 ):
     """Create an adaptive network and optionally restore it from an Equinox checkpoint."""
     if network_arch not in ("cnn", "unet"):
@@ -1071,13 +1073,38 @@ def load_or_create_adaptive_network(
             context_residual=parsed_init_context_residual,
             pyramid_context=parsed_init_pyramid_context,
         )
-        source_network = eqx.tree_deserialise_leaves(path, source_network)
+        source_network = _deserialise_adaptive_leaves(
+            path,
+            source_network,
+            drop_mismatched_leaves=drop_mismatched_init_leaves,
+        )
         if network_arch == "cnn":
             return expand_adaptive_network_channels(network, source_network)
         if network_arch == "unet":
             return expand_adaptive_unet_network(network, source_network)
         raise ValueError(f"unknown adaptive network architecture: {network_arch}")
-    return eqx.tree_deserialise_leaves(path, network)
+    return _deserialise_adaptive_leaves(path, network, drop_mismatched_leaves=drop_mismatched_init_leaves)
+
+
+def _deserialise_adaptive_leaves(path: Path, like, drop_mismatched_leaves: bool = False):
+    """Load an adaptive checkpoint, optionally discarding legacy shape-mismatched arrays."""
+    if not drop_mismatched_leaves:
+        return eqx.tree_deserialise_leaves(path, like)
+
+    def filter_spec(file, leaf):
+        if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)):
+            loaded = np.load(file)
+            if loaded.shape != leaf.shape:
+                return leaf
+            return jnp.asarray(loaded, dtype=leaf.dtype)
+        if isinstance(leaf, np.ndarray):
+            loaded = np.load(file)
+            if loaded.shape != leaf.shape:
+                return leaf
+            return loaded.astype(leaf.dtype, copy=False)
+        return eqx.default_deserialise_filter_spec(file, leaf)
+
+    return eqx.tree_deserialise_leaves(path, like, filter_spec=filter_spec)
 
 
 def _normalize_value_head_sizes(value_head_sizes: tuple[int, ...] | list[int] | None) -> tuple[int, ...]:

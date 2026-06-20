@@ -12214,3 +12214,146 @@ Collect more genuine midgame decisive trajectory data, not heuristic Plan-Q pref
 Train/validate adapters per size before mixing them into the base.
 Run GPU evals serially; parallel JAX evals triggered CUDA allocation warnings on the 16GB card.
 ```
+
+## 2026-06-20 14:46 - Legacy Fixed-v5 Adapter Loader
+
+Implementation changes:
+
+```text
+adaptive_network.py:
+  added explicit drop-mismatched legacy checkpoint loading
+  matching leaves are restored
+  shape-mismatched leaves are reinitialized after consuming the serialized array
+
+evaluate_adaptive_policy.py:
+  added --drop-mismatched-init-leaves
+  added --policy-adapter-mode delta|blend|replace
+```
+
+Reason:
+
+```text
+runs/adaptive-fixed-v5-imitation-v5/ckpts/
+  generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx
+
+could not load into the current template because one old value-head leaf had
+disk shape (128,64) while the current template expected (64,128). The policy
+trunk and policy head were still useful, so the correct recovery path is to
+drop only mismatched leaves under an explicit evaluation flag.
+```
+
+Loader validation:
+
+```text
+legacy iter30 direct load with --drop-mismatched-init-leaves:
+  fixed-v5 max250, 128 games/seat, seed 95820
+  p0 17.19%
+  p1 16.41%
+  min 16.41%
+```
+
+Same-seed fixed-v5 gate:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-fixed-v5-imitation-v5/ckpts/
+    generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx
+
+inference:
+  --policy-adapter-scale 1.0
+  --policy-adapter-mode replace
+  --policy-adapter-max-grid-size 8
+  --drop-mismatched-init-leaves
+
+fixed-v5 max250, 512 games/seat, seed 95920:
+  v4 base:
+    p0 8.79%
+    p1 10.94%
+    min 8.79%
+    draw about 54-56%
+
+  v4 + legacy adapter:
+    p0 11.91%
+    p1 16.21%
+    min 11.91%
+    draw about 65-69%
+```
+
+`--policy-adapter-mode delta --policy-adapter-scale 1.0` produced the same
+fixed-v5 result as `replace`, which is expected: a scale-1 centered legal delta
+is the adapter logits plus a legal-action constant.
+
+Same-seed Expander gate:
+
+```text
+Expander adaptive, 512 games/row, seed 95940:
+
+v4 base:
+  8p0 71.88%
+  8p1 77.15%
+  12p0 85.35%
+  12p1 82.23%
+  16p0 78.91%
+  16p1 81.45%
+  min 71.88%
+
+v4 + legacy adapter, max-grid-size 8:
+  8p0 88.48%
+  8p1 89.26%
+  12p0 85.35%
+  12p1 82.23%
+  16p0 78.91%
+  16p1 81.45%
+  min 78.91%
+```
+
+Interpretation:
+
+```text
+The legacy fixed-v5 imitation checkpoint is currently the strongest 8x8 adapter.
+It lifts the six-row Expander 512-row min from 71.88% to 78.91% by fixing the
+8x8 rows, while 12/16 rows remain bit-for-bit unchanged under the size gate.
+
+This is not a fixed-v5 max250 breakthrough. The fixed-v5 win-rate gain is real
+but draw-heavy; the short-gate problem is still finishability, not just survival.
+```
+
+Current best deployment-shaped Expander wrapper:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+8x8 adapter:
+  runs/adaptive-fixed-v5-imitation-v5/ckpts/
+    generals-adaptive-fixed-v5-imitation-v5-iter-000030.eqx
+
+evaluation flags:
+  --network-arch unet
+  --channels 64,96,128,64
+  --scoreboard-history
+  --fog-memory
+  --value-heads per-size
+  --value-head-sizes 8,12,16
+  --value-loss mse
+  --init-value-heads shared
+  --init-value-loss mse
+  --policy-adapter-path <legacy iter30>
+  --policy-adapter-scale 1.0
+  --policy-adapter-mode replace
+  --policy-adapter-max-grid-size 8
+  --drop-mismatched-init-leaves
+```
+
+Do next:
+
+```text
+Keep this wrapper as the current Expander diagnostic baseline.
+Use the legacy adapter as an 8x8 expert/protection source when training the next
+midgame decisive policy, but do not spend more time on policy-adapter scale
+sweeps. The next fixed-v5 push still needs decisive trajectory / finishability
+supervision rather than more inference-time logit mixing.
+```

@@ -1202,3 +1202,9 @@
 - **Status:** Completed
 - **Next Steps:** Use `v4 base + midgame-v3 adapter max-grid-size 8` as the current diagnostic wrapper, but do not call it a fixed-v5 breakthrough. Collect more genuine midgame decisive trajectories and train per-size adapters before mixing them into the base.
 - **Context:** GPU v4 heuristic Plan-Q prefix data produced `432` best-plan-win states and `5051` non-pass rows, but the pure v4 prefix adapter was negative at fixed-v5 max250 256-row (`base min 8.98%`, scale `1.0` min `7.81%`, scale `0.25` min `8.20%`). Reusing `adaptive-midgame-contact-searchwin-imitation-v3` as an 8x8-only adapter on v4 improved fixed-v5 max250 512-row from same-seed expanded-v4 `10.16%` min to `11.52%` and held Expander 512-row min at `73.05%`. GPU evals should run serially; parallel JAX evals triggered CUDA allocation warnings on the 16GB card.
+
+## [2026-06-20 14:46] Legacy Fixed-v5 Adapter Loader
+- **Changes:** Added explicit legacy checkpoint loading with `--drop-mismatched-init-leaves`, added `evaluate_adaptive_policy.py --policy-adapter-mode delta|blend|replace`, documented the flags, and logged GPU results for using `adaptive-fixed-v5-imitation-v5` iter 30 as an 8x8 adapter on v4.
+- **Status:** Completed
+- **Next Steps:** Treat `v4 + legacy fixed-v5 iter30 adapter max-grid-size 8` as the current Expander diagnostic wrapper. Do not keep sweeping adapter scales; the next fixed-v5 improvement still needs decisive trajectory and finishability supervision.
+- **Context:** Legacy iter30 direct load validated at fixed-v5 max250 128-row min `16.41%`. Same-seed 512-row Expander gate improved from v4 base `71.88%` min to `78.91%` min by lifting 8p0/8p1 to `88.48%/89.26%` while 12/16 rows stayed unchanged. Same-seed fixed-v5 max250 improved from base `8.79%` min to `11.91%` min but remained high-draw, so this is not a fixed-v5 short-gate breakthrough.

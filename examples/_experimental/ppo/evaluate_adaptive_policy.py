@@ -48,6 +48,8 @@ from train import random_action, stack_learner_actions
 
 PLAN_WORKER_COMMAND_SOURCE_NAMES = ("spatial", "belief-main-stack")
 PLAN_WORKER_COMMAND_SOURCE_TO_ID = {name: index for index, name in enumerate(PLAN_WORKER_COMMAND_SOURCE_NAMES)}
+POLICY_ADAPTER_MODE_NAMES = ("delta", "blend", "replace")
+POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODE_NAMES)}
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,7 @@ def _policy_action(
     policy_adapter_scale: float,
     policy_adapter_finish_threshold: float,
     policy_adapter_gate_threshold: float,
+    policy_adapter_mode: int,
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     needs_aux = (
@@ -160,7 +163,16 @@ def _policy_action(
             adapter_aux = adapter_feature_network.strategy_auxiliary(obs_arr, mask, active)
             finish_probability = strategy_finish_probability(adapter_aux.finish_logits)
             adapter_gate = jnp.where(finish_probability >= policy_adapter_finish_threshold, 1.0, 0.0)
-        logits = policy_adapter_delta_logits(logits, adapter_logits, policy_adapter_scale * adapter_gate)
+        adapter_weight = policy_adapter_scale * adapter_gate
+        logits = jax.lax.switch(
+            policy_adapter_mode,
+            (
+                lambda _: policy_adapter_delta_logits(logits, adapter_logits, adapter_weight),
+                lambda _: policy_adapter_blend_logits(logits, adapter_logits, adapter_weight),
+                lambda _: jnp.where(adapter_gate > 0.0, adapter_logits, logits),
+            ),
+            None,
+        )
     if strategy_q_rerank_scale > 0.0:
         logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
     if strategy_target_rerank_scale > 0.0:
@@ -346,6 +358,18 @@ def policy_adapter_delta_logits(
     legal_mean = jnp.sum(jnp.where(legal, raw_delta, 0.0)) / legal_count
     centered_delta = jnp.where(legal, raw_delta - legal_mean, 0.0)
     return policy_logits + scale * centered_delta
+
+
+def policy_adapter_blend_logits(
+    policy_logits: jnp.ndarray,
+    adapter_logits: jnp.ndarray,
+    scale: jnp.ndarray | float,
+) -> jnp.ndarray:
+    """Interpolate legal logits between the base policy and adapter policy."""
+    legal = policy_logits > -1.0e8
+    weight = jnp.clip(jnp.asarray(scale, dtype=policy_logits.dtype), 0.0, 1.0)
+    blended = (1.0 - weight) * policy_logits + weight * adapter_logits
+    return jnp.where(legal, blended, policy_logits)
 
 
 def policy_adapter_gate_features(
@@ -789,6 +813,7 @@ def evaluate_batch(
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
+    policy_adapter_mode=0,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
 ):
@@ -929,6 +954,7 @@ def evaluate_batch(
                 effective_policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
+                policy_adapter_mode,
             )
         )(
             obs_arr,
@@ -998,6 +1024,7 @@ def evaluate_policy_opponent_batch(
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
+    policy_adapter_mode=0,
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
 ):
@@ -1139,6 +1166,7 @@ def evaluate_policy_opponent_batch(
                 effective_policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
+                policy_adapter_mode,
             )
         )(
             obs_arr,
@@ -1211,6 +1239,11 @@ def parse_args():
     parser.add_argument("--init-strategy-spatial-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--init-strategy-finish-outputs", type=int, default=None)
+    parser.add_argument(
+        "--drop-mismatched-init-leaves",
+        action="store_true",
+        help="Load matching checkpoint leaves and reinitialize shape-mismatched legacy leaves.",
+    )
     parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-q-replace-threshold", type=float, default=-1.0)
     parser.add_argument("--strategy-q-replace-policy-margin", type=float, default=-1.0)
@@ -1259,6 +1292,7 @@ def parse_args():
         help="Optional strategy-aux model used only for policy-adapter gate/finish features.",
     )
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
+    parser.add_argument("--policy-adapter-mode", choices=POLICY_ADAPTER_MODE_NAMES, default="delta")
     parser.add_argument("--policy-adapter-finish-threshold", type=float, default=-1.0)
     parser.add_argument(
         "--policy-adapter-min-grid-size",
@@ -1535,6 +1569,7 @@ def main():
         init_pyramid_context=args.pyramid_context,
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
+        drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
     )
     policy_adapter_network = None
     policy_adapter_feature_network = None
@@ -1564,6 +1599,7 @@ def main():
             init_pyramid_context=args.pyramid_context,
             network_arch=args.network_arch,
             init_network_arch=args.network_arch,
+            drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
         )
         if args.policy_adapter_feature_model_path is not None:
             policy_adapter_feature_network = load_or_create_adaptive_network(
@@ -1591,6 +1627,7 @@ def main():
                 init_pyramid_context=args.pyramid_context,
                 network_arch=args.network_arch,
                 init_network_arch=args.network_arch,
+                drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
             )
     plan_worker_network = None
     if args.strategy_plan_worker_path is not None:
@@ -1634,6 +1671,7 @@ def main():
         opponent_network = eqx.tree_deserialise_leaves(args.opponent_policy_path, opponent_network)
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
+    policy_adapter_mode = POLICY_ADAPTER_MODE_TO_ID[args.policy_adapter_mode]
     opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
     rows = []
 
@@ -1735,7 +1773,7 @@ def main():
             max_label = args.policy_adapter_max_grid_size if args.policy_adapter_max_grid_size > 0 else "inf"
             gate_label += f", size=[{min_label},{max_label}]"
         print(f"Policy adapter: {args.policy_adapter_path}")
-        print(f"Policy adapter: scale={args.policy_adapter_scale:g}{gate_label}")
+        print(f"Policy adapter: mode={args.policy_adapter_mode}, scale={args.policy_adapter_scale:g}{gate_label}")
         if args.policy_adapter_feature_model_path is not None:
             print(f"Policy adapter features: {args.policy_adapter_feature_model_path}")
         if args.policy_adapter_gate_threshold >= 0.0:
@@ -1810,6 +1848,7 @@ def main():
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
                     args.policy_adapter_gate_threshold,
+                    policy_adapter_mode,
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
                 )
@@ -1855,6 +1894,7 @@ def main():
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
                     args.policy_adapter_gate_threshold,
+                    policy_adapter_mode,
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
                 )
@@ -1923,6 +1963,7 @@ def main():
         "policy_adapter_path": args.policy_adapter_path,
         "policy_adapter_feature_model_path": args.policy_adapter_feature_model_path,
         "policy_adapter_scale": args.policy_adapter_scale,
+        "policy_adapter_mode": args.policy_adapter_mode,
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,
         "policy_adapter_min_grid_size": args.policy_adapter_min_grid_size,
         "policy_adapter_max_grid_size": args.policy_adapter_max_grid_size,
