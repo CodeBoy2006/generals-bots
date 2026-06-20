@@ -16172,3 +16172,187 @@ they move the scorer toward model-aware conditional action selection instead of
 score/prior-only gating.  Keep this path, but require independent validation and
 best-epoch selection before any gameplay integration.
 ```
+
+### 2026-06-21 00:04 - Candidate Scorer Frozen-Trunk Features
+
+Extended `adaptive_online_search_candidate_scorer.py` with
+`--feature-model-path`, allowing the scorer to append frozen adaptive trunk
+features at the candidate source and destination cells:
+
+```text
+trunk_source[channels]
+trunk_dest[channels]
+trunk_source - trunk_dest
+```
+
+For `adaptive-unet-ppo-v4`, the feature model must be loaded with the true base
+schema:
+
+```text
+--feature-network-arch unet
+--feature-channels 64,96,128,64
+--feature-value-loss hl-gauss
+--feature-value-bins 128
+```
+
+Do not use per-size value heads for this base. The script infers the saved obs
+channel count from the dataset and runs `_features` in bounded batches, then
+writes trunk channel metadata and feature names into the sidecar.
+
+CUDA smoke:
+
+```text
+train: v0 capped to 48 rows
+validation: v3-convert capped to 12 rows
+feature model: adaptive-unet-ppo-v4
+feature dim: 234
+trunk channels: 64
+device: cuda:0
+result: completed, saved runs/adaptive-online-search-candidate-scorer-trunk-smoke/
+```
+
+Independent validation probes on max500 strict conversion rows:
+
+```text
+trunk+heatmap-v0:
+  train: v0 + v1 + partial v2 + v3
+  validation: v4 only
+  train rows: 145
+  val rows: 19
+  feature dim: 243
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-trunk-heatmap-v0/
+  best epoch: 3
+  prior top1/top2: 0.00% / 40.00%
+  scorer top1/top2/pair: 47.37% / 68.42% / 53.51%
+  final top1/top2/pair: 26.32% / 52.63% / 49.12%
+
+trunk-only-v0:
+  train: v0 + v1 + partial v2 + v3
+  validation: v4 only
+  train rows: 145
+  val rows: 19
+  feature dim: 234
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-trunk-v0/
+  best epoch: 3
+  prior top1/top2: 0.00% / 40.00%
+  scorer top1/top2/pair: 47.37% / 73.68% / 61.40%
+  final top1/top2/pair: 15.79% / 47.37% / 42.11%
+```
+
+Decision:
+
+```text
+Frozen trunk features are now wired and usable, but they do not beat the
+previous no-trunk v4-only reference top1/top2/pair of 63.16% / 89.47% / 64.91%.
+They may improve top-2 support and pair ranking in some splits, but the small
+validation rows and final-epoch collapse make direct gameplay integration
+premature. Keep the feature path for planner-aware conditional heads, not as a
+standalone evaluator scorer.
+```
+
+### 2026-06-20 23:59 - Frozen U-Net Trunk Candidate Scorer
+
+Added `adaptive_online_search_candidate_scorer.py --feature-model-path`, which
+loads a frozen adaptive checkpoint and appends source/destination/delta trunk
+features for each online-search top-k candidate.  The intended test was whether
+the main U-Net representation contains the missing planner preference that the
+hand-feature scorer could not recover.
+
+Implementation details:
+
+```text
+feature model:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+  network_arch=unet
+  channels=64,96,128,64
+  input_channels inferred from shard obs: 35
+  value_loss=hl-gauss, value_bins=128
+
+candidate features:
+  previous hand features
+  optional heatmap features
+  trunk source vector
+  trunk destination vector
+  trunk source-minus-destination vector
+```
+
+Smoke checks:
+
+```text
+old path:
+  feature_dim: 96
+  no feature model
+  2-epoch CPU smoke passed
+
+trunk path:
+  feature_dim: 288
+  trunk_channels: 64
+  2-epoch CPU smoke passed
+```
+
+GPU independent holdout diagnostics all used:
+
+```text
+train:
+  rpa2 v0 + rpa2 v1 + v2-small
+  positive field: search_converts_to_win
+  kept rows: 217
+
+validation:
+  rpa2 v3-small
+  kept rows: 193
+  prior top1/top2: 0.00% / 36.27%
+```
+
+Results:
+
+```text
+trunk-v0:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-trunk-v0/
+  local_channels: 20
+  feature_dim: 288
+  hidden_dim: 256
+  lr: 1e-3
+  best epoch: 2
+  val top1/top2/pair: 32.12% / 58.03% / 51.82%
+
+trunk-small-v0:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-trunk-small-v0/
+  local_channels: 20
+  feature_dim: 288
+  hidden_dim: 64
+  lr: 3e-4
+  best epoch: 43
+  val top1/top2/pair: 30.05% / 60.10% / 53.16%
+
+trunk-local0-v0:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-trunk-local0-v0/
+  local_channels: 0
+  feature_dim: 228
+  hidden_dim: 64
+  lr: 3e-4
+  best epoch: 3
+  val top1/top2/pair: 35.75% / 66.32% / 56.40%
+
+trunk-heatmap-local0-v0:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-trunk-heatmap-local0-v0/
+  local_channels: 0
+  heatmap_features: true
+  feature_dim: 237
+  hidden_dim: 64
+  lr: 3e-4
+  best epoch: 42
+  val top1/top2/pair: 34.72% / 62.69% / 54.58%
+```
+
+Decision:
+
+```text
+Frozen U-Net point features do not solve online-search action selection.  They
+either overfit the 217-row strict-conversion training set or recover only the
+same top1 as the plain hand-feature scorer when raw local channels are removed.
+Do not spend more cycles on standalone MLP feature additions.  The next branch
+should train a policy-internal conditional action/adapter head from the same
+max500 conversion rows, so gradients can reshape the U-Net policy head rather
+than asking a small external scorer to infer the planner from frozen features.
+```

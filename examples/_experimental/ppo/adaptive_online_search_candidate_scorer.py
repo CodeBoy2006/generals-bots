@@ -22,6 +22,7 @@ import numpy as np
 import optax
 
 from adaptive_common import ADAPTIVE_MOVE_PLANES
+from adaptive_network import load_or_create_adaptive_network
 
 DIRECTIONS = np.asarray([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=np.int32)
 POSITIVE_FIELDS = (
@@ -80,7 +81,7 @@ HEATMAP_FEATURE_NAMES = (
 )
 
 
-def candidate_feature_names(local_channels: int, heatmap_features: bool) -> list[str]:
+def candidate_feature_names(local_channels: int, heatmap_features: bool, trunk_channels: int = 0) -> list[str]:
     """Return feature names for candidate scorer sidecars."""
     names = list(BASE_FEATURE_NAMES)
     if heatmap_features:
@@ -88,6 +89,9 @@ def candidate_feature_names(local_channels: int, heatmap_features: bool) -> list
     names.extend(f"source_ch{idx}" for idx in range(local_channels))
     names.extend(f"dest_ch{idx}" for idx in range(local_channels))
     names.extend(f"source_minus_dest_ch{idx}" for idx in range(local_channels))
+    names.extend(f"trunk_source_ch{idx}" for idx in range(trunk_channels))
+    names.extend(f"trunk_dest_ch{idx}" for idx in range(trunk_channels))
+    names.extend(f"trunk_source_minus_dest_ch{idx}" for idx in range(trunk_channels))
     return names
 
 
@@ -181,11 +185,29 @@ def _candidate_geometry(indices: np.ndarray, pad_size: int) -> dict[str, np.ndar
     }
 
 
+@eqx.filter_jit
+def _feature_model_batch_features(feature_model, obs_batch: jnp.ndarray) -> jnp.ndarray:
+    return jax.vmap(feature_model._features)(obs_batch)
+
+
+def extract_trunk_feature_maps(feature_model, obs: np.ndarray, batch_size: int) -> np.ndarray:
+    """Run a frozen adaptive trunk over saved observations in bounded batches."""
+    if batch_size <= 0:
+        batch_size = obs.shape[0]
+    chunks = []
+    for start in range(0, obs.shape[0], batch_size):
+        obs_batch = jnp.asarray(obs[start : start + batch_size], dtype=jnp.float32)
+        chunks.append(np.asarray(_feature_model_batch_features(feature_model, obs_batch), dtype=np.float32))
+    return np.concatenate(chunks, axis=0)
+
+
 def build_candidate_features_from_shard(
     shard: np.lib.npyio.NpzFile,
     max_steps: int,
     local_channels: int,
     heatmap_features: bool,
+    feature_model=None,
+    feature_batch_size: int = 256,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
     """Return row-candidate features and search score targets for one trace shard."""
     obs = shard["obs"].astype(np.float32)
@@ -318,6 +340,15 @@ def build_candidate_features_from_shard(
                 source_planes[:, :, :kept_channels] - dest_planes[:, :, :kept_channels],
             ]
         )
+    trunk_channels = 0
+    if feature_model is not None:
+        trunk_maps = extract_trunk_feature_maps(feature_model, obs, feature_batch_size)
+        if trunk_maps.shape[0] != rows or trunk_maps.shape[-2:] != obs.shape[-2:]:
+            raise ValueError(f"Unexpected trunk feature shape {trunk_maps.shape} for obs {obs.shape}")
+        trunk_channels = int(trunk_maps.shape[1])
+        source_trunk = trunk_maps[row_index, :, source_row, source_col]
+        dest_trunk = trunk_maps[row_index, :, dest_row, dest_col]
+        feature_parts.extend([source_trunk, dest_trunk, source_trunk - dest_trunk])
     features = np.concatenate(feature_parts, axis=-1).astype(np.float32)
     valid = np.isfinite(search_scores) & (search_scores > -9990.0) & (candidates >= 0) & (candidates <= pass_index)
     stats = {
@@ -325,6 +356,7 @@ def build_candidate_features_from_shard(
         "changed": int(np.sum(shard["search_action_changed"].astype(np.bool_))),
         "converts": int(np.sum(shard["search_converts_to_win"].astype(np.bool_))),
         "improves": int(np.sum(shard["search_improves_continuation"].astype(np.bool_))),
+        "trunk_channels": trunk_channels,
     }
     return features, search_scores.astype(np.float32), valid.astype(np.bool_), prior_scores, stats
 
@@ -338,6 +370,8 @@ def load_dataset(
     max_steps: int,
     local_channels: int,
     heatmap_features: bool,
+    feature_model,
+    feature_batch_size: int,
     max_rows: int | None,
     seed: int,
 ) -> tuple[dict[str, jnp.ndarray], dict[str, object]]:
@@ -354,6 +388,7 @@ def load_dataset(
         "changed": 0,
         "converts": 0,
         "improves": 0,
+        "trunk_channels": None,
     }
     for path in paths:
         with np.load(path) as shard:
@@ -362,6 +397,8 @@ def load_dataset(
                 max_steps=max_steps,
                 local_channels=local_channels,
                 heatmap_features=heatmap_features,
+                feature_model=feature_model,
+                feature_batch_size=feature_batch_size,
             )
             keep = np.ones((features.shape[0],), dtype=np.bool_)
             if require_search_used:
@@ -377,6 +414,13 @@ def load_dataset(
             stats["changed"] += int(shard_stats["changed"])
             stats["converts"] += int(shard_stats["converts"])
             stats["improves"] += int(shard_stats["improves"])
+            shard_trunk_channels = int(shard_stats["trunk_channels"])
+            if stats["trunk_channels"] is None:
+                stats["trunk_channels"] = shard_trunk_channels
+            elif int(stats["trunk_channels"]) != shard_trunk_channels:
+                raise ValueError(
+                    f"Inconsistent trunk channel count: {stats['trunk_channels']} vs {shard_trunk_channels}"
+                )
             if not np.any(keep):
                 continue
             feature_chunks.append(features[keep])
@@ -402,6 +446,7 @@ def load_dataset(
     stats["rows"] = int(features.shape[0])
     stats["top_k"] = int(features.shape[1])
     stats["feature_dim"] = int(features.shape[2])
+    stats["trunk_channels"] = int(stats["trunk_channels"] or 0)
     stats["prior_top1"] = float(np.mean(np.argmax(priors, axis=1) == np.argmax(scores, axis=1)))
     stats["prior_top2"] = float(np.mean([np.argmax(scores[i]) in np.argsort(priors[i])[-2:] for i in range(scores.shape[0])]))
     return (
@@ -571,6 +616,27 @@ def parse_args():
         action="store_true",
         help="Include saved source/target/enemy-general heatmap features as a model-feature diagnostic.",
     )
+    parser.add_argument(
+        "--feature-model-path",
+        default=None,
+        help="Optional frozen adaptive checkpoint used to append source/destination trunk features.",
+    )
+    parser.add_argument("--feature-network-arch", choices=("cnn", "unet"), default="unet")
+    parser.add_argument("--feature-channels", default="64,96,128,64")
+    parser.add_argument("--feature-input-channels", type=int, default=None)
+    parser.add_argument("--feature-value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--feature-value-head-sizes", default=None)
+    parser.add_argument("--feature-value-loss", choices=("mse", "hl-gauss"), default="hl-gauss")
+    parser.add_argument("--feature-value-bins", type=int, default=128)
+    parser.add_argument("--feature-value-min", type=float, default=-1.0)
+    parser.add_argument("--feature-value-max", type=float, default=1.0)
+    parser.add_argument("--feature-value-sigma", type=float, default=0.04)
+    parser.add_argument("--feature-outcome-head", action="store_true")
+    parser.add_argument("--feature-strategy-aux", action="store_true")
+    parser.add_argument("--feature-strategy-spatial-aux", action="store_true")
+    parser.add_argument("--feature-strategy-finish-outputs", type=int, default=2)
+    parser.add_argument("--feature-batch-size", type=int, default=256)
+    parser.add_argument("--feature-drop-mismatched-init-leaves", action="store_true")
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--max-val-rows", type=int, default=None)
     parser.add_argument("--val-fraction", type=float, default=0.2)
@@ -596,6 +662,12 @@ def parse_args():
         parser.error("--max-steps must be positive")
     if args.local_channels < 0:
         parser.error("--local-channels must be non-negative")
+    if args.feature_batch_size <= 0:
+        parser.error("--feature-batch-size must be positive")
+    if args.feature_value_bins <= 1 and args.feature_value_loss == "hl-gauss":
+        parser.error("--feature-value-bins must be greater than 1 for hl-gauss")
+    if args.feature_strategy_finish_outputs <= 0:
+        parser.error("--feature-strategy-finish-outputs must be positive")
     if args.max_rows is not None and args.max_rows <= 1:
         parser.error("--max-rows must leave at least two rows")
     if args.max_val_rows is not None and args.max_val_rows <= 0:
@@ -613,9 +685,54 @@ def parse_args():
     return args
 
 
+def parse_int_tuple(text: str | None) -> tuple[int, ...]:
+    if text is None or text == "":
+        return ()
+    return tuple(int(part.strip()) for part in text.split(",") if part.strip())
+
+
+def infer_obs_channels(paths: list[Path]) -> int:
+    with np.load(paths[0]) as shard:
+        return int(shard["obs"].shape[1])
+
+
+def load_feature_model(args, paths: list[Path]):
+    if args.feature_model_path is None:
+        return None
+    input_channels = args.feature_input_channels if args.feature_input_channels is not None else infer_obs_channels(paths)
+    value_bins = args.feature_value_bins if args.feature_value_loss == "hl-gauss" else 0
+    return load_or_create_adaptive_network(
+        jrandom.PRNGKey(args.seed + 911),
+        pad_size=16,
+        init_model_path=args.feature_model_path,
+        channels=args.feature_channels,
+        input_channels=input_channels,
+        init_input_channels=input_channels,
+        value_head_sizes=parse_int_tuple(args.feature_value_head_sizes) if args.feature_value_heads == "per-size" else (),
+        init_value_head_sizes=parse_int_tuple(args.feature_value_head_sizes) if args.feature_value_heads == "per-size" else (),
+        value_bins=value_bins,
+        init_value_bins=value_bins,
+        value_min=args.feature_value_min,
+        value_max=args.feature_value_max,
+        value_sigma=args.feature_value_sigma,
+        outcome_head=args.feature_outcome_head,
+        init_outcome_head=args.feature_outcome_head,
+        strategy_aux=args.feature_strategy_aux,
+        init_strategy_aux=args.feature_strategy_aux,
+        strategy_spatial_aux=args.feature_strategy_spatial_aux,
+        init_strategy_spatial_aux=args.feature_strategy_spatial_aux,
+        strategy_finish_outputs=args.feature_strategy_finish_outputs,
+        init_strategy_finish_outputs=args.feature_strategy_finish_outputs,
+        network_arch=args.feature_network_arch,
+        init_network_arch=args.feature_network_arch,
+        drop_mismatched_init_leaves=args.feature_drop_mismatched_init_leaves,
+    )
+
+
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
+    feature_model = load_feature_model(args, paths)
     dataset, stats = load_dataset(
         paths,
         args.require_search_used,
@@ -625,6 +742,8 @@ def main():
         args.max_steps,
         args.local_channels,
         args.heatmap_features,
+        feature_model,
+        args.feature_batch_size,
         args.max_rows,
         args.seed,
     )
@@ -640,6 +759,8 @@ def main():
             args.max_steps,
             args.local_channels,
             args.heatmap_features,
+            feature_model,
+            args.feature_batch_size,
             args.max_val_rows,
             args.seed + 1,
         )
@@ -673,6 +794,8 @@ def main():
     if val_stats is not None:
         print(f"Val rows:      raw={val_stats['raw_rows']} kept={val_stats['rows']} independent_shards=true")
     print(f"Top-k/features:{stats['top_k']} / {stats['feature_dim']}")
+    if feature_model is not None:
+        print(f"Feature model: {args.feature_model_path} trunk_channels={stats['trunk_channels']}")
     print(f"Prior base:    top1={stats['prior_top1']*100:.2f}% top2={stats['prior_top2']*100:.2f}%")
     if args.positive_field is not None:
         print(f"Filter:        {args.positive_field}")
@@ -719,9 +842,13 @@ def main():
     eqx.tree_serialise_leaves(best_path, best_model)
     final_loss, final_metrics = evaluate_loss(model, as_batch(val_data), args.temperature, args.hard_best_weight)
     heatmap_dim = len(HEATMAP_FEATURE_NAMES) if args.heatmap_features else 0
-    actual_local_channels = max(0, (int(dataset["features"].shape[-1]) - len(BASE_FEATURE_NAMES) - heatmap_dim) // 3)
+    trunk_channels = int(stats.get("trunk_channels") or 0)
+    actual_local_channels = max(
+        0,
+        (int(dataset["features"].shape[-1]) - len(BASE_FEATURE_NAMES) - heatmap_dim - 3 * trunk_channels) // 3,
+    )
     sidecar = {
-        "feature_names": candidate_feature_names(actual_local_channels, args.heatmap_features),
+        "feature_names": candidate_feature_names(actual_local_channels, args.heatmap_features, trunk_channels),
         "feature_mean": np.asarray(model.feature_mean).tolist(),
         "feature_std": np.asarray(model.feature_std).tolist(),
         "hidden_dim": args.hidden_dim,
@@ -735,6 +862,19 @@ def main():
             "min_score_gap": args.min_score_gap,
             "local_channels": args.local_channels,
             "heatmap_features": args.heatmap_features,
+            "feature_model_path": args.feature_model_path,
+            "feature_network_arch": args.feature_network_arch,
+            "feature_channels": args.feature_channels,
+            "feature_input_channels": args.feature_input_channels,
+            "feature_value_heads": args.feature_value_heads,
+            "feature_value_head_sizes": args.feature_value_head_sizes,
+            "feature_value_loss": args.feature_value_loss,
+            "feature_value_bins": args.feature_value_bins,
+            "feature_outcome_head": args.feature_outcome_head,
+            "feature_strategy_aux": args.feature_strategy_aux,
+            "feature_strategy_spatial_aux": args.feature_strategy_spatial_aux,
+            "feature_strategy_finish_outputs": args.feature_strategy_finish_outputs,
+            "feature_batch_size": args.feature_batch_size,
         },
         "dataset": stats,
         "validation_dataset": val_stats,

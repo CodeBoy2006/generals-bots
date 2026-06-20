@@ -1460,3 +1460,15 @@
 - **Status:** Completed
 - **Next Steps:** Keep heatmap features for model-aware scorer/conditional-head diagnostics, but require independent validation before integration.
 - **Context:** Heatmap v0 on v3+v4 validation improved top1 from no-heatmap `45.16%` to `51.61%` with pair unchanged `58.38%`; top2 dropped from `74.19%` to `64.52%`. Heatmap v1 on p1-heavy v4 reached top1/top2/pair `57.89%/63.16%/56.14%`, below no-heatmap `63.16%/89.47%/64.91%`, so heatmaps help some splits but are not sufficient alone.
+
+## [2026-06-21 00:04] Candidate Scorer Trunk Features
+- **Changes:** Added `adaptive_online_search_candidate_scorer.py --feature-model-path` and feature-model template flags to append frozen adaptive trunk source/destination features to candidate action rows; documented usage and max500 strict-conversion probes.
+- **Status:** Completed
+- **Next Steps:** Do not wire this scorer directly into gameplay. Use frozen trunk features as ingredients for a planner-aware conditional action head or collect more independent strict-conversion rows before integration.
+- **Context:** CUDA smoke loaded `adaptive-unet-ppo-v4` as shared HL-Gauss U-Net and extracted 64 trunk channels. On v0+v1+v2+v3 train / p1-heavy v4 validation, trunk+heatmap best top1/top2/pair was `47.37%/68.42%/53.51%`; trunk-only was `47.37%/73.68%/61.40%`. This did not beat the previous no-trunk v4-only reference `63.16%/89.47%/64.91%`, so the signal is useful but not a promotion path.
+
+## [2026-06-20 23:59] Frozen U-Net Candidate Scorer
+- **Changes:** Extended `adaptive_online_search_candidate_scorer.py` with `--feature-model-path` to append frozen adaptive trunk source/destination/delta features; ran CPU smoke checks and GPU independent-holdout diagnostics on rpa2 max500 strict-conversion rows.
+- **Status:** Completed
+- **Next Steps:** Stop adding standalone scorer features. Train a U-Net-internal conditional action or policy-adapter head from strict max500 conversion rows so the planner signal can enter the policy head directly.
+- **Context:** The v4 trunk path loaded `runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx` as U-Net `64,96,128,64`, 35 input channels, shared HL-Gauss value. On v0+v1+v2-small -> v3-small (`217` train / `193` validation strict conversions), trunk-v0 reached only top1/top2/pair `32.12%/58.03%/51.82%`; smaller MLP `30.05%/60.10%/53.16%`; trunk with `local_channels=0` recovered `35.75%/66.32%/56.40%`; trunk+heatmap+local0 was `34.72%/62.69%/54.58%`. Frozen point features do not beat the plain/heatmap scorer enough to justify gameplay integration.
