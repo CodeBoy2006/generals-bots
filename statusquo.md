@@ -1388,3 +1388,9 @@
 - **Status:** Completed
 - **Next Steps:** Use max500 as the default fixed-v5 diagnostic horizon and pass `--eval-batch-size 64` or similar for expensive online-search promotion checks.
 - **Context:** `py_compile` passed for the touched scripts. A tiny CUDA smoke with `num_games=4`, `eval_batch_size=2`, and `max_steps=5` ran on `cuda:0` and wrote `runs/eval-batch-smoke.json` with `eval_batch_size: 2`; the first smoke attempt only failed because the legacy v4 checkpoint needed `--drop-mismatched-init-leaves`.
+
+## [2026-06-20 22:47] Chunked rpa2 Teacher Confirmation
+- **Changes:** Ran a correct-schema chunked GPU fixed-v5 max500 rpa2 teacher evaluation and logged the result in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Use rpa2 as a high-budget teacher for trace/continuation collection, not as the fast inner-loop gate. Next collect rpa2 max500 conversion traces and train a conditional/planner-aware controller from those labels.
+- **Context:** `adaptive-unet-ppo-v4` must load as shared HL-Gauss value (`--value-loss hl-gauss --value-bins 128`) with U-Net channels `64,96,128,64`; per-size value flags shift the Equinox tree. Correct rpa2 chunked eval at 128 games/seat, `eval_batch_size=32`, seed `104040`: p0 `72.66%`, p1 `56.25%`, min `56.25%`, draw `2.34%/6.25%`.

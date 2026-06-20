@@ -15320,3 +15320,87 @@ Next useful move:
   the teacher gap is now large enough that the compression target should include
   confidence, phase, and enter/exit behavior instead of just primitive action CE.
 ```
+
+### 2026-06-20 22:47 - Chunked rpa2 Teacher Confirmation
+
+Implementation:
+
+```text
+evaluate_adaptive_policy.py:
+  --eval-batch-size splits each size/seat row into smaller JAX batches
+  aggregate wins/losses/draws, mean_time, and adapter trigger/use/diff stats
+  JSON keeps num_games as the full row count and records eval_batch_size
+```
+
+GPU verification:
+
+```text
+smoke:
+  model: adaptive-unet-ppo-v4
+  grid: 8x8
+  num_games: 4
+  eval_batch_size: 2
+  max_steps: 10
+  device: cuda:0
+  result: command completed and wrote runs/eval-chunked-smoke.json
+```
+
+Important schema note:
+
+```text
+adaptive-unet-ppo-v4 loads as:
+  --network-arch unet
+  --channels 64,96,128,64
+  --scoreboard-history
+  --fog-memory
+  --value-loss hl-gauss
+  --value-bins 128
+
+Do not load this base as per-size value heads.  That shifts the Equinox
+serialization stream and can produce nonsense if mismatched leaves are dropped.
+Per-size value flags were only needed for some older adapter templates, not for
+the v4 base itself.
+```
+
+Fixed-v5 max500 rpa2 chunked gate:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+search:
+  top_k=4
+  rollout_steps=16
+  rollouts_per_action=2
+  min_turn=80
+  require_contact=true
+  max_grid_size=8
+
+eval:
+  num_games=128/seat
+  eval_batch_size=32
+  max_steps=500
+  seed=104040
+  json:
+    runs/adaptive-online-search-conversion-adapter-v1/
+      eval-fixed-v5-max500-v1-adapter-online-search-rpa2-128-chunk32-seed104040.json
+
+result:
+  p0 93/32/3, win 72.66%, draw 2.34%, mean_time 246.1
+  p1 72/48/8, win 56.25%, draw 6.25%, mean_time 260.7
+  min 56.25%
+```
+
+Decision:
+
+```text
+rpa2 remains a strong teacher but is expensive: 128 games/seat with batch 32
+took about 210 seconds.  Use rpa2 for offline trace/continuation collection and
+occasional confirmation, not as the inner loop for every candidate.  The next
+training step should collect rpa2 max500 conversion traces and train a
+conditional/planner-aware controller against those labels.
+```
