@@ -62,6 +62,9 @@ from train import random_action, stack_learner_actions
 from train_adaptive import crop_observation, split_mixed_env_counts
 
 POLICY_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
+OUTCOME_LOSS = 0
+OUTCOME_DRAW = 1
+OUTCOME_WIN = 2
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -455,6 +458,197 @@ def default_trace_from_logits(logits: jnp.ndarray, top_k: int, pad_size: int):
     return candidate_actions, candidate_indices, prior_scores, scores, outcomes
 
 
+def continuation_label_policy_opponent(
+    network,
+    adapter_network,
+    opponent_network,
+    state,
+    effective_size: int,
+    key,
+    first_learner_action: jnp.ndarray,
+    opponent_first_action: jnp.ndarray,
+    policy_player: int,
+    policy_mode: int,
+    opponent_policy_mode: int,
+    opponent_policy_grid_size: int,
+    pad_size: int,
+    max_steps: int,
+    rollout_steps: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    fog_memory_enabled: bool,
+    fog_memory,
+    adapter_scale: float,
+    adapter_mode: int,
+    adapter_min_grid_size: int,
+    adapter_max_grid_size: int,
+    army_weight: float,
+    land_weight: float,
+    terminal_score: float,
+):
+    """Execute a forced first action, then continue deployment policy to a max-step label."""
+    opponent_player = 1 - policy_player
+    obs = game.get_observation(state, policy_player)
+    current_scoreboard = adaptive_scoreboard_features(obs, effective_size)
+    first_actions = jax.lax.cond(
+        policy_player == 0,
+        lambda _: jnp.stack([first_learner_action, opponent_first_action]),
+        lambda _: jnp.stack([opponent_first_action, first_learner_action]),
+        None,
+    )
+    next_state, _ = game.step(state, first_actions)
+
+    def body(carry, _):
+        rollout_state, prev_scoreboard, memory, step_key = carry
+        step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
+        learner_obs = game.get_observation(rollout_state, policy_player)
+        learner_action, next_scoreboard, next_memory = deployment_action_with_memory(
+            network,
+            adapter_network,
+            learner_obs,
+            effective_size,
+            learner_key,
+            policy_mode,
+            pad_size,
+            global_context,
+            scoreboard_history_enabled,
+            prev_scoreboard,
+            fog_memory_enabled,
+            memory,
+            adapter_scale,
+            adapter_mode,
+            adapter_min_grid_size,
+            adapter_max_grid_size,
+        )
+        opponent_obs = game.get_observation(rollout_state, opponent_player)
+        opponent_action_value = policy_network_action(
+            opponent_network,
+            opponent_key,
+            crop_observation(opponent_obs, opponent_policy_grid_size),
+            opponent_policy_mode,
+        )
+        actions = jax.lax.cond(
+            policy_player == 0,
+            lambda _: jnp.stack([learner_action, opponent_action_value]),
+            lambda _: jnp.stack([opponent_action_value, learner_action]),
+            None,
+        )
+        stepped_state, _ = game.step(rollout_state, actions)
+        current_info = game.get_info(rollout_state)
+        already_done = current_info.is_done | (rollout_state.time >= max_steps)
+        final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, stepped_state)
+        final_info = game.get_info(final_state)
+        final_scoreboard = reset_adaptive_scoreboard_history(next_scoreboard, final_info.is_done)
+        final_memory = scalar_reset_fog_memory(next_memory, final_info.is_done)
+        return (final_state, final_scoreboard, final_memory, step_key), None
+
+    (final_state, _, _, _), _ = jax.lax.scan(
+        body,
+        (next_state, current_scoreboard, fog_memory, key),
+        None,
+        length=rollout_steps,
+    )
+    final_info = game.get_info(final_state)
+    truncated = (final_state.time >= max_steps) & ~final_info.is_done
+    scored_info = final_info._replace(winner=jnp.where(truncated, -1, final_info.winner))
+    final_obs = game.get_observation(final_state, policy_player)
+    score = search_score_observation(scored_info, final_obs, policy_player, army_weight, land_weight, terminal_score)
+    outcome = outcome_class_from_winner(jnp.where(final_info.is_done, final_info.winner, -1), policy_player)
+    return score, outcome, final_state.time
+
+
+def continuation_label_heuristic_opponent(
+    network,
+    adapter_network,
+    opponent_id: int,
+    state,
+    effective_size: int,
+    key,
+    first_learner_action: jnp.ndarray,
+    opponent_first_action: jnp.ndarray,
+    policy_player: int,
+    policy_mode: int,
+    pad_size: int,
+    max_steps: int,
+    rollout_steps: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    fog_memory_enabled: bool,
+    fog_memory,
+    adapter_scale: float,
+    adapter_mode: int,
+    adapter_min_grid_size: int,
+    adapter_max_grid_size: int,
+    army_weight: float,
+    land_weight: float,
+    terminal_score: float,
+):
+    """Execute a forced first action, then continue against a heuristic opponent."""
+    opponent_player = 1 - policy_player
+    obs = game.get_observation(state, policy_player)
+    current_scoreboard = adaptive_scoreboard_features(obs, effective_size)
+    first_actions = jax.lax.cond(
+        policy_player == 0,
+        lambda _: jnp.stack([first_learner_action, opponent_first_action]),
+        lambda _: jnp.stack([opponent_first_action, first_learner_action]),
+        None,
+    )
+    next_state, _ = game.step(state, first_actions)
+
+    def body(carry, _):
+        rollout_state, prev_scoreboard, memory, step_key = carry
+        step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
+        learner_obs = game.get_observation(rollout_state, policy_player)
+        learner_action, next_scoreboard, next_memory = deployment_action_with_memory(
+            network,
+            adapter_network,
+            learner_obs,
+            effective_size,
+            learner_key,
+            policy_mode,
+            pad_size,
+            global_context,
+            scoreboard_history_enabled,
+            prev_scoreboard,
+            fog_memory_enabled,
+            memory,
+            adapter_scale,
+            adapter_mode,
+            adapter_min_grid_size,
+            adapter_max_grid_size,
+        )
+        opponent_obs = game.get_observation(rollout_state, opponent_player)
+        opponent_action_value = opponent_action(opponent_id, opponent_key, opponent_obs, random_action)
+        actions = jax.lax.cond(
+            policy_player == 0,
+            lambda _: jnp.stack([learner_action, opponent_action_value]),
+            lambda _: jnp.stack([opponent_action_value, learner_action]),
+            None,
+        )
+        stepped_state, _ = game.step(rollout_state, actions)
+        current_info = game.get_info(rollout_state)
+        already_done = current_info.is_done | (rollout_state.time >= max_steps)
+        final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, stepped_state)
+        final_info = game.get_info(final_state)
+        final_scoreboard = reset_adaptive_scoreboard_history(next_scoreboard, final_info.is_done)
+        final_memory = scalar_reset_fog_memory(next_memory, final_info.is_done)
+        return (final_state, final_scoreboard, final_memory, step_key), None
+
+    (final_state, _, _, _), _ = jax.lax.scan(
+        body,
+        (next_state, current_scoreboard, fog_memory, key),
+        None,
+        length=rollout_steps,
+    )
+    final_info = game.get_info(final_state)
+    truncated = (final_state.time >= max_steps) & ~final_info.is_done
+    scored_info = final_info._replace(winner=jnp.where(truncated, -1, final_info.winner))
+    final_obs = game.get_observation(final_state, policy_player)
+    score = search_score_observation(scored_info, final_obs, policy_player, army_weight, land_weight, terminal_score)
+    outcome = outcome_class_from_winner(jnp.where(final_info.is_done, final_info.winner, -1), policy_player)
+    return score, outcome, final_state.time
+
+
 @eqx.filter_jit
 def collect_online_search_step(
     states,
@@ -491,6 +685,7 @@ def collect_online_search_step(
     search_land_weight: float = 10.0,
     search_prior_weight: float = 0.001,
     search_terminal_score: float = 100.0,
+    conversion_rollout_steps: int = 0,
 ):
     """Collect one deployment step plus aligned online-search trace labels."""
     num_envs = states.armies.shape[0]
@@ -571,7 +766,7 @@ def collect_online_search_step(
         )
     )(obs_arr, masks, active, effective_sizes)
 
-    key, policy_key, opponent_key, search_key = jrandom.split(key, 4)
+    key, policy_key, opponent_key, search_key, conversion_key = jrandom.split(key, 5)
     policy_keys = jrandom.split(policy_key, num_envs)
     opponent_keys = jrandom.split(opponent_key, num_envs)
     search_keys = jrandom.split(search_key, num_envs)
@@ -703,6 +898,138 @@ def collect_online_search_step(
     best_outcomes = jnp.take_along_axis(search_outcomes, best_positions[:, None], axis=1)[:, 0]
     action_changed = executed_action_indices != base_action_indices
 
+    if conversion_rollout_steps > 0:
+        base_conversion_keys = jrandom.split(conversion_key, num_envs)
+        conversion_key, search_conversion_seed = jrandom.split(conversion_key)
+        search_conversion_keys = jrandom.split(search_conversion_seed, num_envs)
+        if opponent_network is not None:
+            base_conversion = jax.vmap(
+                lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_policy_opponent(
+                    network,
+                    adapter_network,
+                    opponent_network,
+                    state,
+                    size,
+                    row_key,
+                    first_action,
+                    opponent_first,
+                    learner_player,
+                    policy_mode,
+                    opponent_policy_mode,
+                    opponent_policy_grid_size,
+                    pad_size,
+                    truncation,
+                    conversion_rollout_steps,
+                    global_context,
+                    scoreboard_history_enabled,
+                    fog_memory_enabled,
+                    row_memory,
+                    adapter_scale,
+                    adapter_mode,
+                    adapter_min_grid_size,
+                    adapter_max_grid_size,
+                    search_army_weight,
+                    search_land_weight,
+                    search_terminal_score,
+                )
+            )(states, effective_sizes, base_conversion_keys, opponent_actions, current_memory, base_actions)
+            search_conversion = jax.vmap(
+                lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_policy_opponent(
+                    network,
+                    adapter_network,
+                    opponent_network,
+                    state,
+                    size,
+                    row_key,
+                    first_action,
+                    opponent_first,
+                    learner_player,
+                    policy_mode,
+                    opponent_policy_mode,
+                    opponent_policy_grid_size,
+                    pad_size,
+                    truncation,
+                    conversion_rollout_steps,
+                    global_context,
+                    scoreboard_history_enabled,
+                    fog_memory_enabled,
+                    row_memory,
+                    adapter_scale,
+                    adapter_mode,
+                    adapter_min_grid_size,
+                    adapter_max_grid_size,
+                    search_army_weight,
+                    search_land_weight,
+                    search_terminal_score,
+                )
+            )(states, effective_sizes, search_conversion_keys, opponent_actions, current_memory, search_actions)
+        else:
+            base_conversion = jax.vmap(
+                lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_heuristic_opponent(
+                    network,
+                    adapter_network,
+                    opponent_id,
+                    state,
+                    size,
+                    row_key,
+                    first_action,
+                    opponent_first,
+                    learner_player,
+                    policy_mode,
+                    pad_size,
+                    truncation,
+                    conversion_rollout_steps,
+                    global_context,
+                    scoreboard_history_enabled,
+                    fog_memory_enabled,
+                    row_memory,
+                    adapter_scale,
+                    adapter_mode,
+                    adapter_min_grid_size,
+                    adapter_max_grid_size,
+                    search_army_weight,
+                    search_land_weight,
+                    search_terminal_score,
+                )
+            )(states, effective_sizes, base_conversion_keys, opponent_actions, current_memory, base_actions)
+            search_conversion = jax.vmap(
+                lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_heuristic_opponent(
+                    network,
+                    adapter_network,
+                    opponent_id,
+                    state,
+                    size,
+                    row_key,
+                    first_action,
+                    opponent_first,
+                    learner_player,
+                    policy_mode,
+                    pad_size,
+                    truncation,
+                    conversion_rollout_steps,
+                    global_context,
+                    scoreboard_history_enabled,
+                    fog_memory_enabled,
+                    row_memory,
+                    adapter_scale,
+                    adapter_mode,
+                    adapter_min_grid_size,
+                    adapter_max_grid_size,
+                    search_army_weight,
+                    search_land_weight,
+                    search_terminal_score,
+                )
+            )(states, effective_sizes, search_conversion_keys, opponent_actions, current_memory, search_actions)
+        base_conversion_scores, base_conversion_outcomes, base_conversion_times = base_conversion
+        search_conversion_scores, search_conversion_outcomes, search_conversion_times = search_conversion
+    else:
+        base_conversion_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
+        search_conversion_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
+        base_conversion_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
+        search_conversion_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
+        base_conversion_times = states.time
+        search_conversion_times = states.time
+
     labels = jax.vmap(lambda state, obs, size: full_state_strategy_labels(state, obs, learner_player, size, pad_size))(
         states,
         learner_obs,
@@ -755,6 +1082,12 @@ def collect_online_search_step(
             best_scores,
             score_gaps,
             best_outcomes,
+            base_conversion_scores,
+            base_conversion_outcomes,
+            base_conversion_times,
+            search_conversion_scores,
+            search_conversion_outcomes,
+            search_conversion_times,
             labels,
             dones,
             saved_winner,
@@ -800,6 +1133,7 @@ def collect_rollout(
     search_land_weight: float = 10.0,
     search_prior_weight: float = 0.001,
     search_terminal_score: float = 100.0,
+    conversion_rollout_steps: int = 0,
 ):
     """Collect one learner-seat rollout."""
     step_data = []
@@ -839,6 +1173,7 @@ def collect_rollout(
             search_land_weight,
             search_prior_weight,
             search_terminal_score,
+            conversion_rollout_steps,
         )
         step_data.append(data)
     return states, effective_sizes, scoreboard_history, fog_memory, jax.tree.map(lambda *xs: jnp.stack(xs), *step_data), key
@@ -871,6 +1206,12 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         best_scores,
         score_gaps,
         best_outcomes,
+        base_conversion_scores,
+        base_conversion_outcomes,
+        base_conversion_times,
+        search_conversion_scores,
+        search_conversion_outcomes,
+        search_conversion_times,
         labels,
         dones,
         winners,
@@ -923,6 +1264,13 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         "search_best_score": clipped_float16(best_scores),
         "search_score_gap": clipped_float16(score_gaps),
         "search_best_outcome": flat(best_outcomes).astype(np.int8),
+        "base_continuation_score": clipped_float16(base_conversion_scores),
+        "base_continuation_outcome": flat(base_conversion_outcomes).astype(np.int8),
+        "base_continuation_time": flat(base_conversion_times).astype(np.int16),
+        "search_continuation_score": clipped_float16(search_conversion_scores),
+        "search_continuation_outcome": flat(search_conversion_outcomes).astype(np.int8),
+        "search_continuation_time": flat(search_conversion_times).astype(np.int16),
+        "search_continuation_score_delta": clipped_float16(search_conversion_scores - base_conversion_scores),
         "done": flat(dones).astype(np.bool_),
         "winner": flat(winners).astype(np.int8),
         "contact": flat(contact).astype(np.float16),
@@ -938,6 +1286,16 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         "finish_within_100": np.zeros(flat(times).shape, dtype=np.float16),
         "finish_within_250": np.zeros(flat(times).shape, dtype=np.float16),
     }
+    base_outcomes = arrays["base_continuation_outcome"].astype(np.int16)
+    search_outcomes = arrays["search_continuation_outcome"].astype(np.int16)
+    valid_conversion = (base_outcomes >= OUTCOME_LOSS) & (search_outcomes >= OUTCOME_LOSS)
+    arrays["search_improves_continuation"] = (valid_conversion & (search_outcomes > base_outcomes)).astype(np.bool_)
+    arrays["search_converts_to_win"] = (
+        valid_conversion & (search_outcomes == OUTCOME_WIN) & (base_outcomes != OUTCOME_WIN)
+    ).astype(np.bool_)
+    arrays["search_converts_draw_to_win"] = (
+        valid_conversion & (search_outcomes == OUTCOME_WIN) & (base_outcomes == OUTCOME_DRAW)
+    ).astype(np.bool_)
     return arrays
 
 
@@ -947,6 +1305,9 @@ def filter_arrays(
     require_search_used: bool,
     require_action_changed: bool,
     min_search_score_gap: float,
+    require_search_improves_continuation: bool,
+    require_search_converts_to_win: bool,
+    min_continuation_score_delta: float,
 ) -> tuple[dict[str, np.ndarray], int, int]:
     """Filter rows before writing while preserving aligned axes."""
     original = int(arrays["obs"].shape[0])
@@ -959,6 +1320,12 @@ def filter_arrays(
         keep &= arrays["search_action_changed"].astype(np.bool_)
     if min_search_score_gap > 0.0:
         keep &= arrays["search_score_gap"].astype(np.float32) >= min_search_score_gap
+    if require_search_improves_continuation:
+        keep &= arrays["search_improves_continuation"].astype(np.bool_)
+    if require_search_converts_to_win:
+        keep &= arrays["search_converts_to_win"].astype(np.bool_)
+    if min_continuation_score_delta > 0.0:
+        keep &= arrays["search_continuation_score_delta"].astype(np.float32) >= min_continuation_score_delta
     return {name: value[keep] for name, value in arrays.items()}, original, int(np.sum(keep))
 
 
@@ -1030,10 +1397,22 @@ def parse_args():
     parser.add_argument("--search-land-weight", type=float, default=10.0)
     parser.add_argument("--search-prior-weight", type=float, default=0.001)
     parser.add_argument("--search-terminal-score", type=float, default=100.0)
+    parser.add_argument(
+        "--conversion-rollout-steps",
+        type=int,
+        default=0,
+        help=(
+            "If positive, execute base and search first actions separately, then continue deployment policy for this "
+            "many steps up to --truncation. Use 500 with --truncation 500 for fixed-v5 conversion labels."
+        ),
+    )
     parser.add_argument("--min-save-turn", type=int, default=0)
     parser.add_argument("--require-search-used", action="store_true")
     parser.add_argument("--require-action-changed", action="store_true")
     parser.add_argument("--min-search-score-gap", type=float, default=0.0)
+    parser.add_argument("--require-search-improves-continuation", action="store_true")
+    parser.add_argument("--require-search-converts-to-win", action="store_true")
+    parser.add_argument("--min-continuation-score-delta", type=float, default=0.0)
     parser.add_argument("--output-dir", default="runs/adaptive-online-search-traces")
     parser.add_argument("--shard-prefix", default="online-search")
     parser.add_argument("--logit-dtype", choices=("float32", "float16"), default="float16")
@@ -1094,6 +1473,19 @@ def parse_args():
         parser.error("--search-min-grid-size must be <= --search-max-grid-size")
     if args.min_search_score_gap < 0.0:
         parser.error("--min-search-score-gap must be non-negative")
+    if args.conversion_rollout_steps < 0:
+        parser.error("--conversion-rollout-steps must be non-negative")
+    if args.min_continuation_score_delta < 0.0:
+        parser.error("--min-continuation-score-delta must be non-negative")
+    if (
+        args.conversion_rollout_steps == 0
+        and (
+            args.require_search_improves_continuation
+            or args.require_search_converts_to_win
+            or args.min_continuation_score_delta > 0.0
+        )
+    ):
+        parser.error("continuation filters require --conversion-rollout-steps > 0")
     return args
 
 
@@ -1158,6 +1550,12 @@ def main():
         f"rollouts/action={args.search_rollouts_per_action}, min_turn={args.search_min_turn}, "
         f"contact={args.search_require_contact}"
     )
+    if args.conversion_rollout_steps > 0:
+        print(
+            "Conversion:    "
+            f"base/search first-action continuation for {args.conversion_rollout_steps} steps "
+            f"up to truncation={args.truncation}"
+        )
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} deployment steps before saving")
     print(f"Output:        {args.output_dir}")
@@ -1371,6 +1769,7 @@ def main():
                 args.search_land_weight,
                 args.search_prior_weight,
                 args.search_terminal_score,
+                args.conversion_rollout_steps,
             )
             states_p1, sizes_p1, history_p1, memory_p1, rollout_p1, _ = collect_rollout(
                 states_p1,
@@ -1408,6 +1807,7 @@ def main():
                 args.search_land_weight,
                 args.search_prior_weight,
                 args.search_terminal_score,
+                args.conversion_rollout_steps,
             )
             rollout = concatenate_rollouts(rollout_p0, rollout_p1)
         else:
@@ -1448,6 +1848,7 @@ def main():
                 args.search_land_weight,
                 args.search_prior_weight,
                 args.search_terminal_score,
+                args.conversion_rollout_steps,
             )
         arrays = prepare_arrays(rollout, args.logit_dtype)
         arrays, original_count, saved_count = filter_arrays(
@@ -1456,6 +1857,9 @@ def main():
             args.require_search_used,
             args.require_action_changed,
             args.min_search_score_gap,
+            args.require_search_improves_continuation,
+            args.require_search_converts_to_win,
+            args.min_continuation_score_delta,
         )
         if saved_count == 0:
             print(f"Shard {shard_index:04d} skipped | samples=0/{original_count}")
@@ -1479,6 +1883,10 @@ def main():
             "search_require_contact": args.search_require_contact,
             "search_min_grid_size": args.search_min_grid_size,
             "search_max_grid_size": args.search_max_grid_size,
+            "conversion_rollout_steps": args.conversion_rollout_steps,
+            "require_search_improves_continuation": args.require_search_improves_continuation,
+            "require_search_converts_to_win": args.require_search_converts_to_win,
+            "min_continuation_score_delta": args.min_continuation_score_delta,
             "original_count": original_count,
             "saved_count": saved_count,
         }
@@ -1487,9 +1895,12 @@ def main():
         changed = float(np.mean(arrays["search_action_changed"])) if saved_count else 0.0
         used = float(np.mean(arrays["search_used"])) if saved_count else 0.0
         mean_gap = float(np.mean(arrays["search_score_gap"].astype(np.float32))) if saved_count else 0.0
+        improves = float(np.mean(arrays["search_improves_continuation"])) if saved_count else 0.0
+        converts = float(np.mean(arrays["search_converts_to_win"])) if saved_count else 0.0
         print(
             f"Shard {shard_index:04d} | samples={saved_count}/{original_count} | "
             f"search_used={used:.3f} changed={changed:.3f} mean_gap={mean_gap:.3f} | "
+            f"improves={improves:.3f} converts={converts:.3f} | "
             f"path={shard_path} | time={time.time() - t0:.2f}s"
         )
     print(f"Done. saved_samples={total_saved}")

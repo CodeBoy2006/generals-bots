@@ -1304,3 +1304,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop trying to promote static action-label distill checkpoints from the current trace shards. The next data upgrade should save final long-episode conversion labels after following the wrapper/search action, then train gate/adapter decisions on draw->win conversion rather than raw short-horizon search labels.
 - **Context:** New fixed-v5 max500 trace v1h8 saved `569` rows with balanced seats, `62.0%` action-change rate, and `105` short-horizon win best-action labels. Expander v1h8 saved `624` rows across 8/12/16 with `190` win labels. Mixed distill v1 improved fixed-v5 128-row min from same-seed v4 `17.97%` to `21.09%`, but dropped Expander min from `76.56%` to `71.88%`. Fixed-v5-only context-gated adapter changed about `10%` of decisions but scored `23.44%` min versus same-seed v4 `25.78%`; not promoted.
+
+## [2026-06-20 19:53] Max500 Online-Search Conversion Labels
+- **Changes:** Added max500 continuation labels to `adaptive_online_search_trace_dataset.py`, including base/search continuation outcome, score, time, score delta, improvement, and draw/loss-to-win conversion flags. Added continuation row filters and wired `adaptive_strategy_supervised.py` to use `search-continuation` label sources plus conversion-aware action CE modes. Updated README, Chinese manual, and strategy log.
+- **Status:** Completed
+- **Next Steps:** Collect a real fixed-v5 max500 conversion shard with `--truncation 500 --conversion-rollout-steps 500`, then train an 8x policy-head adapter using `--label-source search-continuation` and conversion-positive action CE if enough positives appear.
+- **Context:** CUDA smoke passed for both short conversion (`conversion_rollout_steps=32`) and full max500 conversion (`conversion_rollout_steps=500`) on 2-env shards. Models/artifacts remain under ignored `runs/`; no trained model was written to cache.

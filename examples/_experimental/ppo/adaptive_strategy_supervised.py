@@ -32,7 +32,17 @@ OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
 DATASET_FORMAT_MODES = ("strategy", "plan-q-prefix", "online-search")
-ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win", "search-used", "search-changed")
+ACTION_CE_WEIGHT_MODES = (
+    "all",
+    "non-draw",
+    "wins",
+    "search-best-win",
+    "search-used",
+    "search-changed",
+    "search-continuation-win",
+    "search-improves-continuation",
+    "search-converts-win",
+)
 BALANCE_STRATA_MODES = (
     "none",
     "size-seat",
@@ -40,7 +50,13 @@ BALANCE_STRATA_MODES = (
     "size-seat-oversample",
     "size-seat-domain-oversample",
 )
-LABEL_SOURCE_MODES = ("trajectory", "search-best", "search-best-or-trajectory")
+LABEL_SOURCE_MODES = (
+    "trajectory",
+    "search-best",
+    "search-best-or-trajectory",
+    "search-continuation",
+    "search-continuation-or-trajectory",
+)
 
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
@@ -101,6 +117,8 @@ def load_strategy_dataset(
     require_search_best_win: bool = False,
     require_search_used: bool = False,
     require_search_action_changed: bool = False,
+    require_search_improves_continuation: bool = False,
+    require_search_converts_to_win: bool = False,
     require_finish_within_250: bool = False,
     require_win_or_finish_within_250: bool = False,
     min_search_score_gap: float = 0.0,
@@ -202,6 +220,16 @@ def load_strategy_dataset(
                 "search_action_changed",
                 require_field(shard, path, "search_action_changed").astype(np.bool_),
             )
+        if require_search_improves_continuation:
+            add_row_filter(
+                "search_improves_continuation",
+                require_field(shard, path, "search_improves_continuation").astype(np.bool_),
+            )
+        if require_search_converts_to_win:
+            add_row_filter(
+                "search_converts_to_win",
+                require_field(shard, path, "search_converts_to_win").astype(np.bool_),
+            )
         if require_finish_within_250:
             add_row_filter(
                 "finish<=250",
@@ -236,24 +264,39 @@ def load_strategy_dataset(
             search_best_outcome = shard["search_best_outcome"][shard_indices].astype(np.int32)
         else:
             search_best_outcome = np.full((shard_indices.shape[0],), -1, dtype=np.int32)
-        label_known = search_best_outcome >= 0
+        if "search_continuation_outcome" in shard:
+            search_continuation_outcome = shard["search_continuation_outcome"][shard_indices].astype(np.int32)
+        else:
+            search_continuation_outcome = np.full((shard_indices.shape[0],), -1, dtype=np.int32)
         if label_source in ("search-best", "search-best-or-trajectory"):
-            if np.any(search_best_outcome >= 0):
-                if label_source == "search-best-or-trajectory":
-                    outcome_target = np.where(label_known, search_best_outcome, trajectory_outcome).astype(np.int32)
+            search_label = search_best_outcome
+            label_known = search_label >= 0
+            fallback_to_trajectory = label_source == "search-best-or-trajectory"
+        elif label_source in ("search-continuation", "search-continuation-or-trajectory"):
+            search_label = search_continuation_outcome
+            label_known = search_label >= 0
+            fallback_to_trajectory = label_source == "search-continuation-or-trajectory"
+        else:
+            search_label = np.full_like(search_best_outcome, -1)
+            label_known = np.zeros_like(search_best_outcome, dtype=np.bool_)
+            fallback_to_trajectory = False
+        if label_source != "trajectory":
+            if np.any(label_known):
+                if fallback_to_trajectory:
+                    outcome_target = np.where(label_known, search_label, trajectory_outcome).astype(np.int32)
                     outcome_weight = np.where(label_known, 1.0, trajectory_outcome_weight).astype(np.float32)
                     finish_target = np.where(
                         label_known,
-                        search_best_outcome == OUTCOME_WIN,
+                        search_label == OUTCOME_WIN,
                         shard["finish_within_250"][shard_indices].astype(np.float32) > 0.5,
                     ).astype(np.float32)
                 else:
-                    outcome_target = np.where(label_known, search_best_outcome, OUTCOME_DRAW).astype(np.int32)
+                    outcome_target = np.where(label_known, search_label, OUTCOME_DRAW).astype(np.int32)
                     outcome_weight = label_known.astype(np.float32)
-                    finish_target = (search_best_outcome == OUTCOME_WIN).astype(np.float32)
+                    finish_target = (search_label == OUTCOME_WIN).astype(np.float32)
             else:
                 shard_count = shard_indices.shape[0]
-                if label_source == "search-best-or-trajectory":
+                if fallback_to_trajectory:
                     outcome_target = trajectory_outcome
                     outcome_weight = trajectory_outcome_weight
                     finish_target = shard["finish_within_250"][shard_indices].astype(np.float32)
@@ -340,6 +383,12 @@ def load_strategy_dataset(
             action_weight = require_field(shard, path, "search_used")[shard_indices].astype(np.bool_)
         elif action_ce_weight_mode == "search-changed":
             action_weight = require_field(shard, path, "search_action_changed")[shard_indices].astype(np.bool_)
+        elif action_ce_weight_mode == "search-continuation-win":
+            action_weight = search_continuation_outcome == OUTCOME_WIN
+        elif action_ce_weight_mode == "search-improves-continuation":
+            action_weight = require_field(shard, path, "search_improves_continuation")[shard_indices].astype(np.bool_)
+        elif action_ce_weight_mode == "search-converts-win":
+            action_weight = require_field(shard, path, "search_converts_to_win")[shard_indices].astype(np.bool_)
         else:
             action_weight = np.ones_like(outcome, dtype=np.bool_)
         if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
@@ -1334,6 +1383,8 @@ def parse_args():
     parser.add_argument("--require-search-best-win", action="store_true")
     parser.add_argument("--require-search-used", action="store_true")
     parser.add_argument("--require-search-action-changed", action="store_true")
+    parser.add_argument("--require-search-improves-continuation", action="store_true")
+    parser.add_argument("--require-search-converts-to-win", action="store_true")
     parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
     parser.add_argument("--min-search-score-gap", type=float, default=0.0)
@@ -1523,6 +1574,8 @@ def parse_args():
             parser.error("--require-search-best-win is not available for --dataset-format plan-q-prefix")
         if args.require_search_used or args.require_search_action_changed:
             parser.error("search-used/action-changed filters are not available for --dataset-format plan-q-prefix")
+        if args.require_search_improves_continuation or args.require_search_converts_to_win:
+            parser.error("continuation filters are not available for --dataset-format plan-q-prefix")
         if args.require_finish_within_250 or args.require_win_or_finish_within_250:
             parser.error("finish-window filters are not available for --dataset-format plan-q-prefix")
         if args.require_contact or args.min_visible_enemy_cells > 0 or args.min_visible_enemy_density > 0.0:
@@ -1660,6 +1713,8 @@ def main():
             args.require_search_best_win,
             args.require_search_used,
             args.require_search_action_changed,
+            args.require_search_improves_continuation,
+            args.require_search_converts_to_win,
             args.require_finish_within_250,
             args.require_win_or_finish_within_250,
             args.min_search_score_gap,

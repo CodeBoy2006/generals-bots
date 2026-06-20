@@ -14278,3 +14278,78 @@ Next useful data step:
 Next useful model step:
   train a gate/adapter on final conversion labels, not on raw search action labels.
 ```
+
+### 2026-06-20 19:53 - Max500 Online-Search Conversion Labels
+
+User-facing gate update:
+
+```text
+fixed-v5 short-game diagnostics should use max500 as the main gate.
+max250 is too compressed for realistic 8x8 fixed-v5 games.
+max750 can remain a longer confirmation / ablation horizon.
+```
+
+Implementation:
+
+```text
+adaptive_online_search_trace_dataset.py:
+  added --conversion-rollout-steps
+  added continuation labels:
+    base_continuation_score / outcome / time
+    search_continuation_score / outcome / time
+    search_continuation_score_delta
+    search_improves_continuation
+    search_converts_to_win
+    search_converts_draw_to_win
+  added row filters:
+    --require-search-improves-continuation
+    --require-search-converts-to-win
+    --min-continuation-score-delta
+
+adaptive_strategy_supervised.py:
+  added --label-source search-continuation
+  added --label-source search-continuation-or-trajectory
+  added row filters for continuation improvement/conversion
+  added action CE modes:
+    search-continuation-win
+    search-improves-continuation
+    search-converts-win
+```
+
+Verification:
+
+```text
+py_compile:
+  adaptive_online_search_trace_dataset.py
+  adaptive_strategy_supervised.py
+
+GPU smoke:
+  truncation=500
+  conversion_rollout_steps=32
+  saved 2 rows with continuation fields
+
+GPU max500 smoke:
+  truncation=500
+  conversion_rollout_steps=500
+  saved 2/2 rows
+  search_used=1.000
+  changed=0.500
+  mean_gap=0.019
+```
+
+Next:
+
+```text
+Collect a real fixed-v5 max500 conversion shard:
+  --truncation 500
+  --conversion-rollout-steps 500
+  --search-min-turn 80
+  --search-require-contact
+  --require-search-used
+
+First train on search-continuation labels without requiring conversion-only rows.
+If conversion positives are frequent enough, train an 8x policy-head adapter with:
+  --label-source search-continuation
+  --action-ce-weight-mode search-converts-win
+  --require-search-converts-to-win
+```
