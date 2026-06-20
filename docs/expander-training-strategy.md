@@ -15486,3 +15486,155 @@ It is still too small for a main-policy update.  Next scale target should be
 at least 2k-5k rows or 250+ conversion positives, then train a conditional
 search-entry/controller head rather than a full replace-policy CE checkpoint.
 ```
+
+### 2026-06-20 23:14 - RPA2 Teacher Confirmation and Smoke Compression Negative
+
+Purpose:
+
+```text
+The rpa2 online-search wrapper looked much stronger at 128-row fixed-v5 and
+32-row Expander smoke.  I used the new --eval-batch-size path to confirm it at
+larger rows, then tested whether a tiny rpa2 conversion shard could be compressed
+into a pure 8x policy-head adapter.
+```
+
+RPA2 trace smoke:
+
+```text
+output:
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-conversion-smoke/
+
+settings:
+  fixed-v5 max500
+  v4 base + static conversion adapter v1
+  online search top_k=4, rollout_steps=16, rollouts/action=2
+  min_turn=80, contact-only
+  conversion_rollout_steps=500
+  num_envs=16, num_steps=16, shards=2
+  seed=103000
+
+rows:
+  501 saved
+  search_action_changed 305 / 501 = 60.88%
+  search_improves_continuation 63 / 501 = 12.57%
+  search_converts_to_win 48 / 501 = 9.58%
+  search_converts_draw_to_win 15 / 501 = 2.99%
+  p0 converts 11 / 256 = 4.30%
+  p1 converts 37 / 245 = 15.10%
+  adapter_improves_continuation 0
+  adapter_converts_to_win 0
+```
+
+Interpretation:
+
+```text
+rpa2 search has a much denser conversion signal than earlier rpa1-style trace
+sets, but the static adapter itself does not explain those conversions.  That
+makes "gate static v1 harder" the wrong immediate compression target.  The
+teacher action needs either a new conditional action head or a controller that
+can represent the online-search action, not just when to enable the old adapter.
+```
+
+Tiny rpa2 adapter compression probe:
+
+```text
+model:
+  runs/adaptive-online-search-conversion-adapter-rpa2-smoke/
+    generals-adaptive-online-search-conversion-adapter-rpa2-smoke.eqx
+
+init:
+  static conversion adapter v1
+
+data:
+  rpa2-conversion-smoke, 501 rows
+  action CE / pairwise only on search_converts_to_win rows
+
+loss:
+  policy_kl=2.0
+  action_ce=0.4
+  prefix_pairwise_margin=0.4
+  update_scope=policy-heads
+  no strategy aux
+
+offline:
+  action accuracy oscillated around 25%-50%
+  pair accuracy stayed 0%
+```
+
+Fixed-v5 max500, 128 games/seat, seed `103200`:
+
+```text
+rpa2-smoke adapter:
+  p0 28.91%
+  p1 41.41%
+  min 28.91%
+  draw 8.59% / 10.94%
+
+same-seed static v1:
+  p0 32.03%
+  p1 39.84%
+  min 32.03%
+  draw 13.28% / 9.38%
+```
+
+Decision:
+
+```text
+Do not promote or expand this tiny direct adapter compression run.  It is below
+static v1 on the min row and confirms that 48 conversion positives are too few
+and too action-diverse for another policy-head CE pass.
+```
+
+High-budget rpa2 teacher confirmation:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+online search:
+  top_k=4
+  rollout_steps=16
+  rollouts/action=2
+  min_turn=80
+  require_contact=true
+  min_score_gap=0
+```
+
+Fixed-v5 max500, 256 games/seat, seed `103300`, `eval_batch_size=64`:
+
+```text
+p0: 163/76/17, win 63.67%, draw 6.64%, mean_time 265.0
+p1: 149/86/21, win 58.20%, draw 8.20%, mean_time 266.0
+min win rate: 58.20%
+```
+
+Expander max750, 64 games/row, seed `103400`, `eval_batch_size=32`,
+`online_search_max_grid_size=16`:
+
+```text
+8p0:  59/5/0,  win 92.19%, draw 0.00%
+8p1:  57/7/0,  win 89.06%, draw 0.00%
+12p0: 61/3/0,  win 95.31%, draw 0.00%
+12p1: 62/1/1,  win 96.88%, draw 1.56%
+16p0: 62/1/1,  win 96.88%, draw 1.56%
+16p1: 63/0/1,  win 98.44%, draw 1.56%
+min win rate: 89.06%
+```
+
+Decision:
+
+```text
+Promote rpa2 online search to the current strongest high-budget teacher/wrapper.
+It beats fixed-v5 max500 decisively at 256-row and gives a clear larger-map
+Expander advantage in 64-row smoke.  It is still too slow for every inner-loop
+gate, but it is now the best target for distillation/controller research.
+
+Next high-leverage step:
+  scale rpa2 trace collection to at least 2k-5k rows / 250+ conversion positives
+  train a conditional online-search action controller or planner-aware head
+  avoid another tiny full-replace policy-head CE pass
+```

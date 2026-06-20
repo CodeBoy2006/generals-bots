@@ -1400,3 +1400,9 @@
 - **Status:** Completed
 - **Next Steps:** Scale this data to at least 2k-5k rows or 250+ conversion positives, then train a conditional search-entry/controller head. Avoid another full replace-policy CE run on this small shard.
 - **Context:** Four GPU shards saved 471 rows with balanced seats (`223/248`), `63.69%` search action changes, `17.41%` search-improves-continuation, and `12.95%` search-converts-to-win (`61` positives). Search continuation wins were `146` vs base continuation wins `138`; the value is in conversion rows, not raw outcome count.
+
+## [2026-06-20 23:14] RPA2 Teacher Confirmation
+- **Changes:** Collected a small rpa2 fixed-v5 max500 continuation trace under `runs/adaptive-online-search-fixed-v5-max500-rpa2-conversion-smoke/`, trained a tiny pure policy-head rpa2 adapter probe under `runs/adaptive-online-search-conversion-adapter-rpa2-smoke/`, evaluated the high-budget rpa2 wrapper, and documented results in README, Chinese manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Scale rpa2 trace collection to at least `2k-5k` rows or `250+` conversion positives, then train a conditional online-search action controller/planner-aware head. Do not expand the tiny direct policy-head CE smoke.
+- **Context:** The rpa2 trace smoke saved `501` rows with `48` search-converts-to-win and `63` search-improves-continuation rows; static adapter continuation converted `0` rows. The tiny rpa2 adapter regressed fixed-v5 max500 128-row min to `28.91%` versus same-seed static v1 `32.03%`. The actual rpa2 wrapper confirmed strongly: fixed-v5 max500 256-row min `58.20%`, and Expander 8/12/16 max750 64-row min `89.06%` with 12x/16x rows at `95.31%`-`98.44%`.
