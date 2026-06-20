@@ -15639,6 +15639,90 @@ Next high-leverage step:
   avoid another tiny full-replace policy-head CE pass
 ```
 
+### 2026-06-20 23:42 - Online-Search Gate Hook and Negative First Gate
+
+Implementation:
+
+```text
+adaptive_online_search_gate_supervised.py:
+  trains a CommandGateNetwork from online-search trace shards
+  features:
+    search score stats, prior score stats, best prior rank,
+    fallback prior, best-minus-fallback prior, action-changed flag,
+    normalized time, seat, active fraction, visible enemy density, contact
+
+evaluate_adaptive_policy.py:
+  adds --online-search-gate-path
+  adds --online-search-gate-threshold
+  adds --online-search-gate-hidden-dim
+  gate runs after online search has scored candidates
+  if gate probability < threshold, fallback to the original policy action
+```
+
+This is a risk filter, not a compute-saving controller: it still pays the full
+online-search cost before deciding whether to accept the search action.
+
+Training:
+
+```text
+model:
+  runs/adaptive-online-search-gate-rpa2-improve-v0/
+    generals-adaptive-online-search-gate-rpa2-improve-v0.eqx
+
+datasets:
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-v0/*.npz
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-conversion-smoke/*.npz
+
+positive:
+  search_improves_continuation
+
+filters:
+  require_search_used
+  require_action_changed
+
+examples:
+  rows 972
+  kept changed-action examples 605
+  positives 84 = 13.88%
+
+final offline:
+  loss 0.6252
+  acc 68.9%
+  precision 27.0%
+  recall 64.0%
+  P+ 0.538
+  P- 0.415
+```
+
+Fixed-v5 max500, 128 games/seat, seed `104600`:
+
+```text
+gated rpa2, threshold 0.5:
+  p0 57.03%
+  p1 61.72%
+  min 57.03%
+  draw 7.03% / 7.03%
+
+ungated rpa2, same seed:
+  p0 64.06%
+  p1 58.59%
+  min 58.59%
+  draw 6.25% / 7.81%
+```
+
+Decision:
+
+```text
+Do not promote the first online-search gate.  It shifts strength from p0 to p1
+and lowers the same-seed min row.  The hook is useful because it gives us a
+runtime controller path for search actions, but the current 17-feature MLP is
+not enough to improve rpa2.  Next controller work should either:
+
+  1. train on a much larger rpa2 trace set,
+  2. add richer state/action features beyond score/prior statistics, or
+  3. move from post-search accept/reject to a cheaper pre-search entry policy.
+```
+
 ### 2026-06-20 23:15 - rpa2 Max500 Trace v1 and Offline Gate Negative
 
 Scaled the rpa2 fixed-v5 max500 trace collection from the first four shards to a

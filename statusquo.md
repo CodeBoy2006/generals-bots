@@ -1412,3 +1412,15 @@
 - **Status:** Completed
 - **Next Steps:** Do not use this gate for promotion. Use the rpa2 trace data for a richer controller or planner-aware conditional action head, and keep fixed-v5 diagnostics on `max500` with `max750` or longer only as confirmation.
 - **Context:** Combined rpa2 v0+v1 had `2078` rows, `1317` changed actions, and `153` strict conversion rows. The conversion gate ended at precision `13.10%` / recall `94.74%`; the broader improve gate ended at precision `14.75%` / recall `56.63%`. Score/prior/phase features alone are not enough to accept search actions safely.
+
+## [2026-06-20 23:42] Online Search Gate Hook
+- **Changes:** Added and wired `adaptive_online_search_gate_supervised.py`; added `evaluate_adaptive_policy.py --online-search-gate-path/--online-search-gate-threshold/--online-search-gate-hidden-dim`; trained `runs/adaptive-online-search-gate-rpa2-improve-v0/generals-adaptive-online-search-gate-rpa2-improve-v0.eqx`; documented the result.
+- **Status:** Completed
+- **Next Steps:** Do not promote the first gate. Keep the hook as a controller path, but use larger rpa2 trace data and richer features before trying another online-search accept/reject gate.
+- **Context:** The gate trained on `605` changed-action examples with `84` `search_improves_continuation` positives. Offline final was acc `68.9%`, precision `27.0%`, recall `64.0%`, P+ `0.538`, P- `0.415`. Fixed-v5 max500 128-row seed `104600`: gated threshold `0.5` min `57.03%`; ungated rpa2 same seed min `58.59%`.
+
+## [2026-06-20 23:50] rpa2 Candidate Scorer Probe
+- **Changes:** Added `examples/_experimental/ppo/adaptive_online_search_candidate_scorer.py`, a richer candidate-level MLP that learns online-search top-k ranking from observation/action-local features; trained all-changed, strict-convert, broader-improve, and hard-best variants under ignored `runs/`.
+- **Status:** Completed
+- **Next Steps:** Do not wire the scorer into gameplay yet. Use strict conversion rows with soft-rank supervision as the next controller/head direction, and collect more rpa2 conversion rows before attempting evaluator integration.
+- **Context:** After removing an initial label-leak feature (`candidate_is_search_action`), the best all-changed scorer reached val top1 `38.78%`, top2 `70.0%`, pair `59.9%` versus prior top1 `0.38%`. Strict `search_converts_to_win` soft-rank rows were more promising despite only `101` rows: best val top1 `55.0%`, top2 `70.0%`, pair `60.0%`; hard-best CE overfit and fell to best top1 `30.0%`.
