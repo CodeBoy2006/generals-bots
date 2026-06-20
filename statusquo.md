@@ -1172,3 +1172,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue valuecal->PPO or current strategy-Q replacement on the A1 fixed-search shard. Next collect changed-action counterfactual rows where the base action draws/loses and fixed-search replacement later wins, then train a gate/executor on that changed-action outcome.
 - **Context:** Mixed-label value calibration learned offline only modestly (`finish 56.1%`, outcome `62.5%`, value CE `3.3793`). The 192-env PPO variant OOMed during compile; the 96-env run completed but fixed-v5 max250 stayed at `10.94%` min and Expander 128-row min was `74.22%`. The A1 Q probe kept weak search-Q accuracy (`26.5%`) and conservative Q replacement fell to fixed-v5 min `9.38%`.
+
+## [2026-06-20 13:15] Changed-Action Plan-Q Gate Probe
+- **Changes:** Added `adaptive_plan_q_dataset.py --strategy-finish-outputs` so Plan-Q collection can load multi-horizon strategy checkpoints, added a parser regression test, documented the collector flag, and logged the fixed-v5 changed-action command-gate GPU probe.
+- **Status:** Completed
+- **Next Steps:** Do not promote or threshold-sweep the command-gate route. Move to a plan-conditioned executor or longer executed-command trajectory collection with explicit finish pressure.
+- **Context:** The safe-v3 policy checkpoint has no spatial source/target heads, so model-candidate collection used the policy-preserving spatial checkpoint `adaptive-plan-q-source-target-highgap-mid100-v0`. The resulting gate fit a low-positive dataset (`7805` rows, `4.09%` positives), but fixed-v5 max250 collapsed from gate-off min `10.94%` to gated min `0.00%` with `98.44%` draw on both seats.

@@ -1183,6 +1183,43 @@ def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
     assert oversampled["obs"].shape[0] == 4
 
 
+def test_plan_q_dataset_parse_args_accepts_strategy_finish_outputs(monkeypatch):
+    import pytest
+
+    from examples._experimental.ppo.adaptive_plan_q_dataset import parse_args
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "adaptive_plan_q_dataset.py",
+            "4",
+            "--model-path",
+            "model.eqx",
+            "--strategy-aux",
+            "--strategy-finish-outputs",
+            "3",
+        ],
+    )
+    args = parse_args()
+
+    assert args.strategy_finish_outputs == 3
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "adaptive_plan_q_dataset.py",
+            "4",
+            "--model-path",
+            "model.eqx",
+            "--strategy-aux",
+            "--strategy-finish-outputs",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_accepted_replacement_weights_prefer_outcome_then_score():
     from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights
 

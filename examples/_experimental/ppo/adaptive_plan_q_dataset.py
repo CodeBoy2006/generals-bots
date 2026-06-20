@@ -1180,6 +1180,7 @@ def parse_args():
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--source-count", type=int, default=4)
     parser.add_argument("--target-count", type=int, default=4)
@@ -1243,6 +1244,8 @@ def parse_args():
         parser.error("--input-channels must be positive")
     if args.value_loss == "hl-gauss" and args.value_bins <= 1:
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
+    if args.strategy_finish_outputs <= 0:
+        parser.error("--strategy-finish-outputs must be positive")
     if args.source_count <= 0 or args.target_count <= 0:
         parser.error("--source-count and --target-count must be positive")
     if (
@@ -1341,6 +1344,8 @@ def main():
         init_strategy_aux=args.strategy_aux,
         strategy_spatial_aux=args.strategy_spatial_aux,
         init_strategy_spatial_aux=args.strategy_spatial_aux,
+        strategy_finish_outputs=args.strategy_finish_outputs,
+        init_strategy_finish_outputs=args.strategy_finish_outputs,
         global_context=network_global_context,
         init_global_context=network_global_context,
         network_arch=args.network_arch,
@@ -1450,6 +1455,7 @@ def main():
         "outcome_head": args.outcome_head,
         "strategy_aux": args.strategy_aux,
         "strategy_spatial_aux": args.strategy_spatial_aux,
+        "strategy_finish_outputs": args.strategy_finish_outputs,
         "policy_mode": args.policy_mode,
         "source_count": args.source_count,
         "target_count": args.target_count,

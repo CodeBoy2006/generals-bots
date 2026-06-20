@@ -11600,3 +11600,119 @@ Next useful step should change the data/control target, not the weights:
   fixed-search replacement later wins, then train a gate/executor on that
   changed-action outcome rather than all best actions.
 ```
+
+### 2026-06-20: Changed-Action Plan-Q Gate Probe
+
+The next probe targeted inference-time command replacement using model-generated
+source/target candidates instead of heuristic candidates. The Plan-Q collector
+first needed an explicit multi-horizon finish template:
+
+```text
+adaptive_plan_q_dataset.py:
+  added --strategy-finish-outputs
+
+reason:
+  multi-horizon strategy checkpoints store three finish logits, while the
+  collector previously defaulted to the older binary finish head.
+```
+
+`adaptive-midgame-contact-searchwin-imitation-v3` remains a safe policy base,
+but it is not a valid source/target command candidate model because it was saved
+without `strategy_spatial_aux`. The probe therefore used the policy-preserving
+spatial checkpoint:
+
+```text
+base feature/policy model:
+  runs/adaptive-plan-q-source-target-highgap-mid100-v0/
+
+collector:
+  candidate_source: model-worker
+  candidate_target: model
+  grid: 8x8 padded to 16
+  warmup: 80
+  truncation: 250
+  plan rollout: 24
+  worker steps: 3
+  opponent: fixed v5 sample
+```
+
+GPU collection summary:
+
+```text
+output:
+  runs/adaptive-plan-q-fixedv5-changed-mid-v1/
+
+shard 0000:
+  samples 448/512
+  mean_gap 0.1119
+  best_win 11.4%
+  best_draw 88.6%
+
+shard 0001:
+  samples 451/512
+  mean_gap 0.0638
+  best_win 2.9%
+  best_draw 96.9%
+
+shard 0002:
+  samples 459/512
+  mean_gap 0.0668
+  best_win 5.9%
+  best_draw 93.9%
+
+shard 0003:
+  samples 448/512
+  mean_gap 0.0593
+  best_win 3.3%
+  best_draw 96.7%
+```
+
+Command gate training fit the offline label distribution but the positive rate
+was low:
+
+```text
+run:
+  runs/adaptive-command-gate-fixedv5-changed-mid-v1/
+
+examples:
+  7805
+
+positive:
+  4.09%
+
+epoch 60:
+  loss 0.4671
+  accuracy 78.9%
+  P+ 0.678
+  P- 0.309
+  Pmean 0.325
+```
+
+Fixed-v5 max250 evaluation at the same seed:
+
+```text
+gate off:
+  p0 14/50/64, win 10.94%, draw 50.00%
+  p1 14/38/76, win 10.94%, draw 59.38%
+  min 10.94%
+
+gate threshold 0.6:
+  p0 0/2/126, win 0.00%, draw 98.44%
+  p1 0/2/126, win 0.00%, draw 98.44%
+  min 0.00%
+```
+
+Conclusion:
+
+```text
+Do not promote or sweep this command-gate route.
+The gate can identify comparable changed-action positives offline, but current
+source/target proposal plus worker replacement stalls into almost pure draw
+against fixed v5.
+
+Next useful direction:
+  train a plan-conditioned executor or command policy with explicit finish
+  pressure, or collect longer executed-command trajectories where the
+  replacement itself reaches terminal wins. The current single-step command gate
+  is not enough.
+```
