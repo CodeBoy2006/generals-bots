@@ -1490,3 +1490,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the one-step strict-conversion head. Use the new head and prefix trace fields for executed-prefix or multi-step conditional action training; keep fixed-v5 primary triage at `max500`, with `max750` or longer only as confirmation.
 - **Context:** GPU training on rpa2 v0+v1+v2-small strict conversions selected epoch 34 with only `10.42%` holdout pairwise accuracy on v3-small. Replace-mode fixed-v5 max500 128 games/seat scored p0 `30.47%`, p1 `20.31%`, min `20.31%`, so the separate head reduced risk but did not solve one-step label noise.
+
+## [2026-06-21 00:35] Max500 Executed-Prefix Trace Probe
+- **Changes:** Collected `runs/adaptive-online-search-prefix-max500-v0/` with `--save-executed-prefix-steps 8`, trained `adaptive-online-search-prefix-conversion-head-v0`, `adaptive-online-search-prefix-policy-v0`, and a stronger `prefix-policy-v1-strong`, then documented the results.
+- **Status:** Completed
+- **Next Steps:** Do not promote these single-shard prefix checkpoints. Collect more strict max500 executed-prefix shards from the static-v1 + online-search teacher and add independent prefix validation before another training run.
+- **Context:** The strict shard kept `56/1024` origin rows, p0/p1 `28/28`, with `425/448` valid prefix steps and 100% win plan outcomes. Prefix policy v0 reached fixed-v5 max500 256-row min `37.50%` versus same-seed static v1 `38.67%`; aggressive v1 dropped to 128-row min `30.47%`. The prefix data path is usable, but the first shard is too small to beat static v1.

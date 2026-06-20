@@ -16593,3 +16593,167 @@ policy.  The code path is useful infrastructure for the next executed-prefix or
 multi-step conditional-head run.  Keep fixed-v5 triage on max500, with max750 or
 longer only as confirmation.
 ```
+
+### 2026-06-21 00:35 - Max500 Executed-Prefix Trace Probe
+
+Used the new `adaptive_online_search_trace_dataset.py --save-executed-prefix-steps`
+path to turn online-search decisions into Plan-Q-prefix-compatible rows.  The
+goal was to test whether a short option trace transfers better than one-step
+strict-conversion CE.
+
+Smoke checks:
+
+```text
+collector smoke:
+  num_envs=4
+  num_steps=6
+  conversion_rollout_steps=2
+  save_executed_prefix_steps=3
+  wrote 24 rows
+  worker_prefix_valid: 60 / 72
+
+trainer smoke:
+  dataset_format=plan-q-prefix
+  update_scope=conversion-policy-head
+  samples after non-pass filter: 30
+  1 epoch CUDA smoke passed
+```
+
+Real strict prefix collection:
+
+```text
+path:
+  runs/adaptive-online-search-prefix-max500-v0/
+    prefix-max500-00000.npz
+
+teacher/deployment:
+  base = adaptive-unet-ppo-v4
+  static adapter = adaptive-online-search-conversion-adapter-v1
+  fixed-v5 sample opponent
+  max500 truncation
+  search top_k=4, rollout_steps=16, rollouts/action=1
+  warmup=80, search_min_turn=80, require_contact=true
+  conversion_rollout_steps=500
+  save_executed_prefix_steps=8
+
+filters:
+  search_used
+  search_action_changed
+  search_converts_to_win
+
+result:
+  kept 56 / 1024 origin rows
+  p0/p1 = 28 / 28
+  worker_prefix_valid = 425 / 448
+  non-pass prefix actions = 441 / 448
+  plan outcome = 100% win
+  mean plan_advantage = 173.97
+  turn range = 81..141
+```
+
+Conversion-head training from v4:
+
+```text
+checkpoint:
+  runs/adaptive-online-search-prefix-conversion-head-v0/
+
+data:
+  420 prefix samples after non-pass + plan_outcome=win filter
+
+loss:
+  update_scope=conversion-policy-head
+  policy_kl=1.0
+  action_ce=0.25
+  pairwise=0.25
+  prefix_advantage_weighting=true
+  prefix_step_decay=8
+
+offline final:
+  action accuracy ~= 30.4%
+  pairwise accuracy ~= 8.5%
+
+fixed-v5 max500, 128 games/seat, seed130140:
+  conversion-head replace:
+    p0 31.25%
+    p1 15.62%
+    min 15.62%
+  same-seed v4 base:
+    p0 26.56%
+    p1 12.50%
+    min 12.50%
+```
+
+The separate head improved over same-seed v4 base but remained far below the
+static adapter baseline.
+
+Policy-head prefix adapter from static v1:
+
+```text
+checkpoint:
+  runs/adaptive-online-search-prefix-policy-v0/
+
+init:
+  adaptive-online-search-conversion-adapter-v1
+
+loss:
+  update_scope=policy-heads
+  policy_kl=1.0
+  action_ce=0.25
+  pairwise=0.25
+  prefix_advantage_weighting=true
+  prefix_step_decay=8
+
+fixed-v5 max500, 128 games/seat, seed130140:
+  prefix v0 min: 32.81%
+  same-seed static v1 min: 32.03%
+
+fixed-v5 max500, 256 games/seat, seed130180:
+  prefix v0:
+    p0 37.50%
+    p1 37.89%
+    min 37.50%
+  static v1:
+    p0 39.06%
+    p1 38.67%
+    min 38.67%
+```
+
+The 128-row prefix gain was noise; the 256-row same-seed check still favors the
+current static v1 adapter.
+
+Aggressive policy-head probe:
+
+```text
+checkpoint:
+  runs/adaptive-online-search-prefix-policy-v1-strong/
+
+loss:
+  policy_kl=0.3
+  action_ce=1.0
+  pairwise=0.5
+  lr=1e-4
+  epochs=50
+
+offline:
+  action accuracy ~= 34.9%
+  pairwise accuracy ~= 6.8%
+
+fixed-v5 max500, 128 games/seat, seed130140:
+  p0 34.38%
+  p1 30.47%
+  min 30.47%
+```
+
+Decision:
+
+```text
+The executed-prefix data path is valid and the first strict max500 shard is much
+cleaner than one-step strict-conversion rows.  However, 56 origin rows / 420
+usable prefix samples are too small to beat static v1 after 256-row evaluation.
+Do not promote prefix v0/v1.
+
+Next useful move:
+  collect several more strict max500 executed-prefix shards with the same
+  static-v1 + online-search teacher, then train with independent prefix
+  validation.  Do not continue CE-strength scans on the current single shard.
+```
