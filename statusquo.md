@@ -1448,3 +1448,15 @@
 - **Status:** Completed
 - **Next Steps:** Use independent validation for any future scorer/controller. Do not wire the scorer into gameplay until pair/rank calibration improves on independent shards.
 - **Context:** Training on rpa2 v0+v1 strict conversion rows (`101`) and validating on partial v2 strict conversion rows (`32`) gave best epoch `2`, top1/top2/pair `40.62%/53.12%/50.26%` versus prior top1 `0.00%`. Final epoch overtrained to top1 `21.88%`; scorer action top1 transfers somewhat, but ranking calibration is weak.
+
+## [2026-06-20 23:52] rpa2 Strict Conversion v3/v4
+- **Changes:** Collected two small fixed-v5 max500 rpa2 strict-conversion batches under `runs/adaptive-online-search-fixed-v5-max500-rpa2-v3-convert/` and `...v4-convert/`, then trained independent-validation scorer probes `indval-v1` and `indval-v2`.
+- **Status:** Completed
+- **Next Steps:** Move from standalone scorer diagnostics toward a planner-aware conditional action head with early stopping and independent validation. Do not integrate final-epoch scorer weights into gameplay.
+- **Context:** v3 added `12` strict rows (`p0/p1=5/7`); v4 added `19` strict rows (`p0/p1=3/16`). Training on v0+v1+v2 and validating on v3+v4 reached best top1/top2/pair `45.16%/74.19%/58.38%`; training on v0+v1+v2+v3 and validating on p1-heavy v4 reached `63.16%/89.47%/64.91%`. Final epochs collapsed, confirming early stopping is mandatory.
+
+## [2026-06-20 23:54] Candidate Scorer Heatmap Features
+- **Changes:** Added `adaptive_online_search_candidate_scorer.py --heatmap-features`, including saved source/target/enemy-general heatmaps and target-center progress features; trained heatmap independent-validation probes.
+- **Status:** Completed
+- **Next Steps:** Keep heatmap features for model-aware scorer/conditional-head diagnostics, but require independent validation before integration.
+- **Context:** Heatmap v0 on v3+v4 validation improved top1 from no-heatmap `45.16%` to `51.61%` with pair unchanged `58.38%`; top2 dropped from `74.19%` to `64.52%`. Heatmap v1 on p1-heavy v4 reached top1/top2/pair `57.89%/63.16%/56.14%`, below no-heatmap `63.16%/89.47%/64.91%`, so heatmaps help some splits but are not sufficient alone.

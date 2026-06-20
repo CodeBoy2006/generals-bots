@@ -16061,3 +16061,114 @@ diagnostics, not direct evaluator integration.  Next code direction should be a
 planner-aware conditional action head with independent validation and early
 stopping, or more strict-conversion data before revisiting scorer integration.
 ```
+
+### 2026-06-20 23:52 - rpa2 Strict Conversion v3/v4 and Indval
+
+Collected two small strict-conversion batches instead of one long run to avoid
+orphaned GPU processes:
+
+```text
+v3:
+  output: runs/adaptive-online-search-fixed-v5-max500-rpa2-v3-convert/
+  shards: 2
+  strict conversion rows: 12
+  seat balance: p0 5 / p1 7
+
+v4:
+  output: runs/adaptive-online-search-fixed-v5-max500-rpa2-v4-convert/
+  shards: 2
+  strict conversion rows: 19
+  seat balance: p0 3 / p1 16
+```
+
+Independent validation probes:
+
+```text
+indval-v1:
+  train: v0 + v1 + partial v2
+  validation: v3 + v4
+  train rows: 133
+  val rows: 31
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-v1/
+  best epoch: 26
+  prior top1/top2: 0.00% / 25.81%
+  scorer top1/top2/pair: 45.16% / 74.19% / 58.38%
+  final top1/top2/pair: 38.71% / 54.84% / 51.35%
+
+indval-v2:
+  train: v0 + v1 + partial v2 + v3
+  validation: v4 only
+  train rows: 145
+  val rows: 19
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-v2/
+  best epoch: 3
+  prior top1/top2: 0.00% / 15.79%
+  scorer top1/top2/pair: 63.16% / 89.47% / 64.91%
+  final top1/top2/pair: 26.32% / 52.63% / 43.86%
+```
+
+Decision:
+
+```text
+Strict-conversion scorer signal transfers to new shards, including the p1-heavy
+v4 shard, but only with early stopping.  This strengthens the case for a
+planner-aware conditional action head trained on conversion rows with
+independent validation and best-checkpoint selection.  It is still too brittle
+for direct evaluator integration: final-epoch collapse shows overfitting is
+easy at this data scale.
+```
+
+### 2026-06-20 23:54 - Candidate Scorer Heatmap Features
+
+Extended `adaptive_online_search_candidate_scorer.py` with
+`--heatmap-features`, adding saved model/strategy maps to each candidate feature
+vector:
+
+```text
+source_heatmap at source/dest
+target_heatmap at source/dest
+enemy_general_heatmap at source/dest
+distance to target_heatmap center from source/dest
+target-center progress for the candidate move
+```
+
+The script now writes feature names through a shared helper and checks
+train/validation feature-shape compatibility.
+
+Heatmap-feature probes:
+
+```text
+heatmap-v0:
+  train: v0 + v1 + partial v2
+  validation: v3 + v4
+  train rows: 133
+  val rows: 31
+  feature dim: 105
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-heatmap-v0/
+  best epoch: 48
+  prior top1/top2: 0.00% / 25.81%
+  scorer top1/top2/pair: 51.61% / 64.52% / 58.38%
+  no-heatmap reference: 45.16% / 74.19% / 58.38%
+
+heatmap-v1:
+  train: v0 + v1 + partial v2 + v3
+  validation: v4 only
+  train rows: 145
+  val rows: 19
+  feature dim: 105
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-heatmap-v1/
+  best epoch: 28
+  prior top1/top2: 0.00% / 15.79%
+  scorer top1/top2/pair: 57.89% / 63.16% / 56.14%
+  no-heatmap reference: 63.16% / 89.47% / 64.91%
+```
+
+Decision:
+
+```text
+Heatmap features improve the broader v3+v4 independent validation top1 but do
+not dominate the smaller p1-heavy v4 split.  They are still a useful ingredient:
+they move the scorer toward model-aware conditional action selection instead of
+score/prior-only gating.  Keep this path, but require independent validation and
+best-epoch selection before any gameplay integration.
+```

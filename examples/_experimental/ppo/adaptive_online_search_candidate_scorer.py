@@ -67,6 +67,28 @@ BASE_FEATURE_NAMES = (
     "visible_enemy_density",
     "contact",
 )
+HEATMAP_FEATURE_NAMES = (
+    "source_heatmap_source",
+    "source_heatmap_dest",
+    "target_heatmap_source",
+    "target_heatmap_dest",
+    "enemy_general_heatmap_source",
+    "enemy_general_heatmap_dest",
+    "target_center_source_distance",
+    "target_center_dest_distance",
+    "target_center_progress",
+)
+
+
+def candidate_feature_names(local_channels: int, heatmap_features: bool) -> list[str]:
+    """Return feature names for candidate scorer sidecars."""
+    names = list(BASE_FEATURE_NAMES)
+    if heatmap_features:
+        names.extend(HEATMAP_FEATURE_NAMES)
+    names.extend(f"source_ch{idx}" for idx in range(local_channels))
+    names.extend(f"dest_ch{idx}" for idx in range(local_channels))
+    names.extend(f"source_minus_dest_ch{idx}" for idx in range(local_channels))
+    return names
 
 
 class OnlineSearchCandidateScorer(eqx.Module):
@@ -163,6 +185,7 @@ def build_candidate_features_from_shard(
     shard: np.lib.npyio.NpzFile,
     max_steps: int,
     local_channels: int,
+    heatmap_features: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
     """Return row-candidate features and search score targets for one trace shard."""
     obs = shard["obs"].astype(np.float32)
@@ -243,6 +266,49 @@ def build_candidate_features_from_shard(
         shard["visible_enemy_density"].astype(np.float32)[:, None, None].repeat(top_k, axis=1),
         shard["contact"].astype(np.float32)[:, None, None].repeat(top_k, axis=1),
     ]
+    if heatmap_features:
+        required_heatmaps = ("source_heatmap", "target_heatmap", "enemy_general_heatmap")
+        missing = [name for name in required_heatmaps if name not in shard]
+        if missing:
+            raise KeyError(f"Shard is missing heatmap features: {', '.join(missing)}")
+        source_heatmap = shard["source_heatmap"].astype(np.float32)
+        target_heatmap = shard["target_heatmap"].astype(np.float32)
+        enemy_general_heatmap = shard["enemy_general_heatmap"].astype(np.float32)
+        source_target_values = _take2d(source_heatmap, source_row, source_col)
+        dest_source_values = _take2d(source_heatmap, dest_row, dest_col)
+        source_target_pref = _take2d(target_heatmap, source_row, source_col)
+        dest_target_pref = _take2d(target_heatmap, dest_row, dest_col)
+        source_enemy_general = _take2d(enemy_general_heatmap, source_row, source_col)
+        dest_enemy_general = _take2d(enemy_general_heatmap, dest_row, dest_col)
+        coords = np.arange(pad_size, dtype=np.float32)
+        heat_sum = np.maximum(target_heatmap.reshape(rows, -1).sum(axis=1), 1.0e-6)
+        flat_target = target_heatmap.reshape(rows, -1)
+        flat_rows = np.repeat(coords, pad_size)[None, :]
+        flat_cols = np.tile(coords, pad_size)[None, :]
+        target_center_row = (flat_target * flat_rows).sum(axis=1) / heat_sum
+        target_center_col = (flat_target * flat_cols).sum(axis=1) / heat_sum
+        max_distance = max(2 * (pad_size - 1), 1)
+        source_center_distance = (
+            np.abs(source_row.astype(np.float32) - target_center_row[:, None])
+            + np.abs(source_col.astype(np.float32) - target_center_col[:, None])
+        ) / max_distance
+        dest_center_distance = (
+            np.abs(dest_row.astype(np.float32) - target_center_row[:, None])
+            + np.abs(dest_col.astype(np.float32) - target_center_col[:, None])
+        ) / max_distance
+        feature_parts.extend(
+            [
+                source_target_values[:, :, None],
+                dest_source_values[:, :, None],
+                source_target_pref[:, :, None],
+                dest_target_pref[:, :, None],
+                source_enemy_general[:, :, None],
+                dest_enemy_general[:, :, None],
+                source_center_distance[:, :, None],
+                dest_center_distance[:, :, None],
+                (source_center_distance - dest_center_distance)[:, :, None],
+            ]
+        )
     kept_channels = min(local_channels, obs.shape[1])
     if kept_channels > 0:
         feature_parts.extend(
@@ -271,6 +337,7 @@ def load_dataset(
     positive_field: str | None,
     max_steps: int,
     local_channels: int,
+    heatmap_features: bool,
     max_rows: int | None,
     seed: int,
 ) -> tuple[dict[str, jnp.ndarray], dict[str, object]]:
@@ -294,6 +361,7 @@ def load_dataset(
                 shard,
                 max_steps=max_steps,
                 local_channels=local_channels,
+                heatmap_features=heatmap_features,
             )
             keep = np.ones((features.shape[0],), dtype=np.bool_)
             if require_search_used:
@@ -498,6 +566,11 @@ def parse_args():
     parser.add_argument("--positive-field", choices=POSITIVE_FIELDS, default=None)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--local-channels", type=int, default=20)
+    parser.add_argument(
+        "--heatmap-features",
+        action="store_true",
+        help="Include saved source/target/enemy-general heatmap features as a model-feature diagnostic.",
+    )
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--max-val-rows", type=int, default=None)
     parser.add_argument("--val-fraction", type=float, default=0.2)
@@ -551,6 +624,7 @@ def main():
         args.positive_field,
         args.max_steps,
         args.local_channels,
+        args.heatmap_features,
         args.max_rows,
         args.seed,
     )
@@ -565,6 +639,7 @@ def main():
             args.positive_field,
             args.max_steps,
             args.local_channels,
+            args.heatmap_features,
             args.max_val_rows,
             args.seed + 1,
         )
@@ -643,12 +718,10 @@ def main():
     best_path = model_path.with_name(model_path.stem + ".best" + model_path.suffix)
     eqx.tree_serialise_leaves(best_path, best_model)
     final_loss, final_metrics = evaluate_loss(model, as_batch(val_data), args.temperature, args.hard_best_weight)
-    actual_local_channels = max(0, (int(dataset["features"].shape[-1]) - len(BASE_FEATURE_NAMES)) // 3)
+    heatmap_dim = len(HEATMAP_FEATURE_NAMES) if args.heatmap_features else 0
+    actual_local_channels = max(0, (int(dataset["features"].shape[-1]) - len(BASE_FEATURE_NAMES) - heatmap_dim) // 3)
     sidecar = {
-        "feature_names": list(BASE_FEATURE_NAMES)
-        + [f"source_ch{idx}" for idx in range(actual_local_channels)]
-        + [f"dest_ch{idx}" for idx in range(actual_local_channels)]
-        + [f"source_minus_dest_ch{idx}" for idx in range(actual_local_channels)],
+        "feature_names": candidate_feature_names(actual_local_channels, args.heatmap_features),
         "feature_mean": np.asarray(model.feature_mean).tolist(),
         "feature_std": np.asarray(model.feature_std).tolist(),
         "hidden_dim": args.hidden_dim,
@@ -661,6 +734,7 @@ def main():
             "require_action_changed": args.require_action_changed,
             "min_score_gap": args.min_score_gap,
             "local_channels": args.local_channels,
+            "heatmap_features": args.heatmap_features,
         },
         "dataset": stats,
         "validation_dataset": val_stats,
