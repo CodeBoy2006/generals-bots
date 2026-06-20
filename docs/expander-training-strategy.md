@@ -14797,3 +14797,51 @@ The next gate attempt needs either:
   2. direct adapter-vs-base continuation labels, using adapter_converts_to_win /
      adapter_improves_continuation rather than search labels.
 ```
+
+### 2026-06-20 21:10 - Max500 Finish Labels First-Class
+
+The fixed-v5 diagnostic gate is now max500, so the data and supervised-training
+interfaces should no longer force finishability through the old 250-step label.
+
+Implementation:
+
+```text
+adaptive_strategy_dataset.py:
+  saves finish_within_500
+  adds --require-finish-within-500
+  adds --require-win-or-finish-within-500
+
+adaptive_strategy_supervised.py:
+  adds --require-finish-within-500
+  adds --require-win-or-finish-within-500
+  adds --finish-target-horizon 250|500
+  binary finish heads and the third multi-horizon output can now target 500
+
+adaptive_plan_worker_supervised.py:
+  adds --require-finish-within-500 for strategy shards
+
+adaptive_command_gate_supervised.py:
+  adds --filter-finish-within-500
+  adds --include-finish500-worker-positives
+
+adaptive_policy_adapter_gate_supervised.py:
+  adds --include-finish500-positives
+
+adaptive_online_search_trace_dataset.py:
+  writes a zero finish_within_500 placeholder for online-search shards
+```
+
+Compatibility:
+
+```text
+finish_within_250 stays supported for historical shards and deliberately
+compressed ablations.
+
+For current fixed-v5 work, prefer:
+  --truncation 500
+  --conversion-rollout-steps 500
+  --require-finish-within-500 / --require-win-or-finish-within-500
+  --finish-target-horizon 500
+
+Use max750 only as a longer confirmation or ablation horizon.
+```

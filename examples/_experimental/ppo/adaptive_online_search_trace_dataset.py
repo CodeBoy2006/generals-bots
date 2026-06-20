@@ -1434,6 +1434,7 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         "finish_within_50": np.zeros(flat(times).shape, dtype=np.float16),
         "finish_within_100": np.zeros(flat(times).shape, dtype=np.float16),
         "finish_within_250": np.zeros(flat(times).shape, dtype=np.float16),
+        "finish_within_500": np.zeros(flat(times).shape, dtype=np.float16),
     }
     base_outcomes = arrays["base_continuation_outcome"].astype(np.int16)
     search_outcomes = arrays["search_continuation_outcome"].astype(np.int16)

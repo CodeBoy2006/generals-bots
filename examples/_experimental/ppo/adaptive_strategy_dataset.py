@@ -903,6 +903,9 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
     finish_within_250 = ((outcome_targets == OUTCOME_WIN) & (outcome_known > 0.0) & (steps_to_terminal <= 250)).astype(
         jnp.float32
     )
+    finish_within_500 = ((outcome_targets == OUTCOME_WIN) & (outcome_known > 0.0) & (steps_to_terminal <= 500)).astype(
+        jnp.float32
+    )
     draw_risk = ((outcome_targets == OUTCOME_DRAW) & (outcome_known > 0.0)).astype(jnp.float32)
     learner_player_grid = jnp.broadcast_to(learner_players[None, :], dones.shape)
 
@@ -936,6 +939,7 @@ def flatten_rollout_data(rollout_data, learner_players: jnp.ndarray, logit_dtype
         "finish_within_50": flat(finish_within_50).astype(np.float16),
         "finish_within_100": flat(finish_within_100).astype(np.float16),
         "finish_within_250": flat(finish_within_250).astype(np.float16),
+        "finish_within_500": flat(finish_within_500).astype(np.float16),
         "draw_risk": flat(draw_risk).astype(np.float16),
         "enemy_general_heatmap": flat(enemy_general).astype(np.float16),
         "enemy_owned_map": flat(enemy_owned).astype(np.float16),
@@ -972,6 +976,8 @@ def save_filter_config(args) -> dict[str, int | float | bool | None]:
         "require_win": args.require_win,
         "require_finish_within_250": args.require_finish_within_250,
         "require_win_or_finish_within_250": args.require_win_or_finish_within_250,
+        "require_finish_within_500": args.require_finish_within_500,
+        "require_win_or_finish_within_500": args.require_win_or_finish_within_500,
         "draw_only": args.draw_only,
         "terminal_window": args.terminal_window,
         "min_search_score_gap": args.min_search_score_gap,
@@ -1000,6 +1006,10 @@ def active_save_filters(args) -> list[str]:
         labels.append("finish250")
     if args.require_win_or_finish_within_250:
         labels.append("win_or_finish250")
+    if args.require_finish_within_500:
+        labels.append("finish500")
+    if args.require_win_or_finish_within_500:
+        labels.append("win_or_finish500")
     if args.draw_only:
         labels.append("draw_only")
     if args.terminal_window > 0:
@@ -1050,6 +1060,10 @@ def apply_save_filters(arrays: dict[str, np.ndarray], args) -> tuple[dict[str, n
         add_filter("finish250", arrays["finish_within_250"] > 0.5)
     if args.require_win_or_finish_within_250:
         add_filter("win_or_finish250", wins | (arrays["finish_within_250"] > 0.5))
+    if args.require_finish_within_500:
+        add_filter("finish500", arrays["finish_within_500"] > 0.5)
+    if args.require_win_or_finish_within_500:
+        add_filter("win_or_finish500", wins | (arrays["finish_within_500"] > 0.5))
     if args.draw_only:
         add_filter("draw_only", arrays["draw_risk"] > 0.5)
     if args.terminal_window > 0:
@@ -1157,6 +1171,8 @@ def parse_args():
     parser.add_argument("--require-win", action="store_true")
     parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
+    parser.add_argument("--require-finish-within-500", action="store_true")
+    parser.add_argument("--require-win-or-finish-within-500", action="store_true")
     parser.add_argument("--draw-only", action="store_true")
     parser.add_argument("--terminal-window", type=int, default=0)
     parser.add_argument("--min-search-score-gap", type=float, default=0.0)
@@ -1252,7 +1268,13 @@ def parse_args():
         "fixed-search",
     ):
         parser.error("search score filters require --teacher-kind search or fixed-search")
-    if args.draw_only and (args.require_win or args.require_finish_within_250 or args.require_win_or_finish_within_250):
+    if args.draw_only and (
+        args.require_win
+        or args.require_finish_within_250
+        or args.require_win_or_finish_within_250
+        or args.require_finish_within_500
+        or args.require_win_or_finish_within_500
+    ):
         parser.error("--draw-only conflicts with win/finish save filters")
     return args
 

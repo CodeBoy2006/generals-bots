@@ -160,6 +160,7 @@ def build_gate_examples(
     positive_path_contains: tuple[str, ...],
     require_search_best_win: bool,
     include_finish250_positives: bool,
+    include_finish500_positives: bool,
     keep_unchanged_negatives: bool,
     max_examples: int | None,
     seed: int,
@@ -209,6 +210,8 @@ def build_gate_examples(
             decisive = shard["search_best_outcome"].astype(np.int32) == OUTCOME_WIN
             if include_finish250_positives and "finish_within_250" in shard:
                 decisive |= shard["finish_within_250"].astype(np.float32) > 0.5
+            if include_finish500_positives and "finish_within_500" in shard:
+                decisive |= shard["finish_within_500"].astype(np.float32) > 0.5
         else:
             decisive = np.ones((obs.shape[0],), dtype=np.bool_)
         labels = (changed & teacher_match & decisive & positive_domain).astype(np.float32)
@@ -588,6 +591,7 @@ def parse_args():
     )
     parser.add_argument("--allow-nondecisive-positives", action="store_true")
     parser.add_argument("--include-finish250-positives", action="store_true")
+    parser.add_argument("--include-finish500-positives", action="store_true")
     parser.add_argument(
         "--min-prefix-plan-advantage",
         type=float,
@@ -799,6 +803,7 @@ def main():
             tuple(args.positive_path_contains),
             not args.allow_nondecisive_positives,
             args.include_finish250_positives,
+            args.include_finish500_positives,
             args.keep_unchanged_negatives,
             args.max_examples,
             args.seed,
@@ -918,6 +923,7 @@ def main():
         "positive_path_contains": list(args.positive_path_contains),
         "require_search_best_win": not args.allow_nondecisive_positives,
         "include_finish250_positives": args.include_finish250_positives,
+        "include_finish500_positives": args.include_finish500_positives,
         "keep_unchanged_negatives": args.keep_unchanged_negatives,
         "min_prefix_plan_advantage": args.min_prefix_plan_advantage,
         "allow_prefix_nonwin": args.allow_prefix_nonwin,

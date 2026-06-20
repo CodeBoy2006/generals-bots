@@ -309,8 +309,10 @@ def build_strategy_worker_gate_examples(
     filter_outcome_win: bool,
     filter_search_best_win: bool,
     filter_finish_within_250: bool,
+    filter_finish_within_500: bool,
     require_search_win: bool,
     include_finish250: bool,
+    include_finish500: bool,
     max_examples: int | None,
     seed: int,
 ) -> dict[str, jnp.ndarray]:
@@ -353,6 +355,10 @@ def build_strategy_worker_gate_examples(
             if "finish_within_250" not in shard:
                 raise KeyError(f"{path} is missing finish_within_250 for --filter-finish-within-250")
             keep_rows &= shard["finish_within_250"].astype(np.float32) > 0.5
+        if filter_finish_within_500:
+            if "finish_within_500" not in shard:
+                raise KeyError(f"{path} is missing finish_within_500 for --filter-finish-within-500")
+            keep_rows &= shard["finish_within_500"].astype(np.float32) > 0.5
         stats["rows"] += int(obs.shape[0])
         stats["kept"] += int(np.sum(keep_rows))
         if not np.any(keep_rows):
@@ -379,6 +385,8 @@ def build_strategy_worker_gate_examples(
                 decisive = shard["search_best_outcome"].astype(np.int32)[keep_rows] == OUTCOME_WIN
                 if include_finish250 and "finish_within_250" in shard:
                     decisive |= shard["finish_within_250"].astype(np.float32)[keep_rows] > 0.5
+                if include_finish500 and "finish_within_500" in shard:
+                    decisive |= shard["finish_within_500"].astype(np.float32)[keep_rows] > 0.5
             else:
                 decisive = np.ones((obs.shape[0],), dtype=np.bool_)
         pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
@@ -499,8 +507,10 @@ def parse_args():
     parser.add_argument("--filter-outcome-win", action="store_true")
     parser.add_argument("--filter-search-best-win", action="store_true")
     parser.add_argument("--filter-finish-within-250", action="store_true")
+    parser.add_argument("--filter-finish-within-500", action="store_true")
     parser.add_argument("--allow-nondecisive-worker-positives", action="store_true")
     parser.add_argument("--include-finish250-worker-positives", action="store_true")
+    parser.add_argument("--include-finish500-worker-positives", action="store_true")
     parser.add_argument("--model-path", default="runs/adaptive-command-gate/generals-adaptive-command-gate.eqx")
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--num-epochs", type=int, default=100)
@@ -602,8 +612,10 @@ def main():
             args.filter_outcome_win,
             args.filter_search_best_win,
             args.filter_finish_within_250,
+            args.filter_finish_within_500,
             not args.allow_nondecisive_worker_positives,
             args.include_finish250_worker_positives,
+            args.include_finish500_worker_positives,
             args.max_examples,
             args.seed,
         )
@@ -642,6 +654,8 @@ def main():
             filters.append("search_best=win")
         if args.filter_finish_within_250:
             filters.append("finish<=250")
+        if args.filter_finish_within_500:
+            filters.append("finish<=500")
         if filters:
             print(f"Filters:      {', '.join(filters)}")
     print(f"Output:        {args.model_path}")
@@ -687,6 +701,9 @@ def main():
         "filter_outcome_win": args.filter_outcome_win,
         "filter_search_best_win": args.filter_search_best_win,
         "filter_finish_within_250": args.filter_finish_within_250,
+        "filter_finish_within_500": args.filter_finish_within_500,
+        "include_finish250_worker_positives": args.include_finish250_worker_positives,
+        "include_finish500_worker_positives": args.include_finish500_worker_positives,
         "datasets": [str(path) for path in paths],
     }
     if "stats" in dataset:

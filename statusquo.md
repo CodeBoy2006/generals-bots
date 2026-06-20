@@ -1346,3 +1346,9 @@
 - **Status:** Completed
 - **Next Steps:** Stop learned-gate work on the current 18-feature adapter gate. Use the adapter-vs-base continuation data for policy/adapter training, or add richer state/phase/route features before revisiting gating.
 - **Context:** The real shard had `3707` rows with `adapter_improves=25.1%`, `adapter_converts=19.3%`, and `adapter_action_changed=43.2%`. v2 trained to offline acc `75.4%` with P+ `0.654` and P- `0.375`, but gameplay still failed: fixed-v5 max500 128-row min was `28.12%` at threshold `0.5` and `26.56%` at threshold `0.6`, both far below same-seed static v1 `40.62%`.
+
+## [2026-06-20 21:34] Max500 Finish Labels
+- **Changes:** Added `finish_within_500` dataset output plus 500-step finish filters/positives across strategy supervision, Plan-Worker training, command gates, and policy-adapter gates; updated README, Chinese manual, and strategy log guidance.
+- **Status:** Completed
+- **Next Steps:** Use `--truncation 500`, `--conversion-rollout-steps 500`, and `--finish-target-horizon 500` for current fixed-v5 max500 shards; keep max750 for longer confirmation.
+- **Context:** The old `finish_within_250` path remains available for historical shards and compressed ablations. Targeted py_compile and CLI help checks passed; help commands still print the expected sandbox CUDA warning before exiting successfully.

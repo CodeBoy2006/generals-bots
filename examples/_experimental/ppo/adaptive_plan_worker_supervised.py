@@ -328,6 +328,7 @@ def load_strategy_worker_dataset(
     require_outcome_win: bool,
     require_search_best_win: bool,
     require_finish_within_250: bool,
+    require_finish_within_500: bool,
     max_examples: int | None,
     seed: int,
 ) -> dict[str, jnp.ndarray]:
@@ -364,6 +365,10 @@ def load_strategy_worker_dataset(
             if "finish_within_250" not in shard:
                 raise KeyError(f"{path} is missing finish_within_250 for --require-finish-within-250")
             keep &= shard["finish_within_250"].astype(np.float32) > 0.5
+        if require_finish_within_500:
+            if "finish_within_500" not in shard:
+                raise KeyError(f"{path} is missing finish_within_500 for --require-finish-within-500")
+            keep &= shard["finish_within_500"].astype(np.float32) > 0.5
         if drop_pass_labels:
             keep &= labels != pass_index
         if "legal_mask" in shard:
@@ -501,6 +506,7 @@ def parse_args():
     parser.add_argument("--require-outcome-win", action="store_true")
     parser.add_argument("--require-search-best-win", action="store_true")
     parser.add_argument("--require-finish-within-250", action="store_true")
+    parser.add_argument("--require-finish-within-500", action="store_true")
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="cnn")
@@ -560,6 +566,7 @@ def main():
             args.require_outcome_win,
             args.require_search_best_win,
             args.require_finish_within_250,
+            args.require_finish_within_500,
             args.max_examples,
             args.seed,
         )
@@ -603,6 +610,8 @@ def main():
             filters.append("search_best=win")
         if args.require_finish_within_250:
             filters.append("finish<=250")
+        if args.require_finish_within_500:
+            filters.append("finish<=500")
         if filters:
             print(f"Filters:      {', '.join(filters)}")
     if args.dataset_format == "plan-q-prefix":

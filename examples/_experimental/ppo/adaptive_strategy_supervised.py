@@ -42,7 +42,12 @@ ACTION_CE_WEIGHT_MODES = (
     "search-continuation-win",
     "search-improves-continuation",
     "search-converts-win",
+    "adapter-changed",
+    "adapter-continuation-win",
+    "adapter-improves-continuation",
+    "adapter-converts-win",
 )
+ONLINE_ACTION_FIELDS = ("teacher_action_index", "search_action_index", "adapter_action_index", "base_action_index")
 BALANCE_STRATA_MODES = (
     "none",
     "size-seat",
@@ -119,9 +124,16 @@ def load_strategy_dataset(
     require_search_action_changed: bool = False,
     require_search_improves_continuation: bool = False,
     require_search_converts_to_win: bool = False,
+    require_adapter_action_changed: bool = False,
+    require_adapter_improves_continuation: bool = False,
+    require_adapter_converts_to_win: bool = False,
     require_finish_within_250: bool = False,
     require_win_or_finish_within_250: bool = False,
+    require_finish_within_500: bool = False,
+    require_win_or_finish_within_500: bool = False,
     min_search_score_gap: float = 0.0,
+    finish_target_horizon: int = 250,
+    online_action_field: str = "teacher_action_index",
     return_stats: bool = False,
 ) -> dict[str, jnp.ndarray] | tuple[dict[str, jnp.ndarray], dict]:
     """Load the subset of NPZ fields needed by the frozen-head trainer."""
@@ -169,6 +181,16 @@ def load_strategy_dataset(
         if name not in shard:
             raise KeyError(f"{path} is missing {name} for active row filters")
         return shard[name]
+
+    def finish_field(shard, path: Path, horizon: int, indices: np.ndarray) -> np.ndarray:
+        name = f"finish_within_{horizon}"
+        if name in shard:
+            return shard[name][indices].astype(np.float32)
+        if horizon == 500 and "finish_within_250" in shard:
+            # Older shards predate the max500 gate.  Falling back keeps old data
+            # usable while new shards can carry the more realistic 500-step label.
+            return shard["finish_within_250"][indices].astype(np.float32)
+        raise KeyError(f"{path} is missing {name} for --finish-target-horizon {horizon}")
 
     for path in paths:
         shard = np.load(path)
@@ -230,6 +252,21 @@ def load_strategy_dataset(
                 "search_converts_to_win",
                 require_field(shard, path, "search_converts_to_win").astype(np.bool_),
             )
+        if require_adapter_action_changed:
+            add_row_filter(
+                "adapter_action_changed",
+                require_field(shard, path, "adapter_action_changed").astype(np.bool_),
+            )
+        if require_adapter_improves_continuation:
+            add_row_filter(
+                "adapter_improves_continuation",
+                require_field(shard, path, "adapter_improves_continuation").astype(np.bool_),
+            )
+        if require_adapter_converts_to_win:
+            add_row_filter(
+                "adapter_converts_to_win",
+                require_field(shard, path, "adapter_converts_to_win").astype(np.bool_),
+            )
         if require_finish_within_250:
             add_row_filter(
                 "finish<=250",
@@ -240,6 +277,16 @@ def load_strategy_dataset(
             wins = (shard["outcome"].astype(np.int32) == OUTCOME_WIN) & known
             finish250 = require_field(shard, path, "finish_within_250").astype(np.float32) > 0.5
             add_row_filter("win_or_finish<=250", wins | finish250)
+        if require_finish_within_500:
+            add_row_filter(
+                "finish<=500",
+                require_field(shard, path, "finish_within_500").astype(np.float32) > 0.5,
+            )
+        if require_win_or_finish_within_500:
+            known = require_field(shard, path, "outcome_known").astype(np.float32) > 0.0
+            wins = (shard["outcome"].astype(np.int32) == OUTCOME_WIN) & known
+            finish500 = require_field(shard, path, "finish_within_500").astype(np.float32) > 0.5
+            add_row_filter("win_or_finish<=500", wins | finish500)
         if min_search_score_gap > 0.0:
             add_row_filter(
                 f"search_gap>={min_search_score_gap:g}",
@@ -260,6 +307,7 @@ def load_strategy_dataset(
         chunks["intent"].append(shard["intent"][shard_indices].astype(np.int32))
         trajectory_outcome = shard["outcome"][shard_indices].astype(np.int32)
         trajectory_outcome_weight = shard["outcome_known"][shard_indices].astype(np.float32)
+        trajectory_finish_target = finish_field(shard, path, finish_target_horizon, shard_indices)
         if "search_best_outcome" in shard:
             search_best_outcome = shard["search_best_outcome"][shard_indices].astype(np.int32)
         else:
@@ -288,7 +336,7 @@ def load_strategy_dataset(
                     finish_target = np.where(
                         label_known,
                         search_label == OUTCOME_WIN,
-                        shard["finish_within_250"][shard_indices].astype(np.float32) > 0.5,
+                        trajectory_finish_target > 0.5,
                     ).astype(np.float32)
                 else:
                     outcome_target = np.where(label_known, search_label, OUTCOME_DRAW).astype(np.int32)
@@ -299,7 +347,7 @@ def load_strategy_dataset(
                 if fallback_to_trajectory:
                     outcome_target = trajectory_outcome
                     outcome_weight = trajectory_outcome_weight
-                    finish_target = shard["finish_within_250"][shard_indices].astype(np.float32)
+                    finish_target = trajectory_finish_target
                 else:
                     outcome_target = np.full((shard_count,), OUTCOME_DRAW, dtype=np.int32)
                     outcome_weight = np.zeros((shard_count,), dtype=np.float32)
@@ -307,13 +355,13 @@ def load_strategy_dataset(
         else:
             outcome_target = trajectory_outcome
             outcome_weight = trajectory_outcome_weight
-            finish_target = shard["finish_within_250"][shard_indices].astype(np.float32)
+            finish_target = trajectory_finish_target
         if finish_head_mode == "multi-horizon":
             trajectory_finish_targets = np.stack(
                 [
                     shard["finish_within_50"][shard_indices],
                     shard["finish_within_100"][shard_indices],
-                    shard["finish_within_250"][shard_indices],
+                    trajectory_finish_target,
                 ],
                 axis=-1,
             ).astype(np.float32)
@@ -339,7 +387,8 @@ def load_strategy_dataset(
         chunks["source_heatmap"].append(shard["source_heatmap"][shard_indices].astype(np.float32))
         chunks["target_heatmap"].append(shard["target_heatmap"][shard_indices].astype(np.float32))
         teacher_logits = shard["teacher_logits"][shard_indices].astype(np.float32)
-        teacher_actions = shard["teacher_action_index"][shard_indices].astype(np.int32)
+        action_field = online_action_field if online_action_field in shard else "teacher_action_index"
+        teacher_actions = shard[action_field][shard_indices].astype(np.int32)
         safe_teacher_actions = np.clip(teacher_actions, 0, teacher_logits.shape[1] - 1)
         teacher_action_legal = (
             (teacher_actions >= 0)
@@ -397,6 +446,16 @@ def load_strategy_dataset(
             action_weight = require_field(shard, path, "search_improves_continuation")[shard_indices].astype(np.bool_)
         elif action_ce_weight_mode == "search-converts-win":
             action_weight = require_field(shard, path, "search_converts_to_win")[shard_indices].astype(np.bool_)
+        elif action_ce_weight_mode == "adapter-changed":
+            action_weight = require_field(shard, path, "adapter_action_changed")[shard_indices].astype(np.bool_)
+        elif action_ce_weight_mode == "adapter-continuation-win":
+            action_weight = require_field(shard, path, "adapter_continuation_outcome")[shard_indices].astype(
+                np.int32
+            ) == OUTCOME_WIN
+        elif action_ce_weight_mode == "adapter-improves-continuation":
+            action_weight = require_field(shard, path, "adapter_improves_continuation")[shard_indices].astype(np.bool_)
+        elif action_ce_weight_mode == "adapter-converts-win":
+            action_weight = require_field(shard, path, "adapter_converts_to_win")[shard_indices].astype(np.bool_)
         else:
             action_weight = np.ones_like(outcome, dtype=np.bool_)
         action_weight &= teacher_action_legal
@@ -1394,9 +1453,21 @@ def parse_args():
     parser.add_argument("--require-search-action-changed", action="store_true")
     parser.add_argument("--require-search-improves-continuation", action="store_true")
     parser.add_argument("--require-search-converts-to-win", action="store_true")
+    parser.add_argument("--require-adapter-action-changed", action="store_true")
+    parser.add_argument("--require-adapter-improves-continuation", action="store_true")
+    parser.add_argument("--require-adapter-converts-to-win", action="store_true")
     parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
+    parser.add_argument("--require-finish-within-500", action="store_true")
+    parser.add_argument("--require-win-or-finish-within-500", action="store_true")
     parser.add_argument("--min-search-score-gap", type=float, default=0.0)
+    parser.add_argument(
+        "--finish-target-horizon",
+        type=int,
+        choices=(250, 500),
+        default=250,
+        help="Trajectory finish target used by binary finish heads and the third multi-horizon output.",
+    )
     parser.add_argument(
         "--min-teacher-action-logit-margin",
         type=float,
@@ -1509,6 +1580,12 @@ def parse_args():
     )
     parser.add_argument("--action-ce-weight-mode", choices=ACTION_CE_WEIGHT_MODES, default="all")
     parser.add_argument(
+        "--online-action-field",
+        choices=ONLINE_ACTION_FIELDS,
+        default="teacher_action_index",
+        help="For --dataset-format online-search, action-index field used by action CE and pairwise policy losses.",
+    )
+    parser.add_argument(
         "--action-ce-path-contains",
         action="append",
         default=[],
@@ -1574,10 +1651,14 @@ def parse_args():
         parser.error("--min-search-score-gap must be non-negative")
     if args.require_outcome_win and args.require_win_or_finish_within_250:
         parser.error("--require-outcome-win conflicts with --require-win-or-finish-within-250")
+    if args.require_outcome_win and args.require_win_or_finish_within_500:
+        parser.error("--require-outcome-win conflicts with --require-win-or-finish-within-500")
     if args.require_outcome_win and (args.require_outcome_draw or args.require_outcome_nonwin):
         parser.error("--require-outcome-win conflicts with draw/non-win outcome filters")
     if args.require_outcome_draw and args.require_win_or_finish_within_250:
         parser.error("--require-outcome-draw conflicts with --require-win-or-finish-within-250")
+    if args.require_outcome_draw and args.require_win_or_finish_within_500:
+        parser.error("--require-outcome-draw conflicts with --require-win-or-finish-within-500")
     if args.dataset_format == "plan-q-prefix":
         if args.require_search_best_win:
             parser.error("--require-search-best-win is not available for --dataset-format plan-q-prefix")
@@ -1585,7 +1666,18 @@ def parse_args():
             parser.error("search-used/action-changed filters are not available for --dataset-format plan-q-prefix")
         if args.require_search_improves_continuation or args.require_search_converts_to_win:
             parser.error("continuation filters are not available for --dataset-format plan-q-prefix")
-        if args.require_finish_within_250 or args.require_win_or_finish_within_250:
+        if (
+            args.require_adapter_action_changed
+            or args.require_adapter_improves_continuation
+            or args.require_adapter_converts_to_win
+        ):
+            parser.error("adapter continuation filters are not available for --dataset-format plan-q-prefix")
+        if (
+            args.require_finish_within_250
+            or args.require_win_or_finish_within_250
+            or args.require_finish_within_500
+            or args.require_win_or_finish_within_500
+        ):
             parser.error("finish-window filters are not available for --dataset-format plan-q-prefix")
         if args.require_contact or args.min_visible_enemy_cells > 0 or args.min_visible_enemy_density > 0.0:
             parser.error("contact/visible-enemy filters are not available for --dataset-format plan-q-prefix")
@@ -1724,9 +1816,16 @@ def main():
             args.require_search_action_changed,
             args.require_search_improves_continuation,
             args.require_search_converts_to_win,
+            args.require_adapter_action_changed,
+            args.require_adapter_improves_continuation,
+            args.require_adapter_converts_to_win,
             args.require_finish_within_250,
             args.require_win_or_finish_within_250,
+            args.require_finish_within_500,
+            args.require_win_or_finish_within_500,
             args.min_search_score_gap,
+            args.finish_target_horizon,
+            args.online_action_field,
             True,
         )
     extra_load_stats = []
