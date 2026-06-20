@@ -15906,3 +15906,42 @@ rows and train a planner-aware conditional action head or candidate scorer from
 those positives, then only wire evaluator inference after validation top1/top2
 is stable on independent shards/seeds.
 ```
+
+### 2026-06-20 23:28 - Candidate Scorer Frozen-Normalization Rerun
+
+The first clean candidate-scorer implementation still left `feature_mean` and
+`feature_std` as trainable Equinox array leaves.  That was not label leakage, but
+it let the optimizer drift normalization metadata; saved sidecars even showed
+negative std entries.  The scorer now stops gradients through both arrays.
+
+GPU reruns with frozen normalization:
+
+```text
+all changed rows, soft rank:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-frozen-v0/
+  rows: 1317
+  prior top1: 1.06%
+  best val top1: 34.22%
+  best val top2: 67.68%
+  best val pair: 57.54%
+  feature std min/max: 1.0e-6 / 238.76
+
+strict search_converts_to_win rows, soft rank:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-frozen-v0/
+  rows: 101
+  prior top1: 0.00%
+  best val top1: 40.00%
+  best val top2: 60.00%
+  best val pair: 59.66%
+  feature std min/max: 1.0e-6 / 3.81
+```
+
+Decision:
+
+```text
+The candidate scorer still has real signal after the normalization fix, but the
+old 38.78%/55.00% headline numbers were optimistic.  Do not integrate this into
+gameplay yet.  Next useful step remains larger independent max500 rpa2 strict
+conversion collection, then train a planner-aware conditional action head or
+candidate scorer against fixed normalization.
+```

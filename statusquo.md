@@ -1430,3 +1430,9 @@
 - **Status:** Completed
 - **Next Steps:** Use this fixed scorer for subsequent rpa2 strict-conversion diagnostics; older scorer checkpoints are still readable but were trained with mutable normalization leaves.
 - **Context:** This is a training-stability fix before scaling independent rpa2 conversion shards. It does not change trace data or evaluator behavior.
+
+## [2026-06-20 23:28] Frozen Candidate Scorer Rerun
+- **Changes:** Reran fixed-normalization rpa2 candidate scorer probes on existing fixed-v5 max500 v0+v1 traces and documented the corrected metrics.
+- **Status:** Completed
+- **Next Steps:** Treat the candidate scorer as an offline signal probe only. Scale independent max500 strict-conversion rows before wiring a scorer or conditional action head into gameplay.
+- **Context:** Frozen all-changed scorer best val top1/top2/pair was `34.22%/67.68%/57.54%` versus prior top1 `1.06%`. Frozen strict `search_converts_to_win` scorer best val top1/top2/pair was `40.0%/60.0%/59.66%` on `101` rows. The old mutable-normalization numbers were optimistic but the signal survives.
