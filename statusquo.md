@@ -1310,3 +1310,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect a real fixed-v5 max500 conversion shard with `--truncation 500 --conversion-rollout-steps 500`, then train an 8x policy-head adapter using `--label-source search-continuation` and conversion-positive action CE if enough positives appear.
 - **Context:** CUDA smoke passed for both short conversion (`conversion_rollout_steps=32`) and full max500 conversion (`conversion_rollout_steps=500`) on 2-env shards. Models/artifacts remain under ignored `runs/`; no trained model was written to cache.
+
+## [2026-06-20 20:10] Max500 Conversion Adapter v1
+- **Changes:** Fixed `adaptive_strategy_supervised.py` to mask action CE and pairwise prefix weights when the teacher action points to an invalid `teacher_logits <= -9999` entry. Collected fixed-v5 max500 conversion shards, trained `runs/adaptive-online-search-conversion-adapter-v1/generals-adaptive-online-search-conversion-adapter-v1.eqx`, and appended detailed results to `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Promote v1 as the current static fixed-v5 max500 adapter candidate, then collect more max500 conversion rows and train a stronger v2 with more legal conversion positives or a learned gate/mixture. Keep Expander protection at 512-row minimum before any deployment claim.
+- **Context:** Combined max500 conversion data had `1156` rows, `117` improves, and `90` search-converts-to-win rows (`89` legal after masking). Fixed-v5 max500 512-row same-seed baseline was `23.05%` min; v1 adapter reached `38.09%` min. Expander 8/12/16 max750 512-row with the adapter reached `78.32%` min. Artifacts remain under ignored `runs/`, not cache directories.

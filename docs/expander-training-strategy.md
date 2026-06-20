@@ -14353,3 +14353,136 @@ If conversion positives are frequent enough, train an 8x policy-head adapter wit
   --action-ce-weight-mode search-converts-win
   --require-search-converts-to-win
 ```
+
+### 2026-06-20 20:10 - Max500 Conversion Adapter v1
+
+Data:
+
+```text
+runs/adaptive-online-search-fixed-v5-max500-conversion-v0/
+  256 rows
+  improves: 32 / 256 = 12.5%
+  converts_to_win: 20 / 256 = 7.8%
+  draw_to_win: 12 / 256 = 4.7%
+
+runs/adaptive-online-search-fixed-v5-max500-conversion-v1/
+  900 rows
+  per-shard converts_to_win: 6.4% - 9.4%
+
+combined:
+  rows: 1156
+  action_changed: 59.8%
+  improves: 117 = 10.1%
+  converts_to_win: 90 = 7.8%
+  draw_to_win: 38 = 3.3%
+  p0 converts: 37 / 563 = 6.6%
+  p1 converts: 53 / 593 = 8.9%
+```
+
+Important trainer fix:
+
+```text
+adaptive_strategy_supervised.py now masks action CE / prefix-pair weights
+when teacher_action_index points to a logit <= -9999 in teacher_logits.
+
+Reason:
+  one conversion-positive row had a search action with teacher logit -10000.
+  Without masking, a single invalid positive could create 1e7-scale CE/pair
+  losses and dominate the training log.
+```
+
+Training:
+
+```text
+model:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+init:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+loss:
+  policy_kl=0.5 on all rows
+  action_ce=0.6 only on search_converts_to_win rows
+  pairwise accepted-search-action > base-action margin=1.0
+  pairwise weight=1.0 only on legal conversion rows
+  update_scope=policy-heads
+  no strategy aux
+
+legal conversion action rows after masking:
+  89
+
+final epoch:
+  KL 0.0583
+  ActCE 2.4768
+  action accuracy 38.9%
+  Pair 4.1134
+  pair accuracy 12.7%
+```
+
+Fixed-v5 max500:
+
+```text
+128 games/seat, seed100000:
+  v4 base:
+    p0 28.91%
+    p1 24.22%
+    min 24.22%
+  v1 adapter:
+    p0 43.75%
+    p1 35.16%
+    min 35.16%
+
+256 games/seat, seed100020:
+  v4 base:
+    p0 22.66%
+    p1 27.34%
+    min 22.66%
+  v1 adapter:
+    p0 42.58%
+    p1 38.67%
+    min 38.67%
+
+512 games/seat, seed100060:
+  v4 base:
+    p0 24.02%
+    p1 23.05%
+    min 23.05%
+  v1 adapter:
+    p0 38.28%
+    p1 38.09%
+    min 38.09%
+    draw 12.11% / 11.33%
+```
+
+Expander 8/12/16 max750:
+
+```text
+512 games/row, seed100080:
+  8p0 87.50%
+  8p1 82.81%
+  12p0 84.38%
+  12p1 83.59%
+  16p0 78.32%
+  16p1 79.30%
+  min 78.32%
+```
+
+Interpretation:
+
+```text
+This is the first static adapter trained from online-search conversion labels
+that gives a large same-seed fixed-v5 max500 gain while preserving the
+Expander 8/12/16 512-row gate.
+
+The fixed-v5 gap is still below online-search wrapper strength:
+  wrapper previously reached about 51.56% min at 512.
+  v1 adapter reaches 38.09% min at 512.
+
+The next high-ROI step is not more tiny weight sweeps. It is to collect more
+conversion rows and train a stronger adapter/head with either:
+  1. more legal conversion positives and p0 oversampling, or
+  2. a learned gate/mixture that preserves v4 base action unless the adapter
+     has a conversion-like state.
+```

@@ -338,8 +338,16 @@ def load_strategy_dataset(
         chunks["enemy_general"].append(shard["enemy_general_heatmap"][shard_indices].astype(np.float32))
         chunks["source_heatmap"].append(shard["source_heatmap"][shard_indices].astype(np.float32))
         chunks["target_heatmap"].append(shard["target_heatmap"][shard_indices].astype(np.float32))
-        chunks["teacher_logits"].append(shard["teacher_logits"][shard_indices].astype(np.float32))
-        chunks["teacher_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
+        teacher_logits = shard["teacher_logits"][shard_indices].astype(np.float32)
+        teacher_actions = shard["teacher_action_index"][shard_indices].astype(np.int32)
+        safe_teacher_actions = np.clip(teacher_actions, 0, teacher_logits.shape[1] - 1)
+        teacher_action_legal = (
+            (teacher_actions >= 0)
+            & (teacher_actions < teacher_logits.shape[1])
+            & (teacher_logits[np.arange(shard_indices.shape[0]), safe_teacher_actions] > -9999.0)
+        )
+        chunks["teacher_logits"].append(teacher_logits)
+        chunks["teacher_action"].append(teacher_actions)
         chunks["grid_size"].append(shard["grid_size"][shard_indices].astype(np.int32))
         chunks["seat"].append(shard["seat"][shard_indices].astype(np.int32))
         chunks["domain"].append(np.full((shard_indices.shape[0],), domain_id, dtype=np.int32))
@@ -391,6 +399,7 @@ def load_strategy_dataset(
             action_weight = require_field(shard, path, "search_converts_to_win")[shard_indices].astype(np.bool_)
         else:
             action_weight = np.ones_like(outcome, dtype=np.bool_)
+        action_weight &= teacher_action_legal
         if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
             action_weight = np.zeros_like(action_weight, dtype=np.bool_)
         chunks["action_weight"].append(action_weight.astype(np.float32))
