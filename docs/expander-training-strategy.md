@@ -12607,3 +12607,135 @@ Promotion target:
   fixed-v5 max250 512-row min > 17%
   Expander 8/12/16 512-row min >= 79%
 ```
+
+## 2026-06-20 15:28 - Plan-Q Prefix Scaling and Midgame Trajectory Follow-up
+
+This round used the GPU directly (`Device: cuda:0`). The sandbox cannot expose
+CUDA to JAX even though `nvidia-smi` works, so GPU training/evaluation was run
+with elevated execution. All model artifacts stayed under ignored `runs/`.
+
+Legacy Plan-Q prefix scaling:
+
+```text
+v1 data:
+  runs/adaptive-plan-q-legacy-mainstack-fixedv5-v1/
+  150 high-gap best-plan-win states
+  1177 valid non-pass prefix steps
+  seat split: p0 85, p1 65
+  mean plan_q_gap: 1.039
+
+v1 adapter:
+  data: v0 + v1
+  samples after size-seat balance: 1426
+  update: legacy iter30 policy heads only
+  fixed-v5 max250 512-row seed96620:
+    v1 min 11.91%
+    v0 same seed min 10.94%
+    legacy same seed min 14.26%
+```
+
+The larger v1 collection did not preserve the small v0 improvement. To diagnose
+label quality, `adaptive_strategy_supervised.py --dataset-format plan-q-prefix`
+now supports:
+
+```text
+--min-teacher-action-logit-margin <margin>
+```
+
+For each saved prefix step it computes:
+
+```text
+teacher_logit(chosen_prefix_action) - max_teacher_logit
+```
+
+and filters rows below the threshold. With `--min-teacher-action-logit-margin
+-1.0`, training became much cleaner offline:
+
+```text
+v2 margin-filtered adapter:
+  samples after size-seat balance: 760
+  action CE: about 0.58
+  teacher action accuracy: about 75%
+
+fixed-v5 max250 512-row seed96720:
+  v2 margin adapter:
+    p0 14.65%
+    p1 13.28%
+    min 13.28%
+
+  v0 same seed:
+    p0 16.21%
+    p1 11.91%
+    min 11.91%
+
+  legacy iter30 same seed:
+    p0 14.06%
+    p1 13.87%
+    min 13.87%
+```
+
+Interpretation:
+
+```text
+Filtering by base-policy support improves offline CE/accuracy, but it still does
+not beat the same-seed legacy adapter. The useful v0 signal remains real but
+fragile; scaling raw prefix rows or selecting labels by teacher-logit support is
+not enough.
+```
+
+Midgame decisive trajectory follow-up:
+
+```text
+a1mix-v0:
+  init: adaptive-midgame-contact-searchwin-imitation-v3
+  data: A1 fixed-v5 search-win + terminal search-win + fixed-v5 draw/contact +
+        Expander contact protection
+  update: all U-Net weights
+  action CE only on A1/terminal search-best-win paths
+  fixed-v5 max250 256-row seed96820:
+    p0 10.94%
+    p1 11.72%
+    min 10.94%
+
+v3 adapter same-seed control:
+  p0 10.55%
+  p1  7.42%
+  min  7.42%
+
+a1pos-v1:
+  data: A1 + terminal positives + draw contrast
+  action row weight: about 50%
+  fixed-v5 max250 256-row seed96820:
+    min 10.16%
+
+rescue-searchwin-policyhead-v0:
+  data: trajectory non-win rows where search_best_outcome == win
+  kept rows: 3296, seat-balanced to 3206
+  update: policy heads only
+  fixed-v5 max250 256-row seed96820:
+    min 10.16%
+```
+
+Conclusion:
+
+```text
+The A1/terminal/rescue trajectory data contains a small fixed-v5 signal: a1mix
+beats the same-seed v3 adapter. It still does not reach the legacy or Plan-Q v0
+512-row band and does not justify promotion.
+
+Primitive trajectory/action imitation remains the wrong compression target at
+this stage. The next useful step should move the same midgame decisive data into
+finish/value/command gating or a plan-conditioned executor with an explicit
+"enter/exit plan" decision, not another action CE or adapter-scale sweep.
+```
+
+Current best wrapper remains:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+8x8 adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+```

@@ -367,6 +367,7 @@ def load_plan_q_prefix_strategy_dataset(
     require_outcome_draw: bool = False,
     require_outcome_nonwin: bool = False,
     min_search_score_gap: float = 0.0,
+    min_teacher_action_logit_margin: float | None = None,
     drop_pass_labels: bool = True,
     return_stats: bool = False,
 ) -> dict[str, jnp.ndarray] | tuple[dict[str, jnp.ndarray], dict]:
@@ -467,6 +468,19 @@ def load_plan_q_prefix_strategy_dataset(
                 raise KeyError(f"{path} is missing plan_q_gap for --min-search-score-gap")
             gap = np.repeat(shard["plan_q_gap"].astype(np.float32)[:, None], prefix_steps, axis=1)
             add_prefix_filter(f"plan_q_gap>={min_search_score_gap:g}", gap >= min_search_score_gap)
+        if min_teacher_action_logit_margin is not None:
+            flat_logits_for_margin = logits.reshape(total_prefix, logits.shape[-1])
+            flat_labels_for_margin = labels.reshape(-1)
+            chosen_logits = flat_logits_for_margin[
+                np.arange(total_prefix),
+                np.clip(flat_labels_for_margin, 0, logits.shape[-1] - 1),
+            ].reshape(num_rows, prefix_steps)
+            top_logits = np.max(flat_logits_for_margin, axis=-1).reshape(num_rows, prefix_steps)
+            margin = chosen_logits - top_logits
+            add_prefix_filter(
+                f"teacher_action_margin>={min_teacher_action_logit_margin:g}",
+                margin >= min_teacher_action_logit_margin,
+            )
 
         load_stats["rows"] += int(total_prefix)
         load_stats["kept"] += int(np.sum(keep))
@@ -1200,6 +1214,12 @@ def parse_args():
     parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
     parser.add_argument("--min-search-score-gap", type=float, default=0.0)
+    parser.add_argument(
+        "--min-teacher-action-logit-margin",
+        type=float,
+        default=None,
+        help="For Plan-Q prefix rows, keep only labels whose saved teacher logit is within this margin of top.",
+    )
     parser.add_argument("--balance-strata", choices=BALANCE_STRATA_MODES, default="none")
     parser.add_argument(
         "--label-source",
@@ -1438,6 +1458,7 @@ def main():
             args.require_outcome_draw,
             args.require_outcome_nonwin,
             args.min_search_score_gap,
+            args.min_teacher_action_logit_margin,
             not args.keep_pass_prefix_labels,
             True,
         )
@@ -1482,6 +1503,7 @@ def main():
             False,
             False,
             args.min_search_score_gap,
+            args.min_teacher_action_logit_margin,
             not args.keep_pass_prefix_labels,
             True,
         )

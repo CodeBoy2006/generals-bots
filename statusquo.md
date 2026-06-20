@@ -1214,3 +1214,9 @@
 - **Status:** Completed
 - **Next Steps:** Scale `adaptive-plan-q-legacy-mainstack-fixedv5` collection with the same filters (`turn>=80`, best-plan-win, `plan_q_gap>=0.25`) and train a v1 policy-head prefix adapter. Do not continue fixed-v5 PPO or search-best action CE from legacy.
 - **Context:** Search-win CE from legacy underperformed same-seed legacy (`13.48%` vs `14.84%` fixed-v5 max250 512-row min), and both sparse PPO variants collapsed to `0.00%` min. The small legacy Plan-Q prefix dataset kept `42` high-gap winning plan states / `312` non-pass prefix rows and produced `adaptive-legacy-planq-prefix-policy-v0`, which improved same-seed fixed-v5 max250 512-row min from legacy `12.70%` to `15.04%` while keeping Expander 8/12/16 512-row min at `79.69%`.
+
+## [2026-06-20 15:28] Plan-Q Prefix Margin Filter
+- **Changes:** Added `adaptive_strategy_supervised.py --min-teacher-action-logit-margin` for `--dataset-format plan-q-prefix`, documented the flag in README, and logged GPU Plan-Q prefix scaling plus midgame trajectory follow-up results.
+- **Status:** Completed
+- **Next Steps:** Do not promote v1/v2 prefix adapters or the A1 trajectory adapters. Move the decisive data into finish/value/command gating or a plan-conditioned executor with an explicit enter/exit decision.
+- **Context:** Larger legacy prefix v1 data (`150` states / `1177` prefix steps) did not beat legacy same-seed fixed-v5 (`11.91%` vs `14.26%` min at 512 rows). Margin-filtered v2 trained much cleaner offline (`~75%` action accuracy) but still missed same-seed legacy (`13.28%` vs `13.87%` min). A1/terminal/rescue trajectory adapters showed only small fixed-v5 signal (`a1mix-v0` 256-row min `10.94%` vs v3 same-seed `7.42%`) and are not promotion candidates.
