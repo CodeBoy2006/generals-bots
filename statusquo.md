@@ -1406,3 +1406,9 @@
 - **Status:** Completed
 - **Next Steps:** Scale rpa2 trace collection to at least `2k-5k` rows or `250+` conversion positives, then train a conditional online-search action controller/planner-aware head. Do not expand the tiny direct policy-head CE smoke.
 - **Context:** The rpa2 trace smoke saved `501` rows with `48` search-converts-to-win and `63` search-improves-continuation rows; static adapter continuation converted `0` rows. The tiny rpa2 adapter regressed fixed-v5 max500 128-row min to `28.91%` versus same-seed static v1 `32.03%`. The actual rpa2 wrapper confirmed strongly: fixed-v5 max500 256-row min `58.20%`, and Expander 8/12/16 max750 64-row min `89.06%` with 12x/16x rows at `95.31%`-`98.44%`.
+
+## [2026-06-20 23:15] rpa2 Online Search Gate Trainer
+- **Changes:** Added `examples/_experimental/ppo/adaptive_online_search_gate_supervised.py`, documented rpa2 v1/max500 trace stats and the weak offline gate result in README, Chinese manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Do not use this gate for promotion. Use the rpa2 trace data for a richer controller or planner-aware conditional action head, and keep fixed-v5 diagnostics on `max500` with `max750` or longer only as confirmation.
+- **Context:** Combined rpa2 v0+v1 had `2078` rows, `1317` changed actions, and `153` strict conversion rows. The conversion gate ended at precision `13.10%` / recall `94.74%`; the broader improve gate ended at precision `14.75%` / recall `56.63%`. Score/prior/phase features alone are not enough to accept search actions safely.

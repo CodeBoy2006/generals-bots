@@ -52,6 +52,7 @@ PLAN_WORKER_COMMAND_SOURCE_NAMES = ("spatial", "belief-main-stack", "main-stack-
 PLAN_WORKER_COMMAND_SOURCE_TO_ID = {name: index for index, name in enumerate(PLAN_WORKER_COMMAND_SOURCE_NAMES)}
 POLICY_ADAPTER_MODE_NAMES = ("delta", "blend", "replace")
 POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODE_NAMES)}
+ONLINE_SEARCH_GATE_FEATURE_DIM = 17
 
 
 @dataclass(frozen=True)
@@ -537,6 +538,7 @@ def adapter_policy_action_with_memory(
 def online_search_action_policy_opponent(
     network,
     policy_adapter_network,
+    command_gate_network,
     opponent_network,
     state,
     effective_size: int,
@@ -565,6 +567,8 @@ def online_search_action_policy_opponent(
     prior_weight: float,
     terminal_score: float,
     min_score_gap: float,
+    online_search_gate_threshold: float,
+    online_search_gate_feature_dim: int,
 ) -> jnp.ndarray:
     """Choose a primitive action by online counterfactual rollout search against a fixed policy."""
     obs = game.get_observation(state, policy_player)
@@ -675,17 +679,38 @@ def online_search_action_policy_opponent(
 
     candidate_keys = jrandom.split(key, top_k)
     scores = jax.vmap(score_candidate)(candidate_actions, prior_scores, candidate_keys)
-    best_action = candidate_actions[jnp.argmax(scores)]
+    best_position = jnp.argmax(scores)
+    best_action = candidate_actions[best_position]
     score_gap = jnp.asarray(jnp.inf, dtype=scores.dtype)
     if top_k >= 2:
         top_scores, _ = jax.lax.top_k(scores, 2)
         score_gap = top_scores[0] - top_scores[1]
-    return jnp.where(score_gap >= min_score_gap, best_action, fallback_action)
+    accept_search = score_gap >= min_score_gap
+    if online_search_gate_threshold >= 0.0:
+        gate_features = online_search_gate_features(
+            scores,
+            prior_scores,
+            best_position,
+            adaptive_action_to_index(best_action, pad_size),
+            logits,
+            fallback_action,
+            active,
+            obs_arr,
+            state.time,
+            policy_player,
+            max_steps,
+            pad_size,
+            online_search_gate_feature_dim,
+        )
+        gate_probability = jax.nn.sigmoid(command_gate_network(gate_features))
+        accept_search = accept_search & (gate_probability >= online_search_gate_threshold)
+    return jnp.where(accept_search, best_action, fallback_action)
 
 
 def online_search_action_heuristic_opponent(
     network,
     policy_adapter_network,
+    command_gate_network,
     opponent,
     state,
     effective_size: int,
@@ -713,6 +738,8 @@ def online_search_action_heuristic_opponent(
     prior_weight: float,
     terminal_score: float,
     min_score_gap: float,
+    online_search_gate_threshold: float,
+    online_search_gate_feature_dim: int,
 ) -> jnp.ndarray:
     """Choose a primitive action by online counterfactual rollout search against a heuristic opponent."""
     obs = game.get_observation(state, policy_player)
@@ -818,12 +845,96 @@ def online_search_action_heuristic_opponent(
 
     candidate_keys = jrandom.split(key, top_k)
     scores = jax.vmap(score_candidate)(candidate_actions, prior_scores, candidate_keys)
-    best_action = candidate_actions[jnp.argmax(scores)]
+    best_position = jnp.argmax(scores)
+    best_action = candidate_actions[best_position]
     score_gap = jnp.asarray(jnp.inf, dtype=scores.dtype)
     if top_k >= 2:
         top_scores, _ = jax.lax.top_k(scores, 2)
         score_gap = top_scores[0] - top_scores[1]
-    return jnp.where(score_gap >= min_score_gap, best_action, fallback_action)
+    accept_search = score_gap >= min_score_gap
+    if online_search_gate_threshold >= 0.0:
+        gate_features = online_search_gate_features(
+            scores,
+            prior_scores,
+            best_position,
+            adaptive_action_to_index(best_action, pad_size),
+            logits,
+            fallback_action,
+            active,
+            obs_arr,
+            state.time,
+            policy_player,
+            max_steps,
+            pad_size,
+            online_search_gate_feature_dim,
+        )
+        gate_probability = jax.nn.sigmoid(command_gate_network(gate_features))
+        accept_search = accept_search & (gate_probability >= online_search_gate_threshold)
+    return jnp.where(accept_search, best_action, fallback_action)
+
+
+def online_search_gate_features(
+    scores: jnp.ndarray,
+    prior_scores: jnp.ndarray,
+    best_position: jnp.ndarray,
+    best_action_index: jnp.ndarray,
+    policy_logits: jnp.ndarray,
+    fallback_action: jnp.ndarray,
+    active: jnp.ndarray,
+    obs_arr: jnp.ndarray,
+    time: jnp.ndarray,
+    policy_player: int,
+    max_steps: int,
+    pad_size: int,
+    feature_dim: int = ONLINE_SEARCH_GATE_FEATURE_DIM,
+) -> jnp.ndarray:
+    """Build online-search accept/reject features matching the offline trainer."""
+    top_k = scores.shape[0]
+    if top_k >= 2:
+        top_scores, _ = jax.lax.top_k(scores, 2)
+        second_score = top_scores[1]
+        top_prior, _ = jax.lax.top_k(prior_scores, 2)
+        second_prior = top_prior[1]
+        prior_gap = top_prior[0] - top_prior[1]
+    else:
+        second_score = scores[best_position]
+        second_prior = prior_scores[best_position]
+        prior_gap = jnp.asarray(0.0, dtype=prior_scores.dtype)
+    best_score = scores[best_position]
+    mean_score = jnp.mean(scores)
+    std_score = jnp.std(scores)
+    best_prior = prior_scores[best_position]
+    fallback_index = adaptive_action_to_index(fallback_action, pad_size)
+    fallback_prior = policy_logits[fallback_index]
+    search_action_changed = (best_action_index != fallback_index).astype(jnp.float32)
+    active_float = active.astype(jnp.float32)
+    active_fraction = jnp.mean(active_float)
+    active_count = jnp.maximum(jnp.sum(active_float), 1.0)
+    visible_enemy_density = jnp.sum(obs_arr[6] * active_float) / active_count
+    contact = (visible_enemy_density > 0.0).astype(jnp.float32)
+    denom = jnp.maximum(jnp.asarray(top_k - 1, dtype=jnp.float32), 1.0)
+    features = jnp.stack(
+        [
+            best_score,
+            second_score,
+            best_score - second_score,
+            mean_score,
+            std_score,
+            best_prior,
+            second_prior,
+            prior_gap,
+            best_position.astype(jnp.float32) / denom,
+            fallback_prior,
+            best_prior - fallback_prior,
+            search_action_changed,
+            time.astype(jnp.float32) / jnp.asarray(max(max_steps, 1), dtype=jnp.float32),
+            jnp.asarray(policy_player, dtype=jnp.float32),
+            active_fraction,
+            visible_enemy_density,
+            contact,
+        ]
+    )
+    return features[:feature_dim]
 
 
 def policy_adapter_gate_features(
@@ -1326,6 +1437,8 @@ def evaluate_batch(
     online_search_prior_weight=0.001,
     online_search_terminal_score=100.0,
     online_search_min_score_gap=0.0,
+    online_search_gate_threshold=-1.0,
+    online_search_gate_feature_dim=ONLINE_SEARCH_GATE_FEATURE_DIM,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -1506,6 +1619,7 @@ def evaluate_batch(
                     lambda _: online_search_action_heuristic_opponent(
                         network,
                         policy_adapter_network,
+                        command_gate_network,
                         opponent,
                         state,
                         effective_size,
@@ -1533,6 +1647,8 @@ def evaluate_batch(
                         online_search_prior_weight,
                         online_search_terminal_score,
                         online_search_min_score_gap,
+                        online_search_gate_threshold,
+                        online_search_gate_feature_dim,
                     ),
                     lambda _: base_action,
                     None,
@@ -1631,6 +1747,8 @@ def evaluate_policy_opponent_batch(
     online_search_prior_weight=0.001,
     online_search_terminal_score=100.0,
     online_search_min_score_gap=0.0,
+    online_search_gate_threshold=-1.0,
+    online_search_gate_feature_dim=ONLINE_SEARCH_GATE_FEATURE_DIM,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1815,6 +1933,7 @@ def evaluate_policy_opponent_batch(
                     lambda _: online_search_action_policy_opponent(
                         network,
                         policy_adapter_network,
+                        command_gate_network,
                         opponent_network,
                         state,
                         effective_size,
@@ -1843,6 +1962,8 @@ def evaluate_policy_opponent_batch(
                         online_search_prior_weight,
                         online_search_terminal_score,
                         online_search_min_score_gap,
+                        online_search_gate_threshold,
+                        online_search_gate_feature_dim,
                     ),
                     lambda _: base_action,
                     None,
@@ -2067,6 +2188,9 @@ def parse_args():
         default=0.0,
         help="If positive, execute the online-search action only when best-minus-second rollout score gap clears it.",
     )
+    parser.add_argument("--online-search-gate-path", default=None)
+    parser.add_argument("--online-search-gate-threshold", type=float, default=-1.0)
+    parser.add_argument("--online-search-gate-hidden-dim", type=int, default=32)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -2317,6 +2441,29 @@ def parse_args():
         parser.error("--online-search-min-turn must be non-negative")
     if args.online_search_min_score_gap < 0.0:
         parser.error("--online-search-min-score-gap must be non-negative")
+    if args.online_search_gate_threshold < 0.0 and args.online_search_gate_threshold != -1.0:
+        parser.error("--online-search-gate-threshold must be between 0 and 1, or -1 to disable")
+    if args.online_search_gate_threshold > 1.0:
+        parser.error("--online-search-gate-threshold must be between 0 and 1")
+    if args.online_search_gate_threshold >= 0.0 and args.online_search_gate_path is None:
+        parser.error("--online-search-gate-threshold requires --online-search-gate-path")
+    if args.online_search_gate_path is not None and args.online_search_gate_threshold < 0.0:
+        parser.error("--online-search-gate-path requires --online-search-gate-threshold")
+    if args.online_search_gate_threshold >= 0.0 and args.online_search_top_k <= 0:
+        parser.error("--online-search-gate-threshold requires --online-search-top-k > 0")
+    if args.online_search_gate_hidden_dim <= 0:
+        parser.error("--online-search-gate-hidden-dim must be positive")
+    learned_gate_count = sum(
+        threshold >= 0.0
+        for threshold in (
+            args.strategy_command_gate_threshold,
+            args.strategy_plan_worker_gate_threshold,
+            args.policy_adapter_gate_threshold,
+            args.online_search_gate_threshold,
+        )
+    )
+    if learned_gate_count > 1:
+        parser.error("Use only one learned gate type per evaluation command")
     if args.online_search_min_grid_size < 0 or args.online_search_max_grid_size < 0:
         parser.error("--online-search-min-grid-size/max-grid-size must be non-negative")
     if (
@@ -2480,12 +2627,19 @@ def main():
         )
     command_gate_network = None
     command_gate_feature_dim = COMMAND_GATE_FEATURE_DIM
-    gate_path = args.strategy_command_gate_path or args.strategy_plan_worker_gate_path or args.policy_adapter_gate_path
+    gate_path = (
+        args.strategy_command_gate_path
+        or args.strategy_plan_worker_gate_path
+        or args.policy_adapter_gate_path
+        or args.online_search_gate_path
+    )
     if gate_path is not None:
         if args.strategy_plan_worker_gate_path is not None:
             gate_hidden_dim = args.strategy_plan_worker_gate_hidden_dim
         elif args.policy_adapter_gate_path is not None:
             gate_hidden_dim = args.policy_adapter_gate_hidden_dim
+        elif args.online_search_gate_path is not None:
+            gate_hidden_dim = args.online_search_gate_hidden_dim
         else:
             gate_hidden_dim = args.strategy_command_gate_hidden_dim
         gate_sidecar = Path(gate_path).with_suffix(".json")
@@ -2642,6 +2796,12 @@ def main():
             f"rollouts/action={args.online_search_rollouts_per_action}, min_turn={args.online_search_min_turn}"
             f", min_score_gap={args.online_search_min_score_gap:g}{contact_label}{size_label}"
         )
+        if args.online_search_gate_threshold >= 0.0:
+            print(f"Online search gate: {args.online_search_gate_path}")
+            print(
+                "Online search gate: "
+                f"threshold={args.online_search_gate_threshold:g}, feature_dim={command_gate_feature_dim}"
+            )
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -2745,6 +2905,8 @@ def main():
                         args.online_search_prior_weight,
                         args.online_search_terminal_score,
                         args.online_search_min_score_gap,
+                        args.online_search_gate_threshold,
+                        command_gate_feature_dim,
                     )
                 else:
                     info, adapter_stats = evaluate_policy_opponent_batch(
@@ -2806,6 +2968,8 @@ def main():
                         args.online_search_prior_weight,
                         args.online_search_terminal_score,
                         args.online_search_min_score_gap,
+                        args.online_search_gate_threshold,
+                        command_gate_feature_dim,
                     )
                 jax.block_until_ready(info.winner)
                 row_jax = summarize_row(info, grid_size, policy_player, chunk_games, adapter_stats)
@@ -2922,6 +3086,9 @@ def main():
         "online_search_prior_weight": args.online_search_prior_weight,
         "online_search_terminal_score": args.online_search_terminal_score,
         "online_search_min_score_gap": args.online_search_min_score_gap,
+        "online_search_gate_path": args.online_search_gate_path,
+        "online_search_gate_threshold": args.online_search_gate_threshold,
+        "online_search_gate_hidden_dim": args.online_search_gate_hidden_dim,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }

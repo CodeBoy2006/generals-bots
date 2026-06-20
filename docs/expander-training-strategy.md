@@ -15638,3 +15638,98 @@ Next high-leverage step:
   train a conditional online-search action controller or planner-aware head
   avoid another tiny full-replace policy-head CE pass
 ```
+
+### 2026-06-20 23:15 - rpa2 Max500 Trace v1 and Offline Gate Negative
+
+Scaled the rpa2 fixed-v5 max500 trace collection from the first four shards to a
+larger contact-only set, then trained a lightweight offline gate from search
+score/prior/phase features.  This was a cheap controller diagnostic, not an
+evaluation integration.
+
+New collection:
+
+```text
+output:
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-v1/
+
+settings:
+  fixed-v5 max500
+  v4 base + static conversion adapter v1
+  online search top_k=4, rollout_steps=16, rollouts/action=2
+  min_turn=80, contact-only
+  conversion_rollout_steps=500
+  num_steps=16, shards=16, seed=104300
+
+rows:
+  1607 saved
+  search_action_changed 1017 / 1607 = 63.29%
+  search_improves_continuation 179 / 1607 = 11.14%
+  search_converts_to_win 92 / 1607 = 5.72%
+  search_converts_draw_to_win 51 / 1607 = 3.17%
+  seat balance p0/p1 = 773 / 834
+```
+
+Combined rpa2 v0+v1:
+
+```text
+rows: 2078
+search_action_changed: 1317 = 63.38%
+search_improves_continuation: 261 = 12.56%
+search_converts_to_win: 153 = 7.36%
+search_converts_draw_to_win: 70 = 3.37%
+seat balance p0/p1 = 996 / 1082
+p0 convert/improve/change = 5.92% / 13.55% / 63.86%
+p1 convert/improve/change = 8.69% / 11.65% / 62.94%
+```
+
+Added:
+
+```text
+examples/_experimental/ppo/adaptive_online_search_gate_supervised.py
+```
+
+It trains a `CommandGateNetwork` from inference-available online-search trace
+features:
+
+```text
+search scores and score gap
+search prior logits and prior rank
+fallback/base action prior
+action-changed flag
+normalized time, seat, active fraction, visible enemy density, contact
+```
+
+Offline gate results on changed rpa2 v0+v1 rows:
+
+```text
+convert-v0:
+  positive field = search_converts_to_win
+  examples = 1317
+  positives = 101 = 7.67%
+  final acc = 52.92%
+  precision = 13.10%
+  recall = 94.74%
+  p_pos / p_neg = 0.5999 / 0.4321
+
+improve-v0:
+  positive field = search_improves_continuation
+  examples = 1317
+  positives = 174 = 13.21%
+  final acc = 53.49%
+  precision = 14.75%
+  recall = 56.63%
+  p_pos / p_neg = 0.5209 / 0.4928
+```
+
+Decision:
+
+```text
+The gate is available as an explicit diagnostic switch through
+`evaluate_adaptive_policy.py --online-search-gate-path <gate.eqx>
+--online-search-gate-threshold <p>`, but do not use it for promotion.  rpa2
+remains a strong max500 teacher, while the shallow score/prior/phase gate is too
+imprecise to control when to accept search actions.  The next controller should
+use richer state, route, model-embedding, or candidate-action features, or bypass
+gating by training a planner-aware conditional action head from the conversion
+rows.
+```
