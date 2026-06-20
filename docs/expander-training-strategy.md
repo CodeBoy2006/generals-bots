@@ -13393,3 +13393,106 @@ Next higher-yield route:
   prefixes, then gate that executor. The gate needs phase/contact features, but
   the executor must be capable of producing the accepted prefix action.
 ```
+
+### 2026-06-20 17:34 - Max500 Main-Stack Heuristic Plan-Worker Probe
+
+User-facing gate change: fixed-v5 diagnostics should use `max500` instead of
+`max250` by default. `max250` was too compressed and over-penalized otherwise
+reasonable games; `max500` is now the main fixed-v5 short-game gate, with longer
+horizons allowed when checking final behavior.
+
+Implementation:
+
+```text
+evaluate_adaptive_policy.py:
+  added --strategy-plan-worker-command-source main-stack-heuristic
+  source: existing main-stack/route source picker
+  target: public-observation heuristic over visible enemy, cities, fog structures,
+          generals, and neutral cells
+  aux: not required for rerank-only use; still required for learned Worker gates
+
+README.md / docs/zh-manual.md:
+  documented the new Plan-Worker command source
+```
+
+Training:
+
+```text
+output:
+  runs/adaptive-plan-worker-prefix-max500-mainstack-heuristic-v0/
+
+data:
+  max500 accepted-prefix shards
+  81 shards
+  759 accepted plan rows
+  8958 kept winning prefix examples / 9108 prefix slots
+
+train:
+  arch unet
+  channels 64,96,128,64
+  input 38 = 35 adaptive/fog/history + 3 command planes
+  epochs 30
+  lr 3e-5
+  loss weights action=1, source=0.5, direction=0.5
+
+final offline:
+  action 48.5%
+  source 65.2%
+  direction 65.3%
+```
+
+Gameplay checks:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+current best wrapper:
+  + runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+  + --policy-adapter-mode replace
+  + --policy-adapter-max-grid-size 8
+
+fixed-v5 max500 256-row seed98920:
+  v4 + Worker only:
+    p0 21.88%
+    p1 21.88%
+    min 21.88%
+
+  current best wrapper:
+    p0 36.72%
+    p1 39.84%
+    min 36.72%
+
+  current best wrapper + Worker scale 0.02:
+    p0 39.45%
+    p1 41.02%
+    min 39.45%
+
+fixed-v5 max500 512-row seed98800:
+  current best wrapper baseline:
+    p0 38.09%
+    p1 41.41%
+    min 38.09%
+
+  current best wrapper + Worker scale 0.02:
+    p0 36.52%
+    p1 37.50%
+    min 36.52%
+```
+
+Conclusion:
+
+```text
+Do not promote the Plan-Worker combination.
+
+The 256-row same-seed lift was a small false positive. At 512 rows, the Worker
+hurts the max500 wrapper by -1.57pp min versus the existing v0 adapter baseline.
+Keep max500 as the fixed-v5 gate, keep the new main-stack-heuristic command
+source for future data/interface work, but do not continue Worker rerank-scale
+sweeps.
+
+Current deployment reference remains:
+  v4 base + legacy Plan-Q prefix policy v0 adapter
+  max500 512-row reference min: 38.09%
+```

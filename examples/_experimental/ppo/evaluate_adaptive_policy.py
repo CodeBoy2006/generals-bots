@@ -47,7 +47,7 @@ from generals.core.action import DIRECTIONS
 from generals.core import game
 from train import random_action, stack_learner_actions
 
-PLAN_WORKER_COMMAND_SOURCE_NAMES = ("spatial", "belief-main-stack")
+PLAN_WORKER_COMMAND_SOURCE_NAMES = ("spatial", "belief-main-stack", "main-stack-heuristic")
 PLAN_WORKER_COMMAND_SOURCE_TO_ID = {name: index for index, name in enumerate(PLAN_WORKER_COMMAND_SOURCE_NAMES)}
 POLICY_ADAPTER_MODE_NAMES = ("delta", "blend", "replace")
 POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODE_NAMES)}
@@ -127,13 +127,18 @@ def _policy_action(
     adapter_trigger = jnp.asarray(0.0, dtype=logits.dtype)
     adapter_used = jnp.asarray(0.0, dtype=logits.dtype)
     adapter_action_diff = jnp.asarray(0.0, dtype=logits.dtype)
+    plan_worker_enabled = strategy_plan_worker_rerank_scale > 0.0 or strategy_plan_worker_gate_threshold >= 0.0
+    plan_worker_uses_aux_command = (
+        plan_worker_enabled
+        and strategy_plan_worker_command_source != PLAN_WORKER_COMMAND_SOURCE_TO_ID["main-stack-heuristic"]
+    )
     needs_aux = (
         strategy_q_rerank_scale > 0.0
         or strategy_q_replace_threshold >= 0.0
         or strategy_target_rerank_scale > 0.0
         or strategy_spatial_rerank_scale > 0.0
         or strategy_worker_mix_prob > 0.0
-        or strategy_plan_worker_rerank_scale > 0.0
+        or plan_worker_uses_aux_command
         or strategy_plan_worker_gate_threshold >= 0.0
         or strategy_command_gate_threshold >= 0.0
     )
@@ -210,10 +215,11 @@ def _policy_action(
             network.pad_size,
             strategy_spatial_rerank_scale,
         )[0]
-    plan_worker_enabled = strategy_plan_worker_rerank_scale > 0.0 or strategy_plan_worker_gate_threshold >= 0.0
     if plan_worker_enabled:
         plan_worker_policy_logits = logits
-        if strategy_plan_worker_command_source == PLAN_WORKER_COMMAND_SOURCE_TO_ID["belief-main-stack"]:
+        if strategy_plan_worker_command_source == PLAN_WORKER_COMMAND_SOURCE_TO_ID["main-stack-heuristic"]:
+            worker_source_logits, worker_target_logits = main_stack_heuristic_worker_command_logits(obs_arr, active)
+        elif strategy_plan_worker_command_source == PLAN_WORKER_COMMAND_SOURCE_TO_ID["belief-main-stack"]:
             worker_source_logits = jnp.zeros_like(aux.enemy_general_logits)
             worker_target_logits = aux.enemy_general_logits
         else:
@@ -362,6 +368,32 @@ def strategy_finish_probability(finish_logits: jnp.ndarray) -> jnp.ndarray:
     if finish_logits.shape[0] == 2:
         return jax.nn.softmax(finish_logits, axis=-1)[1]
     return jax.nn.sigmoid(finish_logits[-1])
+
+
+def main_stack_heuristic_worker_command_logits(
+    obs_arr: jnp.ndarray,
+    active: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Build commands matching main-stack/heuristic Plan-Q prefix data."""
+    army_log = jnp.maximum(obs_arr[0], 0.0)
+    generals = obs_arr[1]
+    cities = obs_arr[2]
+    mountains = obs_arr[3] > 0.5
+    neutral = obs_arr[4]
+    owned = obs_arr[5]
+    enemy = obs_arr[6]
+    structures_in_fog = obs_arr[8]
+    passable = active & ~mountains
+    not_owned = 1.0 - owned
+
+    target_logits = jnp.where(passable, 0.01, -1.0e9)
+    target_logits = target_logits + enemy * (20.0 + army_log)
+    target_logits = target_logits + cities * not_owned * 40.0
+    target_logits = target_logits + generals * not_owned * 1000.0
+    target_logits = target_logits + structures_in_fog * not_owned * 12.0
+    target_logits = target_logits + neutral * not_owned * 0.05
+    source_logits = jnp.zeros_like(target_logits)
+    return source_logits, target_logits
 
 
 def policy_adapter_delta_logits(
@@ -1536,8 +1568,15 @@ def parse_args():
     )
     if plan_worker_active and args.strategy_plan_worker_path is None:
         parser.error("Plan-Worker inference requires --strategy-plan-worker-path")
-    if plan_worker_active and not args.strategy_aux:
-        parser.error("Plan-Worker inference requires --strategy-aux")
+    if (
+        plan_worker_active
+        and not args.strategy_aux
+        and (
+            args.strategy_plan_worker_command_source != "main-stack-heuristic"
+            or args.strategy_plan_worker_gate_threshold >= 0.0
+        )
+    ):
+        parser.error("Plan-Worker inference requires --strategy-aux for this command source or gate")
     if (
         plan_worker_active
         and args.strategy_plan_worker_command_source == "spatial"

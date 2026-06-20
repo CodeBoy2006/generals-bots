@@ -1262,3 +1262,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote or threshold-sweep `adaptive-prefix-policy-adapter-gate-max500-v0/v1-phase`. Next build an executor that can actually produce accepted-prefix actions, then gate that executor with the new phase/contact features.
 - **Context:** Prefix gate training on max500 accepted-prefix shards produced `3085` changed-action examples with `21.72%` positives. Without phase/contact features, the gate triggered 100% even at threshold `0.8`, reproducing ungated v0. With phase/contact features, offline separation improved to `72.3%` acc (`P+ 0.604`, `P- 0.388`) and max500 256-row trigger dropped to `80%–87%`, but fixed-v5 min was only `39.06%`, below same-seed ungated v0 `42.97%`.
+
+## [2026-06-20 17:34] Max500 Plan-Worker Command Source
+- **Changes:** Added `evaluate_adaptive_policy.py --strategy-plan-worker-command-source main-stack-heuristic`, relaxed Plan-Worker aux requirements for rerank-only heuristic commands, and documented the new command source in `README.md`, `docs/zh-manual.md`, and `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Keep fixed-v5 diagnostics on max500. Do not promote the max500 Plan-Worker rerank; current best deployment remains v4 base plus legacy Plan-Q prefix policy v0 adapter.
+- **Context:** Trained `runs/adaptive-plan-worker-prefix-max500-mainstack-heuristic-v0/` on 8958 winning max500 prefix rows. Same-seed 256-row wrapper+Worker moved min 36.72% -> 39.45%, but 512-row seed98800 fell below the existing wrapper baseline: 36.52% vs 38.09% min.
