@@ -486,6 +486,12 @@ def as_batch(data: dict[str, jnp.ndarray]):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a candidate scorer from online-search trace shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
+    parser.add_argument(
+        "--val-dataset",
+        action="append",
+        default=None,
+        help="Optional independent validation NPZ shard path or glob. Repeatable.",
+    )
     parser.add_argument("--require-search-used", action="store_true")
     parser.add_argument("--require-action-changed", action="store_true")
     parser.add_argument("--min-score-gap", type=float, default=0.0)
@@ -493,6 +499,7 @@ def parse_args():
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--local-channels", type=int, default=20)
     parser.add_argument("--max-rows", type=int, default=None)
+    parser.add_argument("--max-val-rows", type=int, default=None)
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-epochs", type=int, default=80)
@@ -518,6 +525,8 @@ def parse_args():
         parser.error("--local-channels must be non-negative")
     if args.max_rows is not None and args.max_rows <= 1:
         parser.error("--max-rows must leave at least two rows")
+    if args.max_val_rows is not None and args.max_val_rows <= 0:
+        parser.error("--max-val-rows must be positive")
     if not (0.0 < args.val_fraction < 1.0):
         parser.error("--val-fraction must be between 0 and 1")
     if args.hidden_dim <= 0 or args.num_epochs <= 0 or args.minibatch_size <= 0:
@@ -545,7 +554,31 @@ def main():
         args.max_rows,
         args.seed,
     )
-    train_data, val_data, train_idx, val_idx = split_dataset(dataset, args.val_fraction, args.seed)
+    val_stats = None
+    if args.val_dataset:
+        val_paths = expand_dataset_paths(args.val_dataset)
+        val_dataset, val_stats = load_dataset(
+            val_paths,
+            args.require_search_used,
+            args.require_action_changed,
+            args.min_score_gap,
+            args.positive_field,
+            args.max_steps,
+            args.local_channels,
+            args.max_val_rows,
+            args.seed + 1,
+        )
+        if val_dataset["features"].shape[1:] != dataset["features"].shape[1:]:
+            raise ValueError(
+                "--val-dataset must have the same top-k and feature dimensions as --dataset "
+                f"({val_dataset['features'].shape[1:]} != {dataset['features'].shape[1:]})"
+            )
+        train_data = {name: value for name, value in dataset.items() if name not in {"feature_mean", "feature_std"}}
+        val_data = {name: value for name, value in val_dataset.items() if name not in {"feature_mean", "feature_std"}}
+        train_idx = np.arange(dataset["features"].shape[0])
+        val_idx = np.arange(val_dataset["features"].shape[0])
+    else:
+        train_data, val_data, train_idx, val_idx = split_dataset(dataset, args.val_fraction, args.seed)
     key = jrandom.PRNGKey(args.seed)
     key, model_key = jrandom.split(key)
     model = OnlineSearchCandidateScorer(
@@ -562,6 +595,8 @@ def main():
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
     print(f"Rows:          raw={stats['raw_rows']} kept={stats['rows']} train={len(train_idx)} val={len(val_idx)}")
+    if val_stats is not None:
+        print(f"Val rows:      raw={val_stats['raw_rows']} kept={val_stats['rows']} independent_shards=true")
     print(f"Top-k/features:{stats['top_k']} / {stats['feature_dim']}")
     print(f"Prior base:    top1={stats['prior_top1']*100:.2f}% top2={stats['prior_top2']*100:.2f}%")
     if args.positive_field is not None:
@@ -628,6 +663,7 @@ def main():
             "local_channels": args.local_channels,
         },
         "dataset": stats,
+        "validation_dataset": val_stats,
         "best_epoch": best_epoch,
         "best_val_metrics": {name: float(value) for name, value in best_metrics.items()},
         "final_val_loss": float(final_loss),

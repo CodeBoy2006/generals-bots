@@ -16013,3 +16013,51 @@ independent conversion data and likely a stronger conditional action head, not
 another scorer hyperparameter sweep.  Keep the partial v2 shard as usable data,
 but do not promote the scorer into evaluator gameplay.
 ```
+
+### 2026-06-20 23:39 - Candidate Scorer Independent Validation
+
+Added `adaptive_online_search_candidate_scorer.py --val-dataset` so scorer
+training can validate on independent shard globs rather than only random row
+splits from the same data.  The script also validates that train and validation
+sets have matching top-k and feature dimensions.
+
+Independent validation probe:
+
+```text
+train:
+  rpa2 v0 + rpa2 v1
+  positive field: search_converts_to_win
+  rows: 101
+
+validation:
+  rpa2 v2-convert partial
+  rows: 32
+
+model:
+  runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-v0/
+
+best epoch:
+  2
+
+best validation:
+  prior top1: 0.00%
+  prior top2: 40.62%
+  scorer top1: 40.62%
+  scorer top2: 53.12%
+  scorer pair: 50.26%
+
+final epoch:
+  top1: 21.88%
+  top2: 50.00%
+```
+
+Decision:
+
+```text
+The scorer can recover the best search action on a new strict-conversion shard
+well above prior top1, but ranking calibration is weak: pair accuracy is near
+random and overtraining hurts top1.  This supports using early-stopped scorer
+diagnostics, not direct evaluator integration.  Next code direction should be a
+planner-aware conditional action head with independent validation and early
+stopping, or more strict-conversion data before revisiting scorer integration.
+```

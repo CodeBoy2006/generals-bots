@@ -1442,3 +1442,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not integrate the scorer into gameplay. Collect substantially more independent strict-conversion rows or move to a planner-aware conditional action head.
 - **Context:** The collection was interrupted after 6/8 shards and left a GPU JAX process, which was terminated after `nvidia-smi` confirmed it was still consuming GPU. The usable partial shard has `32` strict conversion rows with exact p0/p1 balance `16/16`. Combined v0+v1+partial-v2 strict scorer kept `133` rows and reached best val top1/top2/pair `37.04%/59.26%/55.90%`, not better than the `101`-row frozen v0/v1 split.
+
+## [2026-06-20 23:39] Candidate Scorer Independent Validation
+- **Changes:** Added `adaptive_online_search_candidate_scorer.py --val-dataset` / `--max-val-rows` for independent shard validation, trained `runs/adaptive-online-search-candidate-scorer-rpa2-convert-indval-v0/`, and documented the result.
+- **Status:** Completed
+- **Next Steps:** Use independent validation for any future scorer/controller. Do not wire the scorer into gameplay until pair/rank calibration improves on independent shards.
+- **Context:** Training on rpa2 v0+v1 strict conversion rows (`101`) and validating on partial v2 strict conversion rows (`32`) gave best epoch `2`, top1/top2/pair `40.62%/53.12%/50.26%` versus prior top1 `0.00%`. Final epoch overtrained to top1 `21.88%`; scorer action top1 transfers somewhat, but ranking calibration is weak.
