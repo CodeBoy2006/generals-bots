@@ -231,6 +231,90 @@ def load_plan_worker_dataset(
     return {name: jnp.asarray(value) for name, value in arrays.items()}
 
 
+def load_plan_worker_prefix_dataset(
+    paths: list[Path],
+    drop_pass_labels: bool,
+    require_plan_outcome_win: bool,
+    max_examples: int | None,
+    seed: int,
+) -> dict[str, jnp.ndarray]:
+    """Load best-command executed-prefix examples from Plan-Q shards."""
+    chunks: dict[str, list[np.ndarray]] = {
+        "obs": [],
+        "legal_mask": [],
+        "active": [],
+        "labels": [],
+        "weights": [],
+    }
+    stats = {"rows": 0, "prefix": 0, "kept": 0}
+    required = (
+        "worker_prefix_obs",
+        "worker_prefix_legal_mask",
+        "worker_prefix_active",
+        "worker_prefix_action_index",
+        "worker_prefix_valid",
+        "worker_prefix_source_index",
+        "worker_prefix_target_index",
+        "worker_prefix_plan_outcome",
+    )
+    for path in paths:
+        shard = np.load(path)
+        missing = [name for name in required if name not in shard]
+        if missing:
+            raise KeyError(f"{path} is missing Plan-Q prefix field {missing[0]}")
+        base_obs = shard["worker_prefix_obs"].astype(np.float32)
+        if base_obs.shape[1] == 0:
+            continue
+        num_rows, prefix_steps = base_obs.shape[:2]
+        active = shard["worker_prefix_active"].astype(np.bool_)
+        labels = shard["worker_prefix_action_index"].astype(np.int32)
+        valid = shard["worker_prefix_valid"].astype(np.bool_)
+        plan_outcome = shard["worker_prefix_plan_outcome"].astype(np.int32)
+        pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
+        keep = valid.copy()
+        if require_plan_outcome_win:
+            keep &= plan_outcome == OUTCOME_WIN
+        if drop_pass_labels:
+            keep &= labels != pass_index
+        stats["rows"] += int(num_rows)
+        stats["prefix"] += int(num_rows * prefix_steps)
+        stats["kept"] += int(np.sum(keep))
+        if not np.any(keep):
+            continue
+        flat_obs = base_obs.reshape(num_rows * prefix_steps, *base_obs.shape[2:])
+        flat_active = active.reshape(num_rows * prefix_steps, *active.shape[2:])
+        flat_keep = keep.reshape(-1)
+        flat_sources = shard["worker_prefix_source_index"].astype(np.int32).reshape(-1)
+        flat_targets = shard["worker_prefix_target_index"].astype(np.int32).reshape(-1)
+        command = plan_command_planes(
+            flat_sources[flat_keep],
+            flat_targets[flat_keep],
+            flat_active[flat_keep],
+            flat_obs.shape[-1],
+        )
+        chunks["obs"].append(np.concatenate([flat_obs[flat_keep], command], axis=1).astype(np.float32))
+        chunks["legal_mask"].append(
+            shard["worker_prefix_legal_mask"].astype(np.bool_).reshape(
+                num_rows * prefix_steps,
+                *shard["worker_prefix_legal_mask"].shape[2:],
+            )[flat_keep]
+        )
+        chunks["active"].append(flat_active[flat_keep])
+        chunks["labels"].append(labels.reshape(-1)[flat_keep])
+        chunks["weights"].append(np.ones((int(np.sum(flat_keep)),), dtype=np.float32))
+
+    if not chunks["obs"]:
+        raise ValueError("No Plan-Q prefix Worker examples selected; collect prefix rows or relax filters")
+    arrays = {name: np.concatenate(values, axis=0) for name, values in chunks.items()}
+    if max_examples is not None and arrays["obs"].shape[0] > max_examples:
+        rng = np.random.default_rng(seed)
+        indices = np.sort(rng.choice(arrays["obs"].shape[0], size=max_examples, replace=False))
+        arrays = {name: value[indices] for name, value in arrays.items()}
+    dataset = {name: jnp.asarray(value) for name, value in arrays.items()}
+    dataset["stats"] = stats
+    return dataset
+
+
 def _heatmap_argmax_indices(heatmap: np.ndarray, active: np.ndarray) -> np.ndarray:
     """Return active-cell argmax indices for spatial supervision maps."""
     flat_scores = heatmap.reshape(heatmap.shape[0], -1).astype(np.float32)
@@ -407,7 +491,7 @@ def train_epoch(
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a target-conditioned Worker from Plan-Q shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
-    parser.add_argument("--dataset-format", choices=("plan-q", "strategy"), default="plan-q")
+    parser.add_argument("--dataset-format", choices=("plan-q", "plan-q-prefix", "strategy"), default="plan-q")
     parser.add_argument("--selection", choices=("best", "all", "accepted", "mixed"), default="best")
     parser.add_argument("--score-temperature", type=float, default=0.25)
     parser.add_argument("--accepted-score-margin", type=float, default=25.0)
@@ -479,6 +563,14 @@ def main():
             args.max_examples,
             args.seed,
         )
+    elif args.dataset_format == "plan-q-prefix":
+        dataset = load_plan_worker_prefix_dataset(
+            paths,
+            not args.keep_pass_labels,
+            args.require_outcome_win,
+            args.max_examples,
+            args.seed,
+        )
     else:
         dataset = load_plan_worker_dataset(
             paths,
@@ -513,6 +605,12 @@ def main():
             filters.append("finish<=250")
         if filters:
             print(f"Filters:      {', '.join(filters)}")
+    if args.dataset_format == "plan-q-prefix":
+        stats = dataset.get("stats", {})
+        if stats:
+            print(f"Prefix kept:  {stats['kept']} / {stats['prefix']} from {stats['rows']} row(s)")
+        if args.require_outcome_win:
+            print("Filters:      plan_outcome=win")
     if args.dataset_format == "plan-q":
         print(f"Selection:    {args.selection}")
         if args.selection in ("accepted", "mixed"):

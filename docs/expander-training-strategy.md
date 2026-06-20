@@ -11716,3 +11716,171 @@ Next useful direction:
   replacement itself reaches terminal wins. The current single-step command gate
   is not enough.
 ```
+
+### 2026-06-20: Executed-Prefix Plan-Worker Probe
+
+The command-gate failure showed that choosing a one-step replacement is not
+enough. Added an optional executed-prefix path:
+
+```text
+adaptive_plan_q_dataset.py:
+  --save-worker-prefix-steps N
+
+behavior:
+  after scoring source-target plans, select the best plan and save the first N
+  target-conditioned Worker observations, masks, action labels, source/target
+  command cells, plan outcome, and plan Q.
+
+adaptive_plan_worker_supervised.py:
+  --dataset-format plan-q-prefix
+
+behavior:
+  flatten worker_prefix_* arrays into Worker examples.
+  --require-outcome-win filters by selected plan outcome.
+```
+
+GPU smoke:
+
+```text
+run:
+  runs/adaptive-plan-q-prefix-smoke-v0/
+
+settings:
+  4 envs
+  2 rollout steps
+  2x2 plans
+  plan_rollout_steps 8
+  plan_worker_steps 4
+  save_worker_prefix_steps 4
+
+result:
+  shard saved with worker_prefix_obs shape (8, 4, 35, 16, 16)
+  32 valid prefix steps
+  trainer smoke loaded plan-q-prefix and saved a small Worker
+```
+
+Winning oracle-prefix v0:
+
+```text
+collector:
+  runs/adaptive-plan-q-prefix-oracle-win-v0/
+  heuristic source/target candidates
+  require_best_plan_win
+  warmup 80
+  plan_rollout_steps 48
+  plan_worker_steps 12
+  save_worker_prefix_steps 12
+
+data:
+  8 winning command states
+  96 valid non-pass prefix steps
+  mean plan_q_gap 0.842
+
+worker:
+  runs/adaptive-plan-worker-prefix-oracle-win-v0/
+  small U-Net, 32/48/64/32
+  final action/useful accuracy 96.9%
+```
+
+Fixed-v5 max250, 128 games/seat:
+
+```text
+seed 93900 baseline:
+  p0 4.69%
+  p1 12.50%
+  min 4.69%
+
+seed 93900 prefix worker v0, scale 0.02, command belief-main-stack:
+  p0 11.72%
+  p1 9.38%
+  min 9.38%
+
+seed 93700 historical baseline:
+  p0 10.94%
+  p1 10.94%
+  min 10.94%
+
+seed 93700 prefix worker v0, scale 0.02, command belief-main-stack:
+  p0 12.50%
+  p1 10.94%
+  min 10.94%
+```
+
+Expander smoke, 64 games/row, max500, seed 93940:
+
+```text
+baseline:
+  8p0 60.94%
+  8p1 62.50%
+  12p0 73.44%
+  12p1 70.31%
+  16p0 51.56%
+  16p1 48.44%
+  min 48.44%
+
+prefix worker v0 with --strategy-plan-worker-max-grid-size 8:
+  8p0 73.44%
+  8p1 62.50%
+  12p0 73.44%
+  12p1 70.31%
+  16p0 51.56%
+  16p1 48.44%
+  min 48.44%
+```
+
+This is a weak but real positive signal: multi-step executed-prefix labels can
+improve an 8x8 row without changing larger rows when range-gated.
+
+Winning oracle-prefix v1 scaled the same data source:
+
+```text
+collector:
+  runs/adaptive-plan-q-prefix-oracle-win-v1/
+  16 envs
+  16 rollout steps
+  8 shards
+
+data:
+  186 winning command states
+  2195 valid non-pass prefix steps
+  mean plan_q_gap 0.746
+  min plan_q_gap 0.433
+
+worker:
+  runs/adaptive-plan-worker-prefix-oracle-win-v1/
+  final action/useful accuracy 98.6%
+  source accuracy 98.6%
+  direction accuracy 99.6%
+```
+
+But v1 did not improve gameplay:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 93900:
+  p0 7.03%
+  p1 11.72%
+  min 7.03%
+
+fixed-v5 max250, 128 games/seat, seed 93700:
+  p0 9.38%
+  p1 10.16%
+  min 9.38%
+```
+
+Conclusion:
+
+```text
+Keep the executed-prefix infrastructure.
+Do not continue expanding oracle-only prefix data.
+
+The small v0 signal says the failure point is partly execution, but v1 shows
+that fitting oracle heuristic commands too well creates command-distribution
+mismatch against inference-time belief/main-stack commands.
+
+Next useful variant:
+  collect prefix data from inference-matched commands:
+    candidate_source model-worker
+    candidate_target model or belief-main-stack
+    save executed prefixes only when the plan later wins or sharply reduces draw
+  mix a small oracle slice as regularization rather than the whole Worker target.
+```

@@ -489,6 +489,141 @@ def plan_action_to_index(action: jnp.ndarray, pad_size: int) -> jnp.ndarray:
     return adaptive_action_to_index(action, pad_size)
 
 
+def collect_best_plan_worker_prefix(
+    fixed_opponent_network,
+    state,
+    effective_size,
+    key,
+    truncation: int,
+    learner_player: int,
+    plan_outputs,
+    worker_prefix_steps: int,
+    opponent_id: int,
+    opponent_policy_mode: int,
+    opponent_policy_grid_size: int,
+    pad_size: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    previous_scoreboard: jnp.ndarray,
+    fog_memory_enabled: bool,
+    fog_memory: AdaptiveFogMemory,
+):
+    """Record the executable prefix for the selected best source-target command."""
+    (
+        source_indices,
+        target_indices,
+        _plan_scores,
+        plan_q,
+        plan_outcomes,
+        _plan_action_indices,
+        _source_probs,
+        _target_probs,
+        best_source_pos,
+        best_target_pos,
+    ) = plan_outputs
+    source_index = source_indices[best_source_pos]
+    target_index = target_indices[best_target_pos]
+    best_plan_q = plan_q[best_source_pos, best_target_pos]
+    best_plan_outcome = plan_outcomes[best_source_pos, best_target_pos]
+    opponent_player = 1 - learner_player
+
+    def body(carry, _):
+        rollout_state, prev_scoreboard, memory, step_key, already_done = carry
+        step_key, opponent_key = jrandom.split(step_key)
+        learner_obs = game.get_observation(rollout_state, learner_player)
+        current_memory = update_adaptive_fog_memory(memory, learner_obs) if fog_memory_enabled else memory
+        current_scoreboard = adaptive_scoreboard_features(learner_obs, effective_size)
+        history_context = (
+            adaptive_scoreboard_history_context(prev_scoreboard, current_scoreboard)
+            if scoreboard_history_enabled
+            else None
+        )
+        obs_arr, active = adaptive_obs_to_array(
+            learner_obs,
+            effective_size,
+            pad_size,
+            include_global_context=global_context,
+            scoreboard_history=history_context,
+            fog_memory=current_memory if fog_memory_enabled else None,
+        )
+        mask = compute_adaptive_valid_move_mask(
+            learner_obs.armies,
+            learner_obs.owned_cells,
+            learner_obs.mountains,
+            effective_size,
+            pad_size,
+        )
+        worker_action = plan_worker_action(
+            rollout_state,
+            learner_player,
+            source_index,
+            target_index,
+            effective_size,
+            pad_size,
+        )
+        action_index = plan_action_to_index(worker_action, pad_size)
+        opponent_obs = game.get_observation(rollout_state, opponent_player)
+        opponent_action_value = opponent_policy_action(
+            fixed_opponent_network,
+            opponent_id,
+            opponent_key,
+            opponent_obs,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
+        )
+        actions = jax.lax.cond(
+            learner_player == 0,
+            lambda _: jnp.stack([worker_action, opponent_action_value]),
+            lambda _: jnp.stack([opponent_action_value, worker_action]),
+            None,
+        )
+        next_state, info = game.step(rollout_state, actions)
+        truncated = (next_state.time >= truncation) & ~info.is_done
+        step_done = info.is_done | truncated
+        final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
+        next_scoreboard = jnp.where(already_done, prev_scoreboard, current_scoreboard)
+        next_memory = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), memory, current_memory)
+        valid = ~already_done
+        return (
+            final_state,
+            next_scoreboard,
+            next_memory,
+            step_key,
+            already_done | step_done,
+        ), (
+            obs_arr,
+            mask,
+            active,
+            action_index,
+            valid,
+            rollout_state.time,
+        )
+
+    (_, _, _, _, _), prefix = jax.lax.scan(
+        body,
+        (state, previous_scoreboard, fog_memory, key, jnp.asarray(False)),
+        jnp.arange(worker_prefix_steps),
+        length=worker_prefix_steps,
+    )
+    obs_arr, masks, active, action_indices, valid, times = prefix
+    source_prefix = jnp.full((worker_prefix_steps,), source_index, dtype=jnp.int32)
+    target_prefix = jnp.full((worker_prefix_steps,), target_index, dtype=jnp.int32)
+    outcome_prefix = jnp.full((worker_prefix_steps,), best_plan_outcome, dtype=jnp.int8)
+    q_prefix = jnp.full((worker_prefix_steps,), best_plan_q, dtype=jnp.float32)
+    return (
+        obs_arr,
+        masks,
+        active,
+        action_indices,
+        valid,
+        times,
+        source_prefix,
+        target_prefix,
+        outcome_prefix,
+        q_prefix,
+    )
+
+
 @eqx.filter_jit
 def advance_behavior_step(
     states,
@@ -686,6 +821,7 @@ def collect_plan_q_step(
     fog_memory_enabled=False,
     candidate_source_mode=0,
     candidate_target_mode=0,
+    worker_prefix_steps=0,
 ):
     """Collect one vectorized batch of plan-Q labels and advance behavior states."""
     num_envs = states.armies.shape[0]
@@ -756,7 +892,7 @@ def collect_plan_q_step(
         model_source_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
         model_target_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
 
-    key, plan_key, policy_key, opponent_key = jrandom.split(key, 4)
+    key, plan_key, prefix_key, policy_key, opponent_key = jrandom.split(key, 5)
     plan_keys = jrandom.split(plan_key, num_envs)
     plan_outputs = jax.vmap(
         lambda state, size, sample_key, prev_scoreboard, memory, source_logits, target_logits: score_plan_candidates(
@@ -801,6 +937,35 @@ def collect_plan_q_step(
         current_fog_memory,
         model_source_logits,
         model_target_logits,
+    )
+    prefix_keys = jrandom.split(prefix_key, num_envs)
+    worker_prefix_outputs = jax.vmap(
+        lambda state, size, sample_key, prev_scoreboard, memory, plans: collect_best_plan_worker_prefix(
+            fixed_opponent_network,
+            state,
+            size,
+            sample_key,
+            truncation,
+            learner_player,
+            plans,
+            worker_prefix_steps,
+            opponent_id,
+            opponent_policy_mode,
+            opponent_policy_grid_size,
+            pad_size,
+            global_context,
+            scoreboard_history_enabled,
+            prev_scoreboard,
+            fog_memory_enabled,
+            memory,
+        )
+    )(
+        states,
+        effective_sizes,
+        prefix_keys,
+        current_scoreboard,
+        current_fog_memory,
+        plan_outputs,
     )
 
     policy_keys = jrandom.split(policy_key, num_envs)
@@ -850,6 +1015,7 @@ def collect_plan_q_step(
         plan_outputs,
         dones,
         infos,
+        worker_prefix_outputs,
     )
     return final_states, final_sizes, final_scoreboard, final_memory, data, key
 
@@ -887,6 +1053,7 @@ def collect_plan_q_rollout(
     fog_memory_enabled=False,
     candidate_source_mode=0,
     candidate_target_mode=0,
+    worker_prefix_steps=0,
 ):
     """Collect multiple plan-Q steps for one learner seat."""
     step_data = []
@@ -923,6 +1090,7 @@ def collect_plan_q_rollout(
             fog_memory_enabled,
             candidate_source_mode,
             candidate_target_mode,
+            worker_prefix_steps,
         )
         step_data.append(data)
     return states, effective_sizes, scoreboard_history, fog_memory, jax.tree.map(lambda *xs: jnp.stack(xs), *step_data), key
@@ -964,6 +1132,7 @@ def collect_mixed_plan_q_rollout(
     fog_memory_enabled=False,
     candidate_source_mode=0,
     candidate_target_mode=0,
+    worker_prefix_steps=0,
 ):
     """Collect plan-Q data for both seats and concatenate env dimension."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -1000,6 +1169,7 @@ def collect_mixed_plan_q_rollout(
         fog_memory_enabled,
         candidate_source_mode,
         candidate_target_mode,
+        worker_prefix_steps,
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_plan_q_rollout(
         states_p1,
@@ -1034,6 +1204,7 @@ def collect_mixed_plan_q_rollout(
         fog_memory_enabled,
         candidate_source_mode,
         candidate_target_mode,
+        worker_prefix_steps,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
@@ -1062,6 +1233,7 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         plan_outputs,
         dones,
         infos,
+        worker_prefix_outputs,
     ) = rollout_data
     (
         source_indices,
@@ -1075,6 +1247,18 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         best_source_pos,
         best_target_pos,
     ) = plan_outputs
+    (
+        worker_prefix_obs,
+        worker_prefix_masks,
+        worker_prefix_active,
+        worker_prefix_action_indices,
+        worker_prefix_valid,
+        worker_prefix_time,
+        worker_prefix_source_indices,
+        worker_prefix_target_indices,
+        worker_prefix_plan_outcome,
+        worker_prefix_plan_q,
+    ) = worker_prefix_outputs
     learner_player_grid = jnp.broadcast_to(learner_players[None, :], dones.shape)
     best_plan_q = jnp.take_along_axis(
         plan_q.reshape(*plan_q.shape[:2], -1),
@@ -1089,7 +1273,7 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
     flat_logits = flat(logits)
     if logit_dtype == "float16":
         flat_logits = np.clip(flat_logits, -1.0e4, 1.0e4).astype(np.float16)
-    return {
+    arrays = {
         "obs": flat(obs).astype(np.float16),
         "legal_mask": flat(masks).astype(np.bool_),
         "active": flat(active).astype(np.bool_),
@@ -1114,6 +1298,21 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         "mean_plan_q": flat(mean_plan_q).astype(np.float16),
         "plan_q_gap": flat(best_plan_q - mean_plan_q).astype(np.float16),
     }
+    arrays.update(
+        {
+            "worker_prefix_obs": flat(worker_prefix_obs).astype(np.float16),
+            "worker_prefix_legal_mask": flat(worker_prefix_masks).astype(np.bool_),
+            "worker_prefix_active": flat(worker_prefix_active).astype(np.bool_),
+            "worker_prefix_action_index": flat(worker_prefix_action_indices).astype(np.int32),
+            "worker_prefix_valid": flat(worker_prefix_valid).astype(np.bool_),
+            "worker_prefix_time": flat(worker_prefix_time).astype(np.int16),
+            "worker_prefix_source_index": flat(worker_prefix_source_indices).astype(np.int16),
+            "worker_prefix_target_index": flat(worker_prefix_target_indices).astype(np.int16),
+            "worker_prefix_plan_outcome": flat(worker_prefix_plan_outcome).astype(np.int8),
+            "worker_prefix_plan_q": flat(worker_prefix_plan_q).astype(np.float16),
+        }
+    )
+    return arrays
 
 
 def best_plan_outcomes_from_arrays(arrays: dict[str, np.ndarray], target_count: int) -> np.ndarray:
@@ -1188,6 +1387,7 @@ def parse_args():
     parser.add_argument("--candidate-target", choices=tuple(CANDIDATE_MODE_TO_ID), default="heuristic")
     parser.add_argument("--plan-rollout-steps", type=int, default=16)
     parser.add_argument("--plan-worker-steps", type=int, default=0)
+    parser.add_argument("--save-worker-prefix-steps", type=int, default=0)
     parser.add_argument("--rollouts-per-plan", type=int, default=2)
     parser.add_argument("--score-scale", type=float, default=10.0)
     parser.add_argument("--score-temperature", type=float, default=0.25)
@@ -1262,6 +1462,10 @@ def parse_args():
         parser.error("--plan-worker-steps must be non-negative")
     if args.plan_worker_steps > args.plan_rollout_steps:
         parser.error("--plan-worker-steps must be less than or equal to --plan-rollout-steps")
+    if args.save_worker_prefix_steps < 0:
+        parser.error("--save-worker-prefix-steps must be non-negative")
+    if args.save_worker_prefix_steps > args.plan_worker_steps:
+        parser.error("--save-worker-prefix-steps must be less than or equal to --plan-worker-steps")
     if args.score_scale <= 0.0 or args.score_temperature <= 0.0:
         parser.error("--score-scale and --score-temperature must be positive")
     if args.min_plan_gap < 0.0:
@@ -1310,6 +1514,8 @@ def main():
     print(f"Plan rollout:  {args.plan_rollout_steps} steps x {args.rollouts_per_plan}")
     if args.plan_worker_steps > 0:
         print(f"Plan worker:   {args.plan_worker_steps} extra target-conditioned steps")
+    if args.save_worker_prefix_steps > 0:
+        print(f"Worker prefix: saving {args.save_worker_prefix_steps} best-command steps")
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} behavior steps before scoring")
     if args.min_plan_gap > 0.0 or args.require_best_plan_win or args.min_save_turn > 0 or args.max_save_turn is not None:
@@ -1463,6 +1669,7 @@ def main():
         "candidate_target": args.candidate_target,
         "plan_rollout_steps": args.plan_rollout_steps,
         "plan_worker_steps": args.plan_worker_steps,
+        "save_worker_prefix_steps": args.save_worker_prefix_steps,
         "rollouts_per_plan": args.rollouts_per_plan,
         "opponent": args.opponent,
         "opponent_policy_path": args.opponent_policy_path,
@@ -1533,6 +1740,7 @@ def main():
             args.fog_memory,
             candidate_source_mode,
             candidate_target_mode,
+            args.save_worker_prefix_steps,
         )
         jax.block_until_ready(states_p0.armies)
         arrays = flatten_plan_q_data(rollout_data, learner_players, args.logit_dtype)

@@ -1220,6 +1220,48 @@ def test_plan_q_dataset_parse_args_accepts_strategy_finish_outputs(monkeypatch):
         parse_args()
 
 
+def test_plan_worker_prefix_dataset_loads_executed_command_rows(tmp_path):
+    import numpy as np
+
+    from examples._experimental.ppo.adaptive_plan_worker_supervised import load_plan_worker_prefix_dataset
+
+    shard_path = tmp_path / "prefix.npz"
+    obs = np.zeros((2, 2, 5, 4, 4), dtype=np.float16)
+    legal = np.zeros((2, 2, 4, 4, 4), dtype=np.bool_)
+    active = np.ones((2, 2, 4, 4), dtype=np.bool_)
+    labels = np.array([[0, 1], [2, 3]], dtype=np.int32)
+    valid = np.array([[True, False], [True, True]], dtype=np.bool_)
+    source = np.array([[0, 0], [5, 5]], dtype=np.int16)
+    target = np.array([[15, 15], [10, 10]], dtype=np.int16)
+    outcome = np.array([[2, 2], [1, 1]], dtype=np.int8)
+    np.savez_compressed(
+        shard_path,
+        worker_prefix_obs=obs,
+        worker_prefix_legal_mask=legal,
+        worker_prefix_active=active,
+        worker_prefix_action_index=labels,
+        worker_prefix_valid=valid,
+        worker_prefix_source_index=source,
+        worker_prefix_target_index=target,
+        worker_prefix_plan_outcome=outcome,
+    )
+
+    dataset = load_plan_worker_prefix_dataset(
+        [shard_path],
+        drop_pass_labels=True,
+        require_plan_outcome_win=True,
+        max_examples=None,
+        seed=7,
+    )
+
+    assert dataset["obs"].shape == (1, 8, 4, 4)
+    assert dataset["legal_mask"].shape == (1, 4, 4, 4)
+    assert dataset["labels"].tolist() == [0]
+    assert dataset["stats"]["kept"] == 1
+    assert float(dataset["obs"][0, 5, 0, 0]) == 1.0
+    assert float(dataset["obs"][0, 6, 3, 3]) == 1.0
+
+
 def test_accepted_replacement_weights_prefer_outcome_then_score():
     from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights
 

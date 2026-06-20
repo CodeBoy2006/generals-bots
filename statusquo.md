@@ -1178,3 +1178,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote or threshold-sweep the command-gate route. Move to a plan-conditioned executor or longer executed-command trajectory collection with explicit finish pressure.
 - **Context:** The safe-v3 policy checkpoint has no spatial source/target heads, so model-candidate collection used the policy-preserving spatial checkpoint `adaptive-plan-q-source-target-highgap-mid100-v0`. The resulting gate fit a low-positive dataset (`7805` rows, `4.09%` positives), but fixed-v5 max250 collapsed from gate-off min `10.94%` to gated min `0.00%` with `98.44%` draw on both seats.
+
+## [2026-06-20 13:32] Executed-Prefix Plan Worker
+- **Changes:** Added `adaptive_plan_q_dataset.py --save-worker-prefix-steps` to save best-command executed Worker prefixes, added `adaptive_plan_worker_supervised.py --dataset-format plan-q-prefix`, covered the loader with a synthetic test, and documented GPU prefix Worker probes.
+- **Status:** Completed
+- **Next Steps:** Keep the prefix infrastructure but stop expanding oracle-only prefix data. Next collect inference-matched model-worker/model or belief-main-stack prefixes whose executed plans later win or reduce draw, then mix a small oracle slice as regularization.
+- **Context:** Small oracle-prefix v0 had only `8` winning states / `96` prefix labels but weakly improved fixed-v5 max250 seed `93900` min from `4.69%` to `9.38%` and held seed `93700` at `10.94%`; Expander smoke with Worker limited to 8x8 improved 8p0 and left larger rows unchanged. Larger oracle-prefix v1 (`186` states / `2195` labels, offline action `98.6%`) regressed fixed-v5 to `7.03%` and `9.38%` min, indicating oracle command-distribution mismatch.
