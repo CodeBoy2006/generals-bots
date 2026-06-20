@@ -147,7 +147,7 @@ def parse_args():
     parser.add_argument("--num-iterations", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--pool-size", type=int, default=4096)
-    parser.add_argument("--truncation", type=int, default=250)
+    parser.add_argument("--truncation", type=int, default=500)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
     parser.add_argument("--num-cities-min", type=int, default=4)

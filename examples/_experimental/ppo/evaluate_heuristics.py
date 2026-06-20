@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument("--num-games", type=int, default=1024)
     parser.add_argument("--grid-size", type=int, default=8)
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
-    parser.add_argument("--max-steps", type=int, default=250)
+    parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
     parser.add_argument("--num-cities-min", type=int, default=4)

@@ -1887,6 +1887,12 @@ def parse_args():
     parser.add_argument("--grid-sizes", default="8,12,16")
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--num-games", type=int, default=1024)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=0,
+        help="If positive, split each size/seat row into this many games per JAX evaluation batch.",
+    )
     parser.add_argument("--max-steps", type=int, default=750)
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="expander")
     parser.add_argument("--opponent-policy-path", default=None)
@@ -2095,6 +2101,8 @@ def parse_args():
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_games <= 0:
         parser.error("--num-games must be positive")
+    if args.eval_batch_size < 0:
+        parser.error("--eval-batch-size must be non-negative")
     if args.max_steps <= 0:
         parser.error("--max-steps must be positive")
     if args.opponent_input_channels <= 0:
@@ -2644,158 +2652,187 @@ def main():
         print("Score hist: previous+delta channels")
     if args.fog_memory:
         print("Fog memory: explored/enemy/city/general planes")
+    eval_batch_size = args.eval_batch_size if args.eval_batch_size > 0 else args.num_games
+    if eval_batch_size < args.num_games:
+        print(f"Eval batch: {eval_batch_size} games per compiled batch")
     print()
 
     for grid_size in args.grid_sizes:
         for policy_player in (0, 1):
-            key, pool_key, eval_key = jrandom.split(key, 3)
-            pool = make_adaptive_state_pool(
-                pool_key,
-                args.num_games,
-                (grid_size,),
-                args.pad_to,
-                args.map_generator,
-                (args.mountain_density_min, args.mountain_density_max),
-                (args.num_cities_min, args.num_cities_max),
-                args.max_generals_distance,
-                (args.city_army_min, args.city_army_max),
-            )
-            states = pool.states
             t0 = time.time()
-            if opponent_network is None:
-                info, adapter_stats = evaluate_batch(
-                    network,
-                    policy_adapter_network,
-                    policy_adapter_feature_network,
-                    plan_worker_network,
-                    command_gate_network,
-                    states,
-                    grid_size,
-                    eval_key,
-                    args.max_steps,
-                    opponent_id,
-                    policy_mode,
-                    policy_player,
+            wins = 0
+            losses = 0
+            draws = 0
+            weighted_time = 0.0
+            total_games = 0
+            adapter_trigger_sum = 0.0
+            adapter_used_sum = 0.0
+            adapter_action_diff_sum = 0.0
+            adapter_active_decision_sum = 0.0
+            remaining_games = args.num_games
+
+            while remaining_games > 0:
+                chunk_games = min(eval_batch_size, remaining_games)
+                key, pool_key, eval_key = jrandom.split(key, 3)
+                pool = make_adaptive_state_pool(
+                    pool_key,
+                    chunk_games,
+                    (grid_size,),
                     args.pad_to,
-                    network_global_context,
-                    args.scoreboard_history,
-                    args.fog_memory,
-                    args.strategy_q_rerank_scale,
-                    args.strategy_q_replace_threshold,
-                    args.strategy_q_replace_policy_margin,
-                    args.strategy_q_replace_worker_candidate,
-                    args.strategy_target_rerank_scale,
-                    args.strategy_target_finish_gate,
-                    args.strategy_spatial_rerank_scale,
-                    args.strategy_worker_mix_prob,
-                    args.strategy_worker_finish_gate,
-                    args.strategy_worker_policy_margin,
-                    args.strategy_plan_worker_rerank_scale,
-                    args.strategy_plan_worker_min_margin,
-                    PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
-                    args.strategy_plan_worker_gate_threshold,
-                    args.strategy_plan_worker_min_grid_size,
-                    args.strategy_plan_worker_max_grid_size,
-                    args.strategy_command_gate_threshold,
-                    args.strategy_command_gate_source_count,
-                    args.strategy_command_gate_target_count,
-                    command_gate_feature_dim,
-                    args.policy_adapter_scale,
-                    args.policy_adapter_finish_threshold,
-                    args.policy_adapter_gate_threshold,
-                    policy_adapter_mode,
-                    args.policy_adapter_min_grid_size,
-                    args.policy_adapter_max_grid_size,
-                    args.policy_adapter_min_turn,
-                    args.policy_adapter_require_contact,
-                    args.policy_adapter_commit_steps,
-                    args.online_search_top_k,
-                    args.online_search_rollout_steps,
-                    args.online_search_rollouts_per_action,
-                    args.online_search_min_turn,
-                    args.online_search_require_contact,
-                    args.online_search_min_grid_size,
-                    args.online_search_max_grid_size,
-                    args.online_search_army_weight,
-                    args.online_search_land_weight,
-                    args.online_search_prior_weight,
-                    args.online_search_terminal_score,
-                    args.online_search_min_score_gap,
+                    args.map_generator,
+                    (args.mountain_density_min, args.mountain_density_max),
+                    (args.num_cities_min, args.num_cities_max),
+                    args.max_generals_distance,
+                    (args.city_army_min, args.city_army_max),
                 )
-            else:
-                info, adapter_stats = evaluate_policy_opponent_batch(
-                    network,
-                    policy_adapter_network,
-                    policy_adapter_feature_network,
-                    plan_worker_network,
-                    command_gate_network,
-                    opponent_network,
-                    states,
-                    grid_size,
-                    eval_key,
-                    args.max_steps,
-                    policy_mode,
-                    policy_player,
-                    args.pad_to,
-                    opponent_policy_mode,
-                    network_global_context,
-                    args.scoreboard_history,
-                    args.fog_memory,
-                    args.strategy_q_rerank_scale,
-                    args.strategy_q_replace_threshold,
-                    args.strategy_q_replace_policy_margin,
-                    args.strategy_q_replace_worker_candidate,
-                    args.strategy_target_rerank_scale,
-                    args.strategy_target_finish_gate,
-                    args.strategy_spatial_rerank_scale,
-                    args.strategy_worker_mix_prob,
-                    args.strategy_worker_finish_gate,
-                    args.strategy_worker_policy_margin,
-                    args.strategy_plan_worker_rerank_scale,
-                    args.strategy_plan_worker_min_margin,
-                    PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
-                    args.strategy_plan_worker_gate_threshold,
-                    args.strategy_plan_worker_min_grid_size,
-                    args.strategy_plan_worker_max_grid_size,
-                    args.strategy_command_gate_threshold,
-                    args.strategy_command_gate_source_count,
-                    args.strategy_command_gate_target_count,
-                    command_gate_feature_dim,
-                    args.policy_adapter_scale,
-                    args.policy_adapter_finish_threshold,
-                    args.policy_adapter_gate_threshold,
-                    policy_adapter_mode,
-                    args.policy_adapter_min_grid_size,
-                    args.policy_adapter_max_grid_size,
-                    args.policy_adapter_min_turn,
-                    args.policy_adapter_require_contact,
-                    args.policy_adapter_commit_steps,
-                    args.online_search_top_k,
-                    args.online_search_rollout_steps,
-                    args.online_search_rollouts_per_action,
-                    args.online_search_min_turn,
-                    args.online_search_require_contact,
-                    args.online_search_min_grid_size,
-                    args.online_search_max_grid_size,
-                    args.online_search_army_weight,
-                    args.online_search_land_weight,
-                    args.online_search_prior_weight,
-                    args.online_search_terminal_score,
-                    args.online_search_min_score_gap,
-                )
-            jax.block_until_ready(info.winner)
-            row_jax = summarize_row(info, grid_size, policy_player, args.num_games, adapter_stats)
+                states = pool.states
+                if opponent_network is None:
+                    info, adapter_stats = evaluate_batch(
+                        network,
+                        policy_adapter_network,
+                        policy_adapter_feature_network,
+                        plan_worker_network,
+                        command_gate_network,
+                        states,
+                        grid_size,
+                        eval_key,
+                        args.max_steps,
+                        opponent_id,
+                        policy_mode,
+                        policy_player,
+                        args.pad_to,
+                        network_global_context,
+                        args.scoreboard_history,
+                        args.fog_memory,
+                        args.strategy_q_rerank_scale,
+                        args.strategy_q_replace_threshold,
+                        args.strategy_q_replace_policy_margin,
+                        args.strategy_q_replace_worker_candidate,
+                        args.strategy_target_rerank_scale,
+                        args.strategy_target_finish_gate,
+                        args.strategy_spatial_rerank_scale,
+                        args.strategy_worker_mix_prob,
+                        args.strategy_worker_finish_gate,
+                        args.strategy_worker_policy_margin,
+                        args.strategy_plan_worker_rerank_scale,
+                        args.strategy_plan_worker_min_margin,
+                        PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
+                        args.strategy_plan_worker_gate_threshold,
+                        args.strategy_plan_worker_min_grid_size,
+                        args.strategy_plan_worker_max_grid_size,
+                        args.strategy_command_gate_threshold,
+                        args.strategy_command_gate_source_count,
+                        args.strategy_command_gate_target_count,
+                        command_gate_feature_dim,
+                        args.policy_adapter_scale,
+                        args.policy_adapter_finish_threshold,
+                        args.policy_adapter_gate_threshold,
+                        policy_adapter_mode,
+                        args.policy_adapter_min_grid_size,
+                        args.policy_adapter_max_grid_size,
+                        args.policy_adapter_min_turn,
+                        args.policy_adapter_require_contact,
+                        args.policy_adapter_commit_steps,
+                        args.online_search_top_k,
+                        args.online_search_rollout_steps,
+                        args.online_search_rollouts_per_action,
+                        args.online_search_min_turn,
+                        args.online_search_require_contact,
+                        args.online_search_min_grid_size,
+                        args.online_search_max_grid_size,
+                        args.online_search_army_weight,
+                        args.online_search_land_weight,
+                        args.online_search_prior_weight,
+                        args.online_search_terminal_score,
+                        args.online_search_min_score_gap,
+                    )
+                else:
+                    info, adapter_stats = evaluate_policy_opponent_batch(
+                        network,
+                        policy_adapter_network,
+                        policy_adapter_feature_network,
+                        plan_worker_network,
+                        command_gate_network,
+                        opponent_network,
+                        states,
+                        grid_size,
+                        eval_key,
+                        args.max_steps,
+                        policy_mode,
+                        policy_player,
+                        args.pad_to,
+                        opponent_policy_mode,
+                        network_global_context,
+                        args.scoreboard_history,
+                        args.fog_memory,
+                        args.strategy_q_rerank_scale,
+                        args.strategy_q_replace_threshold,
+                        args.strategy_q_replace_policy_margin,
+                        args.strategy_q_replace_worker_candidate,
+                        args.strategy_target_rerank_scale,
+                        args.strategy_target_finish_gate,
+                        args.strategy_spatial_rerank_scale,
+                        args.strategy_worker_mix_prob,
+                        args.strategy_worker_finish_gate,
+                        args.strategy_worker_policy_margin,
+                        args.strategy_plan_worker_rerank_scale,
+                        args.strategy_plan_worker_min_margin,
+                        PLAN_WORKER_COMMAND_SOURCE_TO_ID[args.strategy_plan_worker_command_source],
+                        args.strategy_plan_worker_gate_threshold,
+                        args.strategy_plan_worker_min_grid_size,
+                        args.strategy_plan_worker_max_grid_size,
+                        args.strategy_command_gate_threshold,
+                        args.strategy_command_gate_source_count,
+                        args.strategy_command_gate_target_count,
+                        command_gate_feature_dim,
+                        args.policy_adapter_scale,
+                        args.policy_adapter_finish_threshold,
+                        args.policy_adapter_gate_threshold,
+                        policy_adapter_mode,
+                        args.policy_adapter_min_grid_size,
+                        args.policy_adapter_max_grid_size,
+                        args.policy_adapter_min_turn,
+                        args.policy_adapter_require_contact,
+                        args.policy_adapter_commit_steps,
+                        args.online_search_top_k,
+                        args.online_search_rollout_steps,
+                        args.online_search_rollouts_per_action,
+                        args.online_search_min_turn,
+                        args.online_search_require_contact,
+                        args.online_search_min_grid_size,
+                        args.online_search_max_grid_size,
+                        args.online_search_army_weight,
+                        args.online_search_land_weight,
+                        args.online_search_prior_weight,
+                        args.online_search_terminal_score,
+                        args.online_search_min_score_gap,
+                    )
+                jax.block_until_ready(info.winner)
+                row_jax = summarize_row(info, grid_size, policy_player, chunk_games, adapter_stats)
+                wins += int(row_jax.wins)
+                losses += int(row_jax.losses)
+                draws += int(row_jax.draws)
+                weighted_time += float(row_jax.mean_time) * chunk_games
+                total_games += chunk_games
+                if adapter_stats is not None:
+                    adapter_trigger_sum += float(adapter_stats[0])
+                    adapter_used_sum += float(adapter_stats[1])
+                    adapter_action_diff_sum += float(adapter_stats[2])
+                    adapter_active_decision_sum += float(adapter_stats[3])
+                remaining_games -= chunk_games
+
+            adapter_denominator = max(adapter_active_decision_sum, 1.0)
             row = AdaptiveEvalRow(
                 grid_size=grid_size,
                 policy_player=policy_player,
-                wins=int(row_jax.wins),
-                losses=int(row_jax.losses),
-                draws=int(row_jax.draws),
-                num_games=args.num_games,
-                mean_time=float(row_jax.mean_time),
-                adapter_trigger_rate=float(row_jax.adapter_trigger_rate),
-                adapter_used_rate=float(row_jax.adapter_used_rate),
-                adapter_action_diff_rate=float(row_jax.adapter_action_diff_rate),
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                num_games=total_games,
+                mean_time=weighted_time / total_games,
+                adapter_trigger_rate=adapter_trigger_sum / adapter_denominator,
+                adapter_used_rate=adapter_used_sum / adapter_denominator,
+                adapter_action_diff_rate=adapter_action_diff_sum / adapter_denominator,
             )
             rows.append(row)
             elapsed = time.time() - t0
@@ -2821,6 +2858,7 @@ def main():
         "value_head_sizes": list(args.value_head_sizes) if args.value_heads == "per-size" else [],
         "policy_mode": args.policy_mode,
         "num_games": args.num_games,
+        "eval_batch_size": eval_batch_size,
         "max_steps": args.max_steps,
         "global_context": network_global_context,
         "scoreboard_history": args.scoreboard_history,

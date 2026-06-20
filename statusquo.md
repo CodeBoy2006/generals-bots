@@ -1382,3 +1382,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat rollouts/action `2` as the current high-budget teacher candidate. Collect rpa2 traces/continuations next, then train a planner-aware conditional head or controller; do not resume direct full-replace action CE as the main route.
 - **Context:** Fixed-v5 max500 128-row seed `101060` improved from rpa1 min `50.78%` to rpa2 min `60.16%` (`65.62%` p0, `60.16%` p1). Expander 8/12/16 32-row smoke min was `81.25%`, with 8/12 rows above `90%` and 16x p0 `96.88%`.
+
+## [2026-06-20 22:40] Max500 Default Horizon Cleanup
+- **Changes:** Changed single-size `behavior_clone.py`, `evaluate_policy.py`, and `evaluate_heuristics.py` defaults from `250` to `500`; added `evaluate_adaptive_policy.py --eval-batch-size` to split expensive max500/max750 rows into smaller JAX evaluation batches; updated README and Chinese manual.
+- **Status:** Completed
+- **Next Steps:** Use max500 as the default fixed-v5 diagnostic horizon and pass `--eval-batch-size 64` or similar for expensive online-search promotion checks.
+- **Context:** `py_compile` passed for the touched scripts. A tiny CUDA smoke with `num_games=4`, `eval_batch_size=2`, and `max_steps=5` ran on `cuda:0` and wrote `runs/eval-batch-smoke.json` with `eval_batch_size: 2`; the first smoke attempt only failed because the legacy v4 checkpoint needed `--drop-mismatched-init-leaves`.
