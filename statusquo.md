@@ -1364,3 +1364,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v3/v4/v5/v6. Keep static conversion adapter v1 as the current pure adapter and keep the online-search wrapper as the max500 teacher. Next compression should use a planner-aware conditional head or richer enter/exit controller, not another global replace-policy CE pass.
 - **Context:** Combined adapter-vs-base max500 data had `5283` rows with `521` changed&improve and `385` changed&convert rows. Best sharpened adapter v4 reached fixed-v5 max500 2048-row `1555/4096` wins versus static v1 `1498/4096`, but min only moved `35.99% -> 36.57%` and p1 regressed `37.16% -> 36.57%`. p1-weighted v5 and static-init v6 failed 256-row triage.
+
+## [2026-06-20 22:12] Online Search Score-Gap Gate
+- **Changes:** Added `evaluate_adaptive_policy.py --online-search-min-score-gap`, which falls back to the original policy action when the online-search best-vs-second rollout score gap is below a threshold; documented the fixed-v5 max500 gap-gate result.
+- **Status:** Completed
+- **Next Steps:** Do not use score-gap gating for promotion. Keep default `--online-search-min-score-gap 0.0`; richer gate/controller features are still needed.
+- **Context:** With `v4 + static conversion adapter v1 + online search top_k=4 rollout=16`, fixed-v5 max500 128-row seed `101060` default min was `50.78%`. Gap `0.5` dropped min to `47.66%`; gap `2.0` dropped min to `46.09%`. The gate improved p1 but hurt p0, so simple score-gap confidence is not a reliable enter/exit mechanism.

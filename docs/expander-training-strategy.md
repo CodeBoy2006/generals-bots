@@ -15118,3 +15118,68 @@ Next useful move:
   online search is used during deployment, evaluate --online-search-min-score-gap
   to avoid low-margin search replacements before distilling more labels.
 ```
+
+### 2026-06-20 22:12 - Online Search Score-Gap Gate Negative
+
+Implementation:
+
+```text
+evaluate_adaptive_policy.py:
+  added --online-search-min-score-gap
+
+behavior:
+  online search still scores the top-k prior candidates
+  if best_score - second_best_score < threshold:
+    execute the original policy action instead of the search action
+  default threshold 0.0 preserves previous behavior
+```
+
+Rationale:
+
+```text
+The current best fixed-v5 wrapper uses online search after turn 80/contact.
+The hypothesis was that low-margin search replacements may be noisy, and a
+simple best-vs-second score-gap gate might keep decisive search actions while
+rejecting uncertain replacements.
+```
+
+Fixed-v5 max500, same seed as the default 128-row online-search check:
+
+```text
+base:
+  v4 + static conversion adapter v1
+search:
+  top_k=4
+  rollout_steps=16
+  contact-only
+  min_turn=80
+seed:
+  101060
+
+default min_score_gap=0.0:
+  p0 52.34%
+  p1 50.78%
+  min 50.78%
+
+min_score_gap=0.5:
+  p0 47.66%
+  p1 57.81%
+  min 47.66%
+
+min_score_gap=2.0:
+  p0 46.09%
+  p1 57.81%
+  min 46.09%
+```
+
+Decision:
+
+```text
+Do not use score-gap gating for promotion.  It creates a p0/p1 tradeoff and
+lowers the min row versus the default online-search wrapper.  The useful search
+actions are not reliably separable by a simple best-vs-second rollout score
+gap; some low-margin replacements are apparently important.
+
+Keep --online-search-min-score-gap as a diagnostic/risk-control switch, but
+default 0.0 remains the current best deployment/teacher setting.
+```
