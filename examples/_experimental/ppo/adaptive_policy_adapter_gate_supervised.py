@@ -29,7 +29,16 @@ from evaluate_adaptive_policy import policy_adapter_gate_features
 from generals.agents.ppo_policy_agent import parse_policy_channels
 from train_adaptive import OUTCOME_WIN
 
-DATASET_FORMATS = ("strategy", "plan-q-prefix")
+DATASET_FORMATS = ("strategy", "plan-q-prefix", "online-search")
+ONLINE_POSITIVE_FIELDS = (
+    "search_converts_to_win",
+    "search_converts_draw_to_win",
+    "search_improves_continuation",
+    "adapter_converts_to_win",
+    "adapter_converts_draw_to_win",
+    "adapter_improves_continuation",
+)
+ONLINE_ACTION_FIELDS = ("search_action_index", "teacher_action_index", "adapter_action_index")
 POLICY_ADAPTER_GATE_FEATURE_NAMES = (
     "adapter_delta_at_adapter_top",
     "adapter_delta_at_policy_top",
@@ -370,6 +379,114 @@ def build_prefix_gate_examples(
     }
 
 
+def build_online_search_gate_examples(
+    paths: list[Path],
+    base_network,
+    adapter_network,
+    feature_network,
+    feature_batch_size: int,
+    keep_unchanged_negatives: bool,
+    max_examples: int | None,
+    seed: int,
+    positive_field: str,
+    action_field: str,
+    min_score_delta: float,
+    require_search_used: bool,
+    require_adapter_match: bool,
+) -> dict[str, object]:
+    """Construct gate examples from online-search continuation/conversion shards."""
+    rng = np.random.default_rng(seed)
+    feature_chunks: list[np.ndarray] = []
+    label_chunks: list[np.ndarray] = []
+    weight_chunks: list[np.ndarray] = []
+    stats = {
+        "rows": 0,
+        "changed": 0,
+        "positive": 0,
+        "positive_signal": 0,
+        "adapter_search_match": 0,
+        "search_used": 0,
+        "score_delta_pass": 0,
+    }
+    for path in paths:
+        shard = np.load(path)
+        if positive_field not in shard:
+            raise KeyError(f"{path} does not contain {positive_field}; collect online-search conversion labels first")
+        if action_field not in shard:
+            raise KeyError(f"{path} does not contain {action_field}")
+        obs = shard["obs"].astype(np.float32)
+        legal_mask = shard["legal_mask"].astype(np.bool_)
+        active = shard["active"].astype(np.bool_)
+        seats = shard["seat"].astype(np.float32)
+        positive_actions = shard[action_field].astype(np.int32)
+        positive_signal = shard[positive_field].astype(np.bool_)
+        if min_score_delta > 0.0:
+            if "search_continuation_score_delta" not in shard:
+                raise KeyError(f"{path} does not contain search_continuation_score_delta")
+            score_delta_pass = shard["search_continuation_score_delta"].astype(np.float32) >= min_score_delta
+            positive_signal &= score_delta_pass
+        else:
+            score_delta_pass = np.ones((obs.shape[0],), dtype=np.bool_)
+        if require_search_used and "search_used" in shard:
+            search_used = shard["search_used"].astype(np.bool_)
+            positive_signal &= search_used
+        else:
+            search_used = np.ones((obs.shape[0],), dtype=np.bool_)
+
+        features, policy_indices, adapter_indices = _compute_adapter_features(
+            base_network,
+            adapter_network,
+            feature_network,
+            obs,
+            legal_mask,
+            active,
+            seats,
+            feature_batch_size,
+        )
+        pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
+        changed = (adapter_indices != policy_indices) & (adapter_indices != pass_index)
+        adapter_action_match = adapter_indices == positive_actions
+        match_domain = adapter_action_match if require_adapter_match else np.ones_like(adapter_action_match)
+        labels = (changed & positive_signal & match_domain).astype(np.float32)
+        keep = np.ones_like(changed, dtype=np.bool_) if keep_unchanged_negatives else changed
+        if not np.any(keep):
+            continue
+        kept_features = features[keep].astype(np.float32)
+        kept_labels = labels[keep].astype(np.float32)
+        weights = _balanced_binary_weights(kept_labels)
+        feature_chunks.append(kept_features)
+        label_chunks.append(kept_labels)
+        weight_chunks.append(weights)
+        stats["rows"] += int(obs.shape[0])
+        stats["changed"] += int(np.sum(changed))
+        stats["positive"] += int(np.sum(labels[keep] > 0.5))
+        stats["positive_signal"] += int(np.sum(positive_signal))
+        stats["adapter_search_match"] += int(np.sum(changed & adapter_action_match))
+        stats["search_used"] += int(np.sum(search_used))
+        stats["score_delta_pass"] += int(np.sum(score_delta_pass))
+
+    if not feature_chunks:
+        raise ValueError("No online-search policy-adapter gate examples selected")
+    features = np.concatenate(feature_chunks, axis=0)
+    labels = np.concatenate(label_chunks, axis=0)
+    weights = np.concatenate(weight_chunks, axis=0)
+    if max_examples is not None and features.shape[0] > max_examples:
+        indices = np.sort(rng.choice(features.shape[0], size=max_examples, replace=False))
+        features = features[indices]
+        labels = labels[indices]
+        weights = weights[indices]
+    feature_mean = features.mean(axis=0).astype(np.float32)
+    feature_std = np.maximum(features.std(axis=0).astype(np.float32), 1.0e-6)
+    return {
+        "features": jnp.asarray(features),
+        "labels": jnp.asarray(labels),
+        "weights": jnp.asarray(weights),
+        "feature_mean": jnp.asarray(feature_mean),
+        "feature_std": jnp.asarray(feature_std),
+        "stats": stats,
+    }
+
+
 @eqx.filter_jit
 def train_step(gate, opt_state, batch, optimizer):
     features, labels, weights = batch
@@ -500,6 +617,28 @@ def parse_args():
         help="For --dataset-format plan-q-prefix, positives use only early executed-prefix steps up to this index.",
     )
     parser.add_argument(
+        "--online-positive-field",
+        choices=ONLINE_POSITIVE_FIELDS,
+        default="search_converts_to_win",
+        help="For --dataset-format online-search, shard boolean field that marks positive conversion/improvement rows.",
+    )
+    parser.add_argument(
+        "--min-online-score-delta",
+        type=float,
+        default=0.0,
+        help="For --dataset-format online-search, require this continuation-score improvement for positives.",
+    )
+    parser.add_argument(
+        "--require-online-search-used",
+        action="store_true",
+        help="For --dataset-format online-search, positives require rows where the online search action was used.",
+    )
+    parser.add_argument(
+        "--allow-online-adapter-mismatch",
+        action="store_true",
+        help="For --dataset-format online-search, allow positives even if the adapter top action differs from search action.",
+    )
+    parser.add_argument(
         "--keep-unchanged-negatives",
         action="store_true",
         help="Keep rows where the adapter and base greedy actions match as negative examples.",
@@ -546,6 +685,8 @@ def parse_args():
         parser.error("--max-prefix-plan-time-to-terminal must be positive")
     if args.max_prefix_step is not None and args.max_prefix_step < 0:
         parser.error("--max-prefix-step must be non-negative")
+    if args.min_online_score_delta < 0.0:
+        parser.error("--min-online-score-delta must be non-negative")
     return args
 
 
@@ -656,7 +797,7 @@ def main():
             args.max_examples,
             args.seed,
         )
-    else:
+    elif args.dataset_format == "plan-q-prefix":
         dataset = build_prefix_gate_examples(
             paths,
             base_network,
@@ -672,6 +813,21 @@ def main():
             args.max_prefix_plan_time_to_terminal,
             args.max_prefix_step,
         )
+    else:
+        dataset = build_online_search_gate_examples(
+            paths,
+            base_network,
+            adapter_network,
+            feature_network,
+            args.feature_batch_size,
+            args.keep_unchanged_negatives,
+            args.max_examples,
+            args.seed,
+            args.online_positive_field,
+            args.min_online_score_delta,
+            args.require_online_search_used,
+            not args.allow_online_adapter_mismatch,
+        )
     labels = np.asarray(dataset["labels"])
     stats = dataset["stats"]
     print("Adaptive policy-adapter gate supervised training")
@@ -684,10 +840,14 @@ def main():
     if args.dataset_format == "strategy":
         print(f"Teacher match: {stats['teacher_match']}")
         print(f"Decisive:      {stats['decisive']}")
-    else:
+    elif args.dataset_format == "plan-q-prefix":
         print(f"Prefix rows:   {stats['valid_prefix']} valid / {stats['accepted_prefix']} accepted")
         print(f"Label domain:  {stats['label_domain']}")
         print(f"Prefix match:  {stats['prefix_action_match']}")
+    else:
+        print(f"Positive sig:  {stats['positive_signal']}")
+        print(f"Adapter match: {stats['adapter_search_match']}")
+        print(f"Search used:   {stats['search_used']}")
     print(f"Base:          {args.base_model_path}")
     print(f"Adapter:       {args.adapter_model_path}")
     print(
@@ -710,17 +870,30 @@ def main():
     )
     optimizer = optax.adamw(args.lr, weight_decay=args.weight_decay)
     opt_state = optimizer.init(eqx.filter(gate, eqx.is_inexact_array))
+    epoch_history = []
     for epoch in range(1, args.num_epochs + 1):
         key, epoch_key = jrandom.split(key)
         t0 = time.time()
         gate, opt_state, loss, metrics = train_epoch(gate, opt_state, dataset, optimizer, epoch_key, args.minibatch_size)
+        elapsed = time.time() - t0
+        epoch_history.append(
+            {
+                "epoch": epoch,
+                "loss": float(loss),
+                "accuracy": float(metrics["accuracy"]),
+                "positive_prob": float(metrics["positive_prob"]),
+                "negative_prob": float(metrics["negative_prob"]),
+                "mean_prob": float(metrics["mean_prob"]),
+                "seconds": elapsed,
+            }
+        )
         print(
             f"Epoch {epoch:03d} | Loss {float(loss):.4f} | "
             f"Acc {float(metrics['accuracy']) * 100:5.1f}% | "
             f"P+ {float(metrics['positive_prob']):.3f} | "
             f"P- {float(metrics['negative_prob']):.3f} | "
             f"Pmean {float(metrics['mean_prob']):.3f} | "
-            f"Time {time.time() - t0:.2f}s"
+            f"Time {elapsed:.2f}s"
         )
 
     model_path = Path(args.model_path)
@@ -744,6 +917,10 @@ def main():
         "require_prefix_base_not_win": args.require_prefix_base_not_win,
         "max_prefix_plan_time_to_terminal": args.max_prefix_plan_time_to_terminal,
         "max_prefix_step": args.max_prefix_step,
+        "online_positive_field": args.online_positive_field,
+        "min_online_score_delta": args.min_online_score_delta,
+        "require_online_search_used": args.require_online_search_used,
+        "allow_online_adapter_mismatch": args.allow_online_adapter_mismatch,
         "base_model_path": args.base_model_path,
         "base_outcome_head": base_outcome_head,
         "base_strategy_aux": base_strategy_aux,
@@ -752,6 +929,7 @@ def main():
         "adapter_model_path": args.adapter_model_path,
         "feature_model_path": args.feature_model_path,
         "datasets": [str(path) for path in paths],
+        "epoch_history": epoch_history,
     }
     model_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"\nModel saved to: {model_path}")

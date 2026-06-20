@@ -656,6 +656,7 @@ def collect_online_search_step(
     pool,
     network,
     adapter_network,
+    counterfactual_adapter_network,
     opponent_network,
     key,
     truncation: int,
@@ -674,6 +675,10 @@ def collect_online_search_step(
     adapter_mode: int = 0,
     adapter_min_grid_size: int = 0,
     adapter_max_grid_size: int = 0,
+    counterfactual_adapter_scale: float = 0.0,
+    counterfactual_adapter_mode: int = 0,
+    counterfactual_adapter_min_grid_size: int = 0,
+    counterfactual_adapter_max_grid_size: int = 0,
     search_top_k: int = 4,
     search_rollout_steps: int = 16,
     search_rollouts_per_action: int = 1,
@@ -766,8 +771,9 @@ def collect_online_search_step(
         )
     )(obs_arr, masks, active, effective_sizes)
 
-    key, policy_key, opponent_key, search_key, conversion_key = jrandom.split(key, 5)
+    key, policy_key, counterfactual_key, opponent_key, search_key, conversion_key = jrandom.split(key, 6)
     policy_keys = jrandom.split(policy_key, num_envs)
+    counterfactual_keys = jrandom.split(counterfactual_key, num_envs)
     opponent_keys = jrandom.split(opponent_key, num_envs)
     search_keys = jrandom.split(search_key, num_envs)
     base_actions = jax.vmap(lambda row_logits, row_key: policy_action_from_logits(row_logits, row_key, policy_mode, pad_size))(
@@ -775,6 +781,33 @@ def collect_online_search_step(
         policy_keys,
     )
     base_action_indices = jax.vmap(lambda action: adaptive_action_to_index(action, pad_size))(base_actions)
+    if counterfactual_adapter_network is not None and counterfactual_adapter_scale > 0.0:
+        counterfactual_logits = jax.vmap(
+            lambda obs, mask, active_mask, size: dynamic_adapter_logits(
+                network,
+                counterfactual_adapter_network,
+                obs,
+                mask,
+                active_mask,
+                size,
+                counterfactual_adapter_scale,
+                counterfactual_adapter_mode,
+                counterfactual_adapter_min_grid_size,
+                counterfactual_adapter_max_grid_size,
+            )
+        )(obs_arr, masks, active, effective_sizes)
+        counterfactual_adapter_actions = jax.vmap(
+            lambda row_logits, row_key: policy_action_from_logits(row_logits, row_key, policy_mode, pad_size)
+        )(
+            counterfactual_logits,
+            counterfactual_keys,
+        )
+        counterfactual_adapter_action_indices = jax.vmap(
+            lambda action: adaptive_action_to_index(action, pad_size)
+        )(counterfactual_adapter_actions)
+    else:
+        counterfactual_adapter_actions = base_actions
+        counterfactual_adapter_action_indices = base_action_indices
 
     if opponent_network is not None:
         opponent_actions = jax.vmap(
@@ -902,6 +935,8 @@ def collect_online_search_step(
         base_conversion_keys = jrandom.split(conversion_key, num_envs)
         conversion_key, search_conversion_seed = jrandom.split(conversion_key)
         search_conversion_keys = jrandom.split(search_conversion_seed, num_envs)
+        conversion_key, adapter_conversion_seed = jrandom.split(conversion_key)
+        adapter_conversion_keys = jrandom.split(adapter_conversion_seed, num_envs)
         if opponent_network is not None:
             base_conversion = jax.vmap(
                 lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_policy_opponent(
@@ -963,6 +998,50 @@ def collect_online_search_step(
                     search_terminal_score,
                 )
             )(states, effective_sizes, search_conversion_keys, opponent_actions, current_memory, search_actions)
+            if counterfactual_adapter_network is not None and counterfactual_adapter_scale > 0.0:
+                adapter_conversion = jax.vmap(
+                    lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_policy_opponent(
+                        network,
+                        counterfactual_adapter_network,
+                        opponent_network,
+                        state,
+                        size,
+                        row_key,
+                        first_action,
+                        opponent_first,
+                        learner_player,
+                        policy_mode,
+                        opponent_policy_mode,
+                        opponent_policy_grid_size,
+                        pad_size,
+                        truncation,
+                        conversion_rollout_steps,
+                        global_context,
+                        scoreboard_history_enabled,
+                        fog_memory_enabled,
+                        row_memory,
+                        counterfactual_adapter_scale,
+                        counterfactual_adapter_mode,
+                        counterfactual_adapter_min_grid_size,
+                        counterfactual_adapter_max_grid_size,
+                        search_army_weight,
+                        search_land_weight,
+                        search_terminal_score,
+                    )
+                )(
+                    states,
+                    effective_sizes,
+                    adapter_conversion_keys,
+                    opponent_actions,
+                    current_memory,
+                    counterfactual_adapter_actions,
+                )
+            else:
+                adapter_conversion = (
+                    jnp.zeros((num_envs,), dtype=jnp.float32),
+                    jnp.full((num_envs,), -1, dtype=jnp.int32),
+                    states.time,
+                )
         else:
             base_conversion = jax.vmap(
                 lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_heuristic_opponent(
@@ -1020,15 +1099,61 @@ def collect_online_search_step(
                     search_terminal_score,
                 )
             )(states, effective_sizes, search_conversion_keys, opponent_actions, current_memory, search_actions)
+            if counterfactual_adapter_network is not None and counterfactual_adapter_scale > 0.0:
+                adapter_conversion = jax.vmap(
+                    lambda state, size, row_key, opponent_first, row_memory, first_action: continuation_label_heuristic_opponent(
+                        network,
+                        counterfactual_adapter_network,
+                        opponent_id,
+                        state,
+                        size,
+                        row_key,
+                        first_action,
+                        opponent_first,
+                        learner_player,
+                        policy_mode,
+                        pad_size,
+                        truncation,
+                        conversion_rollout_steps,
+                        global_context,
+                        scoreboard_history_enabled,
+                        fog_memory_enabled,
+                        row_memory,
+                        counterfactual_adapter_scale,
+                        counterfactual_adapter_mode,
+                        counterfactual_adapter_min_grid_size,
+                        counterfactual_adapter_max_grid_size,
+                        search_army_weight,
+                        search_land_weight,
+                        search_terminal_score,
+                    )
+                )(
+                    states,
+                    effective_sizes,
+                    adapter_conversion_keys,
+                    opponent_actions,
+                    current_memory,
+                    counterfactual_adapter_actions,
+                )
+            else:
+                adapter_conversion = (
+                    jnp.zeros((num_envs,), dtype=jnp.float32),
+                    jnp.full((num_envs,), -1, dtype=jnp.int32),
+                    states.time,
+                )
         base_conversion_scores, base_conversion_outcomes, base_conversion_times = base_conversion
         search_conversion_scores, search_conversion_outcomes, search_conversion_times = search_conversion
+        adapter_conversion_scores, adapter_conversion_outcomes, adapter_conversion_times = adapter_conversion
     else:
         base_conversion_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
         search_conversion_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
+        adapter_conversion_scores = jnp.zeros((num_envs,), dtype=jnp.float32)
         base_conversion_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
         search_conversion_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
+        adapter_conversion_outcomes = jnp.full((num_envs,), -1, dtype=jnp.int32)
         base_conversion_times = states.time
         search_conversion_times = states.time
+        adapter_conversion_times = states.time
 
     labels = jax.vmap(lambda state, obs, size: full_state_strategy_labels(state, obs, learner_player, size, pad_size))(
         states,
@@ -1069,6 +1194,7 @@ def collect_online_search_step(
             logits,
             base_action_indices,
             executed_action_indices,
+            counterfactual_adapter_action_indices,
             effective_sizes,
             jnp.full((num_envs,), learner_player, dtype=jnp.int32),
             states.time,
@@ -1088,6 +1214,9 @@ def collect_online_search_step(
             search_conversion_scores,
             search_conversion_outcomes,
             search_conversion_times,
+            adapter_conversion_scores,
+            adapter_conversion_outcomes,
+            adapter_conversion_times,
             labels,
             dones,
             saved_winner,
@@ -1103,6 +1232,7 @@ def collect_rollout(
     pool,
     network,
     adapter_network,
+    counterfactual_adapter_network,
     opponent_network,
     key,
     num_steps: int,
@@ -1122,6 +1252,10 @@ def collect_rollout(
     adapter_mode: int = 0,
     adapter_min_grid_size: int = 0,
     adapter_max_grid_size: int = 0,
+    counterfactual_adapter_scale: float = 0.0,
+    counterfactual_adapter_mode: int = 0,
+    counterfactual_adapter_min_grid_size: int = 0,
+    counterfactual_adapter_max_grid_size: int = 0,
     search_top_k: int = 4,
     search_rollout_steps: int = 16,
     search_rollouts_per_action: int = 1,
@@ -1144,6 +1278,7 @@ def collect_rollout(
             pool,
             network,
             adapter_network,
+            counterfactual_adapter_network,
             opponent_network,
             key,
             truncation,
@@ -1162,6 +1297,10 @@ def collect_rollout(
             adapter_mode,
             adapter_min_grid_size,
             adapter_max_grid_size,
+            counterfactual_adapter_scale,
+            counterfactual_adapter_mode,
+            counterfactual_adapter_min_grid_size,
+            counterfactual_adapter_max_grid_size,
             search_top_k,
             search_rollout_steps,
             search_rollouts_per_action,
@@ -1193,6 +1332,7 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         logits,
         base_action_indices,
         executed_action_indices,
+        adapter_action_indices,
         effective_sizes,
         seats,
         times,
@@ -1212,6 +1352,9 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         search_conversion_scores,
         search_conversion_outcomes,
         search_conversion_times,
+        adapter_conversion_scores,
+        adapter_conversion_outcomes,
+        adapter_conversion_times,
         labels,
         dones,
         winners,
@@ -1251,6 +1394,8 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         "teacher_action_index": flat(executed_action_indices).astype(np.int32),
         "base_action_index": flat(base_action_indices).astype(np.int32),
         "search_action_index": flat(executed_action_indices).astype(np.int32),
+        "adapter_action_index": flat(adapter_action_indices).astype(np.int32),
+        "adapter_action_changed": flat(adapter_action_indices != base_action_indices).astype(np.bool_),
         "grid_size": flat(effective_sizes).astype(np.int16),
         "seat": flat(seats).astype(np.int8),
         "time": flat(times).astype(np.int16),
@@ -1271,6 +1416,10 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
         "search_continuation_outcome": flat(search_conversion_outcomes).astype(np.int8),
         "search_continuation_time": flat(search_conversion_times).astype(np.int16),
         "search_continuation_score_delta": clipped_float16(search_conversion_scores - base_conversion_scores),
+        "adapter_continuation_score": clipped_float16(adapter_conversion_scores),
+        "adapter_continuation_outcome": flat(adapter_conversion_outcomes).astype(np.int8),
+        "adapter_continuation_time": flat(adapter_conversion_times).astype(np.int16),
+        "adapter_continuation_score_delta": clipped_float16(adapter_conversion_scores - base_conversion_scores),
         "done": flat(dones).astype(np.bool_),
         "winner": flat(winners).astype(np.int8),
         "contact": flat(contact).astype(np.float16),
@@ -1295,6 +1444,17 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
     ).astype(np.bool_)
     arrays["search_converts_draw_to_win"] = (
         valid_conversion & (search_outcomes == OUTCOME_WIN) & (base_outcomes == OUTCOME_DRAW)
+    ).astype(np.bool_)
+    adapter_outcomes = arrays["adapter_continuation_outcome"].astype(np.int16)
+    valid_adapter_conversion = (base_outcomes >= OUTCOME_LOSS) & (adapter_outcomes >= OUTCOME_LOSS)
+    arrays["adapter_improves_continuation"] = (
+        valid_adapter_conversion & (adapter_outcomes > base_outcomes)
+    ).astype(np.bool_)
+    arrays["adapter_converts_to_win"] = (
+        valid_adapter_conversion & (adapter_outcomes == OUTCOME_WIN) & (base_outcomes != OUTCOME_WIN)
+    ).astype(np.bool_)
+    arrays["adapter_converts_draw_to_win"] = (
+        valid_adapter_conversion & (adapter_outcomes == OUTCOME_WIN) & (base_outcomes == OUTCOME_DRAW)
     ).astype(np.bool_)
     return arrays
 
@@ -1371,6 +1531,11 @@ def parse_args():
     parser.add_argument("--policy-adapter-mode", choices=tuple(POLICY_ADAPTER_MODE_TO_ID), default="delta")
     parser.add_argument("--policy-adapter-min-grid-size", type=int, default=0)
     parser.add_argument("--policy-adapter-max-grid-size", type=int, default=0)
+    parser.add_argument("--counterfactual-policy-adapter-path", default=None)
+    parser.add_argument("--counterfactual-policy-adapter-scale", type=float, default=0.0)
+    parser.add_argument("--counterfactual-policy-adapter-mode", choices=tuple(POLICY_ADAPTER_MODE_TO_ID), default="replace")
+    parser.add_argument("--counterfactual-policy-adapter-min-grid-size", type=int, default=0)
+    parser.add_argument("--counterfactual-policy-adapter-max-grid-size", type=int, default=0)
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--opponent", choices=OPPONENT_NAMES, default="expander")
     parser.add_argument("--opponent-policy-path", default=None)
@@ -1457,6 +1622,18 @@ def parse_args():
         and args.policy_adapter_min_grid_size > args.policy_adapter_max_grid_size
     ):
         parser.error("--policy-adapter-min-grid-size must be <= --policy-adapter-max-grid-size")
+    if args.counterfactual_policy_adapter_scale < 0.0:
+        parser.error("--counterfactual-policy-adapter-scale must be non-negative")
+    if args.counterfactual_policy_adapter_path is None and args.counterfactual_policy_adapter_scale > 0.0:
+        parser.error("--counterfactual-policy-adapter-scale requires --counterfactual-policy-adapter-path")
+    if args.counterfactual_policy_adapter_min_grid_size < 0 or args.counterfactual_policy_adapter_max_grid_size < 0:
+        parser.error("--counterfactual-policy-adapter-min/max-grid-size must be non-negative")
+    if (
+        args.counterfactual_policy_adapter_min_grid_size > 0
+        and args.counterfactual_policy_adapter_max_grid_size > 0
+        and args.counterfactual_policy_adapter_min_grid_size > args.counterfactual_policy_adapter_max_grid_size
+    ):
+        parser.error("--counterfactual-policy-adapter-min-grid-size must be <= max-grid-size")
     if args.opponent_policy_path is not None and len(args.grid_sizes) != 1:
         parser.error("--opponent-policy-path requires exactly one --grid-sizes value")
     if args.search_top_k <= 0 or args.search_rollout_steps <= 0 or args.search_rollouts_per_action <= 0:
@@ -1531,10 +1708,11 @@ def load_adaptive_model(args, key):
 def main():
     args = parse_args()
     key = jrandom.PRNGKey(args.seed)
-    key, pool_key, model_key, adapter_key, opponent_key = jrandom.split(key, 5)
+    key, pool_key, model_key, adapter_key, counterfactual_adapter_key, opponent_key = jrandom.split(key, 6)
     policy_mode = POLICY_MODE_TO_ID[args.policy_mode]
     opponent_policy_mode = POLICY_MODE_TO_ID[args.opponent_policy_mode]
     adapter_mode = POLICY_ADAPTER_MODE_TO_ID[args.policy_adapter_mode]
+    counterfactual_adapter_mode = POLICY_ADAPTER_MODE_TO_ID[args.counterfactual_policy_adapter_mode]
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     network_global_context = args.global_context or args.scoreboard_history
 
@@ -1556,6 +1734,12 @@ def main():
             f"base/search first-action continuation for {args.conversion_rollout_steps} steps "
             f"up to truncation={args.truncation}"
         )
+    if args.counterfactual_policy_adapter_path is not None:
+        print(
+            "Counterfactual adapter: "
+            f"{args.counterfactual_policy_adapter_path} mode={args.counterfactual_policy_adapter_mode} "
+            f"scale={args.counterfactual_policy_adapter_scale:g}"
+        )
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} deployment steps before saving")
     print(f"Output:        {args.output_dir}")
@@ -1566,6 +1750,12 @@ def main():
         adapter_network = load_adaptive_model(
             argparse.Namespace(**{**vars(args), "model_path": args.policy_adapter_path}),
             adapter_key,
+        )
+    counterfactual_adapter_network = None
+    if args.counterfactual_policy_adapter_path is not None:
+        counterfactual_adapter_network = load_adaptive_model(
+            argparse.Namespace(**{**vars(args), "model_path": args.counterfactual_policy_adapter_path}),
+            counterfactual_adapter_key,
         )
     opponent_network = None
     if args.opponent_policy_path is not None:
@@ -1618,6 +1808,7 @@ def main():
                 pool,
                 network,
                 adapter_network,
+                counterfactual_adapter_network,
                 opponent_network,
                 p0_key,
                 args.warmup_steps,
@@ -1637,6 +1828,10 @@ def main():
                 adapter_mode,
                 args.policy_adapter_min_grid_size,
                 args.policy_adapter_max_grid_size,
+                args.counterfactual_policy_adapter_scale,
+                counterfactual_adapter_mode,
+                args.counterfactual_policy_adapter_min_grid_size,
+                args.counterfactual_policy_adapter_max_grid_size,
                 args.search_top_k,
                 args.search_rollout_steps,
                 args.search_rollouts_per_action,
@@ -1655,6 +1850,7 @@ def main():
                 pool,
                 network,
                 adapter_network,
+                counterfactual_adapter_network,
                 opponent_network,
                 p1_key,
                 args.warmup_steps,
@@ -1674,6 +1870,10 @@ def main():
                 adapter_mode,
                 args.policy_adapter_min_grid_size,
                 args.policy_adapter_max_grid_size,
+                args.counterfactual_policy_adapter_scale,
+                counterfactual_adapter_mode,
+                args.counterfactual_policy_adapter_min_grid_size,
+                args.counterfactual_policy_adapter_max_grid_size,
                 args.search_top_k,
                 args.search_rollout_steps,
                 args.search_rollouts_per_action,
@@ -1694,6 +1894,7 @@ def main():
                 pool,
                 network,
                 adapter_network,
+                counterfactual_adapter_network,
                 opponent_network,
                 warmup_key,
                 args.warmup_steps,
@@ -1713,6 +1914,10 @@ def main():
                 adapter_mode,
                 args.policy_adapter_min_grid_size,
                 args.policy_adapter_max_grid_size,
+                args.counterfactual_policy_adapter_scale,
+                counterfactual_adapter_mode,
+                args.counterfactual_policy_adapter_min_grid_size,
+                args.counterfactual_policy_adapter_max_grid_size,
                 args.search_top_k,
                 args.search_rollout_steps,
                 args.search_rollouts_per_action,
@@ -1739,6 +1944,7 @@ def main():
                 pool,
                 network,
                 adapter_network,
+                counterfactual_adapter_network,
                 opponent_network,
                 p0_key,
                 args.num_steps,
@@ -1758,6 +1964,10 @@ def main():
                 adapter_mode,
                 args.policy_adapter_min_grid_size,
                 args.policy_adapter_max_grid_size,
+                args.counterfactual_policy_adapter_scale,
+                counterfactual_adapter_mode,
+                args.counterfactual_policy_adapter_min_grid_size,
+                args.counterfactual_policy_adapter_max_grid_size,
                 args.search_top_k,
                 args.search_rollout_steps,
                 args.search_rollouts_per_action,
@@ -1777,6 +1987,7 @@ def main():
                 pool,
                 network,
                 adapter_network,
+                counterfactual_adapter_network,
                 opponent_network,
                 p1_key,
                 args.num_steps,
@@ -1796,6 +2007,10 @@ def main():
                 adapter_mode,
                 args.policy_adapter_min_grid_size,
                 args.policy_adapter_max_grid_size,
+                args.counterfactual_policy_adapter_scale,
+                counterfactual_adapter_mode,
+                args.counterfactual_policy_adapter_min_grid_size,
+                args.counterfactual_policy_adapter_max_grid_size,
                 args.search_top_k,
                 args.search_rollout_steps,
                 args.search_rollouts_per_action,
@@ -1818,6 +2033,7 @@ def main():
                 pool,
                 network,
                 adapter_network,
+                counterfactual_adapter_network,
                 opponent_network,
                 rollout_key,
                 args.num_steps,
@@ -1837,6 +2053,10 @@ def main():
                 adapter_mode,
                 args.policy_adapter_min_grid_size,
                 args.policy_adapter_max_grid_size,
+                args.counterfactual_policy_adapter_scale,
+                counterfactual_adapter_mode,
+                args.counterfactual_policy_adapter_min_grid_size,
+                args.counterfactual_policy_adapter_max_grid_size,
                 args.search_top_k,
                 args.search_rollout_steps,
                 args.search_rollouts_per_action,
@@ -1870,6 +2090,9 @@ def main():
             "source": "adaptive_online_search_trace_dataset.py",
             "model_path": args.model_path,
             "policy_adapter_path": args.policy_adapter_path,
+            "counterfactual_policy_adapter_path": args.counterfactual_policy_adapter_path,
+            "counterfactual_policy_adapter_scale": args.counterfactual_policy_adapter_scale,
+            "counterfactual_policy_adapter_mode": args.counterfactual_policy_adapter_mode,
             "opponent": args.opponent,
             "opponent_policy_path": args.opponent_policy_path,
             "grid_sizes": list(args.grid_sizes),
@@ -1897,10 +2120,13 @@ def main():
         mean_gap = float(np.mean(arrays["search_score_gap"].astype(np.float32))) if saved_count else 0.0
         improves = float(np.mean(arrays["search_improves_continuation"])) if saved_count else 0.0
         converts = float(np.mean(arrays["search_converts_to_win"])) if saved_count else 0.0
+        adapter_improves = float(np.mean(arrays["adapter_improves_continuation"])) if saved_count else 0.0
+        adapter_converts = float(np.mean(arrays["adapter_converts_to_win"])) if saved_count else 0.0
         print(
             f"Shard {shard_index:04d} | samples={saved_count}/{original_count} | "
             f"search_used={used:.3f} changed={changed:.3f} mean_gap={mean_gap:.3f} | "
             f"improves={improves:.3f} converts={converts:.3f} | "
+            f"adapter_improves={adapter_improves:.3f} adapter_converts={adapter_converts:.3f} | "
             f"path={shard_path} | time={time.time() - t0:.2f}s"
         )
     print(f"Done. saved_samples={total_saved}")

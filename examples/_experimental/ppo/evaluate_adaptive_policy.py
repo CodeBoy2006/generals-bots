@@ -1960,6 +1960,30 @@ def parse_args():
         default=None,
         help="Optional strategy-aux model used only for policy-adapter gate/finish features.",
     )
+    parser.add_argument(
+        "--policy-adapter-feature-outcome-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Outcome-head schema for --policy-adapter-feature-model-path. Defaults to --outcome-head.",
+    )
+    parser.add_argument(
+        "--policy-adapter-feature-strategy-aux",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Strategy-aux schema for --policy-adapter-feature-model-path. Defaults to --strategy-aux.",
+    )
+    parser.add_argument(
+        "--policy-adapter-feature-strategy-spatial-aux",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Spatial strategy-aux schema for --policy-adapter-feature-model-path. Defaults to --strategy-spatial-aux.",
+    )
+    parser.add_argument(
+        "--policy-adapter-feature-strategy-finish-outputs",
+        type=int,
+        default=None,
+        help="Finish-output count for --policy-adapter-feature-model-path. Defaults to --strategy-finish-outputs.",
+    )
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
     parser.add_argument("--policy-adapter-mode", choices=POLICY_ADAPTER_MODE_NAMES, default="delta")
     parser.add_argument("--policy-adapter-finish-threshold", type=float, default=-1.0)
@@ -2182,6 +2206,21 @@ def parse_args():
         parser.error("--policy-adapter-path requires --policy-adapter-scale > 0")
     if args.policy_adapter_feature_model_path is not None and args.policy_adapter_path is None:
         parser.error("--policy-adapter-feature-model-path requires --policy-adapter-path")
+    policy_adapter_feature_strategy_aux = (
+        args.strategy_aux if args.policy_adapter_feature_strategy_aux is None else args.policy_adapter_feature_strategy_aux
+    )
+    policy_adapter_feature_strategy_spatial_aux = (
+        args.strategy_spatial_aux
+        if args.policy_adapter_feature_strategy_spatial_aux is None
+        else args.policy_adapter_feature_strategy_spatial_aux
+    )
+    if (
+        args.policy_adapter_feature_strategy_finish_outputs is not None
+        and args.policy_adapter_feature_strategy_finish_outputs <= 0
+    ):
+        parser.error("--policy-adapter-feature-strategy-finish-outputs must be positive")
+    if policy_adapter_feature_strategy_spatial_aux and not policy_adapter_feature_strategy_aux:
+        parser.error("--policy-adapter-feature-strategy-spatial-aux requires feature strategy aux")
     if args.policy_adapter_finish_threshold < 0.0 and args.policy_adapter_finish_threshold != -1.0:
         parser.error("--policy-adapter-finish-threshold must be between 0 and 1, or -1 to disable")
     if args.policy_adapter_finish_threshold > 1.0:
@@ -2198,8 +2237,12 @@ def parse_args():
         parser.error("--policy-adapter-gate-threshold requires --policy-adapter-gate-path")
     if args.policy_adapter_gate_threshold >= 0.0 and args.policy_adapter_scale <= 0.0:
         parser.error("--policy-adapter-gate-threshold requires --policy-adapter-scale > 0")
-    if args.policy_adapter_gate_threshold >= 0.0 and not args.strategy_aux:
-        parser.error("--policy-adapter-gate-threshold requires --strategy-aux")
+    if (
+        args.policy_adapter_gate_threshold >= 0.0
+        and not args.strategy_aux
+        and not (args.policy_adapter_feature_model_path is not None and policy_adapter_feature_strategy_aux)
+    ):
+        parser.error("--policy-adapter-gate-threshold requires --strategy-aux or a strategy-aux feature model")
     if args.policy_adapter_gate_threshold >= 0.0 and args.policy_adapter_finish_threshold >= 0.0:
         parser.error("Use either --policy-adapter-gate-threshold or --policy-adapter-finish-threshold")
     if args.policy_adapter_gate_threshold >= 0.0 and (
@@ -2310,6 +2353,26 @@ def main():
     )
     policy_adapter_network = None
     policy_adapter_feature_network = None
+    policy_adapter_feature_outcome_head = (
+        args.outcome_head
+        if args.policy_adapter_feature_outcome_head is None
+        else args.policy_adapter_feature_outcome_head
+    )
+    policy_adapter_feature_strategy_aux = (
+        args.strategy_aux
+        if args.policy_adapter_feature_strategy_aux is None
+        else args.policy_adapter_feature_strategy_aux
+    )
+    policy_adapter_feature_strategy_spatial_aux = (
+        args.strategy_spatial_aux
+        if args.policy_adapter_feature_strategy_spatial_aux is None
+        else args.policy_adapter_feature_strategy_spatial_aux
+    )
+    policy_adapter_feature_strategy_finish_outputs = (
+        args.strategy_finish_outputs
+        if args.policy_adapter_feature_strategy_finish_outputs is None
+        else args.policy_adapter_feature_strategy_finish_outputs
+    )
     if args.policy_adapter_path is not None:
         policy_adapter_network = load_or_create_adaptive_network(
             net_key,
@@ -2351,11 +2414,11 @@ def main():
                 value_min=args.value_min,
                 value_max=args.value_max,
                 value_sigma=args.value_sigma,
-                outcome_head=args.outcome_head,
-                strategy_aux=args.strategy_aux,
-                strategy_spatial_aux=args.strategy_spatial_aux,
-                strategy_finish_outputs=args.strategy_finish_outputs,
-                init_strategy_finish_outputs=args.strategy_finish_outputs,
+                outcome_head=policy_adapter_feature_outcome_head,
+                strategy_aux=policy_adapter_feature_strategy_aux,
+                strategy_spatial_aux=policy_adapter_feature_strategy_spatial_aux,
+                strategy_finish_outputs=policy_adapter_feature_strategy_finish_outputs,
+                init_strategy_finish_outputs=policy_adapter_feature_strategy_finish_outputs,
                 global_context=network_global_context,
                 init_global_context=network_global_context,
                 context_residual=args.context_residual,
@@ -2517,6 +2580,13 @@ def main():
         print(f"Policy adapter: mode={args.policy_adapter_mode}, scale={args.policy_adapter_scale:g}{gate_label}")
         if args.policy_adapter_feature_model_path is not None:
             print(f"Policy adapter features: {args.policy_adapter_feature_model_path}")
+            print(
+                "Policy adapter features: "
+                f"outcome={policy_adapter_feature_outcome_head}, "
+                f"strategy_aux={policy_adapter_feature_strategy_aux}, "
+                f"spatial={policy_adapter_feature_strategy_spatial_aux}, "
+                f"finish_outputs={policy_adapter_feature_strategy_finish_outputs}"
+            )
         if args.policy_adapter_gate_threshold >= 0.0:
             print(f"Policy adapter gate: {args.policy_adapter_gate_path}")
             print(f"Policy adapter gate: feature_dim={command_gate_feature_dim}")
@@ -2757,6 +2827,10 @@ def main():
         "strategy_command_gate_target_count": args.strategy_command_gate_target_count,
         "policy_adapter_path": args.policy_adapter_path,
         "policy_adapter_feature_model_path": args.policy_adapter_feature_model_path,
+        "policy_adapter_feature_outcome_head": policy_adapter_feature_outcome_head,
+        "policy_adapter_feature_strategy_aux": policy_adapter_feature_strategy_aux,
+        "policy_adapter_feature_strategy_spatial_aux": policy_adapter_feature_strategy_spatial_aux,
+        "policy_adapter_feature_strategy_finish_outputs": policy_adapter_feature_strategy_finish_outputs,
         "policy_adapter_scale": args.policy_adapter_scale,
         "policy_adapter_mode": args.policy_adapter_mode,
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,

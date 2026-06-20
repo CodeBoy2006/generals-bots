@@ -1322,3 +1322,15 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v2. Keep v1 as the current static adapter candidate. Next route should be a learned gate/mixture or preservation-heavy objective that only uses v1-policy conversion labels in high-confidence states.
 - **Context:** v1-policy data still had `805` rows with `59` legal search-converts-to-win rows, so online search continues to find improvements on top of v1. Naive continuation from v1 did not help: fixed-v5 max500 256-row same seed dropped from v1 `38.67%` min to v2 `36.33%` min. This points to over-broad static replacement, not lack of conversion labels.
+
+## [2026-06-20 21:10] Max500 Online-Search Adapter Gate
+- **Changes:** Added `online-search` support to `adaptive_policy_adapter_gate_supervised.py`, including conversion/improvement positive fields and adapter-vs-search-action matching. Added independent policy-adapter feature-model schema flags in `evaluate_adaptive_policy.py` so a pure v4 base/adapter can use a strategy-aux feature model for learned gate features. Preserved counterfactual adapter continuation fields in `adaptive_online_search_trace_dataset.py`.
+- **Status:** Completed
+- **Next Steps:** Do not promote the learned gate yet. Keep `runs/adaptive-online-search-conversion-adapter-v1/generals-adaptive-online-search-conversion-adapter-v1.eqx` as the current max500 static adapter. The next data step should increase adapter-matching conversion positives or train a calibrated gate from direct adapter-vs-base continuation labels.
+- **Context:** Conversion-only gate v0 had only `6/1162` strict positives and triggered `100%` even at thresholds `0.8` and `0.95`, making it equivalent to static v1. Broader `search_improves_continuation` gate had `9/1132` positives and triggered about `68%`, but fixed-v5 max500 128-row same seed min was `38.28%`, below static v1's `40.62%`. The max500 switch remains correct; learned gating is not yet the mechanism to improve on v1.
+
+## [2026-06-20 21:11] Max500 Gate Documentation
+- **Changes:** Updated `README.md`, `docs/zh-manual.md`, and `docs/expander-training-strategy.md` with the new online-search gate dataset format, independent feature-model schema flags, and the negative max500 learned-gate result.
+- **Status:** Completed
+- **Next Steps:** Future gate work should use direct adapter continuation labels (`adapter_improves_continuation` / `adapter_converts_to_win`) or a larger adapter-matching conversion set before running another 512-row gate.
+- **Context:** Documentation now reflects that fixed-v5 diagnostics stay on `max500`, static conversion adapter v1 remains current best, and learned gate v0/improve-v0 are diagnostic artifacts under ignored `runs/`.

@@ -14685,3 +14685,115 @@ Do not continue small CE/KL sweeps on full-replace policy-head adapters.
 The next step should be a gate/mixture or a higher-quality conversion-positive
 collector, because full replace has started trading away useful v1 behavior.
 ```
+
+### 2026-06-20: Max500 Online-Search Learned Gate
+
+Code changes:
+
+```text
+adaptive_policy_adapter_gate_supervised.py:
+  added --dataset-format online-search
+  added --online-positive-field:
+    search_converts_to_win
+    search_converts_draw_to_win
+    search_improves_continuation
+  positive labels require adapter top action == search action by default
+
+evaluate_adaptive_policy.py:
+  added independent policy-adapter feature-model schema flags:
+    --policy-adapter-feature-outcome-head
+    --policy-adapter-feature-strategy-aux
+    --policy-adapter-feature-strategy-spatial-aux
+    --policy-adapter-feature-strategy-finish-outputs
+```
+
+This fixed an important evaluator issue: a pure v4 base and pure policy adapter
+should not be instantiated with global `--strategy-aux` just because the learned
+gate needs strategy features. The feature model can now be strategy-aux while
+the deployment base and adapter keep their original schema.
+
+Conversion-only gate:
+
+```text
+model:
+  runs/adaptive-policy-adapter-gate-online-max500-v0/
+    generals-adaptive-policy-adapter-gate-online-max500-v0.eqx
+
+data:
+  old max500 conversion v0/v1 + v1-policy conversion v0
+
+label:
+  search_converts_to_win
+  adapter top action must match search action
+
+stats:
+  examples: 1162 changed rows
+  strict positives: 6
+  positive signal rows before adapter-match filter: 149
+  adapter/search matches among changed rows: 89
+```
+
+Evaluation against fixed-v5 max500, 128 games/seat, seed101040:
+
+```text
+static v1 adapter:
+  p0 47.66%
+  p1 40.62%
+  min 40.62%
+
+conversion gate threshold 0.50:
+  trigger 100%
+  min 40.62%
+
+conversion gate threshold 0.80:
+  trigger 100%
+  min 40.62%
+
+conversion gate threshold 0.95:
+  trigger 100%
+  min 40.62%
+```
+
+The conversion-only gate learned an always-on classifier. It is not a promotion
+candidate.
+
+Broader improvement gate:
+
+```text
+model:
+  runs/adaptive-policy-adapter-gate-online-max500-improve-v0/
+    generals-adaptive-policy-adapter-gate-online-max500-improve-v0.eqx
+
+label:
+  search_improves_continuation
+  adapter top action must match search action
+
+stats:
+  examples: 1132 changed rows
+  strict positives: 9
+  positive signal rows before adapter-match filter: 199
+```
+
+Fixed-v5 max500, 128 games/seat, seed101040:
+
+```text
+threshold 0.80:
+  p0 38.28%
+  p1 38.28%
+  min 38.28%
+  trigger about 68%
+```
+
+Decision:
+
+```text
+Do not promote learned gate.
+Keep static conversion adapter v1 as the current max500 adapter:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+The next gate attempt needs either:
+  1. many more adapter-matching conversion positives, or
+  2. direct adapter-vs-base continuation labels, using adapter_converts_to_win /
+     adapter_improves_continuation rather than search labels.
+```
