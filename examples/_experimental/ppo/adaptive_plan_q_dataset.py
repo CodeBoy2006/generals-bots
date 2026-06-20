@@ -1447,6 +1447,11 @@ def parse_args():
     parser.add_argument("--init-strategy-spatial-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-finish-outputs", type=int, default=2)
     parser.add_argument("--init-strategy-finish-outputs", type=int, default=None)
+    parser.add_argument(
+        "--drop-mismatched-init-leaves",
+        action="store_true",
+        help="Load matching checkpoint leaves and reinitialize shape-mismatched legacy leaves.",
+    )
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--source-count", type=int, default=4)
     parser.add_argument("--target-count", type=int, default=4)
@@ -1662,6 +1667,7 @@ def main():
         init_global_context=network_global_context,
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
+        drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
     )
     input_channels = adaptive_network_input_channels(network)
 

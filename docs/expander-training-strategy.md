@@ -12357,3 +12357,253 @@ midgame decisive policy, but do not spend more time on policy-adapter scale
 sweeps. The next fixed-v5 push still needs decisive trajectory / finishability
 supervision rather than more inference-time logit mixing.
 ```
+
+## 2026-06-20 15:06 - Legacy Plan-Q Prefix Adapter Probe
+
+Implementation changes:
+
+```text
+adaptive_strategy_supervised.py:
+  added --drop-mismatched-init-leaves
+
+train_adaptive.py:
+  added --drop-mismatched-init-leaves
+  added --teacher-drop-mismatched-init-leaves
+
+adaptive_plan_q_dataset.py:
+  added --drop-mismatched-init-leaves
+```
+
+These flags let the current training/data tools use legacy fixed-v5 imitation
+checkpoints directly, not only the evaluator.
+
+Negative probes:
+
+```text
+legacy search-win policy-head CE:
+  init:
+    adaptive-fixed-v5-imitation-v5 iter30
+  data:
+    adaptive-fixed-v5-searchwin-a1-v1
+    adaptive-midgame-terminal-searchwin-fixed-v5-safev3-v0
+  samples:
+    3214 after size-seat balancing
+  update:
+    policy heads only
+    KL 1.0
+    action CE 0.25
+  result:
+    fixed-v5 max250 512-row seed 96040:
+      trained adapter min 13.48%
+      same-seed legacy adapter min 14.84%
+  conclusion:
+    action CE on search-best labels still degrades the legacy expert
+
+legacy fixed-v5 PPO:
+  init:
+    adaptive-fixed-v5-imitation-v5 iter30
+  config:
+    128 envs
+    mixed seats
+    256 rollout
+    top-advantage 0.25 stratified
+    sparse terminal reward
+    40 iterations
+    EMA saved
+  training signal:
+    rollout learner wins were effectively zero
+  result:
+    fixed-v5 max250 512-row seed 96120:
+      min 0.00%
+  conclusion:
+    sparse fixed-v5 PPO from this expert collapses into fast losses
+
+legacy fixed-v5 PPO with teacher KL:
+  config:
+    teacher KL 0.05 to legacy iter30
+    lr 5e-7
+    30 iterations
+  result:
+    fixed-v5 max250 512-row seed 96260:
+      min 0.00%
+  conclusion:
+    KL did not solve the sparse-positive PPO failure mode
+```
+
+Old checkpoint selection:
+
+```text
+fixed-v5 imitation v3/v4/v5, same seed 96160:
+  v3 adapter:
+    p0 16.02%
+    p1 14.06%
+    min 14.06%
+
+  v4 adapter:
+    p0 16.02%
+    p1 13.48%
+    min 13.48%
+
+  v5 iter30 adapter:
+    p0 14.84%
+    p1 14.06%
+    min 14.06%
+
+conclusion:
+  no older fixed-v5 imitation checkpoint clearly beats v5 iter30
+```
+
+Positive probe: legacy Plan-Q executed-prefix data.
+
+Collection:
+
+```text
+run:
+  runs/adaptive-plan-q-legacy-mainstack-fixedv5-v0/
+
+base:
+  adaptive-fixed-v5-imitation-v5 iter30
+
+opponent:
+  fixed 8x8 v5 sample
+
+candidate source:
+  main-stack
+
+candidate target:
+  heuristic
+
+plan rollout:
+  4x4 plans
+  24 rollout steps
+  1 rollout per plan
+  8 target-conditioned worker steps
+  save 8 executed prefix steps
+
+filters:
+  warmup 80
+  turn >= 80
+  best plan outcome win
+  plan_q_gap >= 0.25
+
+data:
+  shard 0: 14/256 states kept, mean_gap 0.9932
+  shard 1: 28/256 states kept, mean_gap 1.0303
+  total:
+    42 plan states
+    312 non-pass winning prefix rows before balancing
+    112 rows after size-seat balancing
+```
+
+Training:
+
+```text
+run:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+
+init:
+  adaptive-fixed-v5-imitation-v5 iter30
+
+update:
+  policy heads only
+  KL 1.0 to saved prefix logits
+  action CE 0.3
+  20 epochs
+  lr 5e-5
+
+offline:
+  action CE 2.537 -> 2.476
+  teacher action accuracy 50.9%
+  policy KL 0.000 -> 0.0043
+```
+
+Fixed-v5 gate:
+
+```text
+fixed-v5 max250, 512 games/seat, seed 96400:
+  legacy iter30 adapter:
+    p0 14.06%
+    p1 12.70%
+    min 12.70%
+    draw about 68%
+
+  legacy Plan-Q prefix adapter:
+    p0 15.04%
+    p1 16.41%
+    min 15.04%
+    draw about 65%
+```
+
+Expander gate:
+
+```text
+Expander adaptive, 512 games/row, seed 96420:
+  legacy iter30 adapter:
+    8p0 85.55%
+    8p1 87.89%
+    12p0 83.01%
+    12p1 81.45%
+    16p0 83.01%
+    16p1 79.69%
+    min 79.69%
+
+  legacy Plan-Q prefix adapter:
+    8p0 88.09%
+    8p1 87.11%
+    12p0 83.01%
+    12p1 81.45%
+    16p0 83.01%
+    16p1 79.69%
+    min 79.69%
+```
+
+Interpretation:
+
+```text
+This is the first positive fixed-v5 movement in this round that does not damage
+the 8/12/16 Expander gate. It is still small and draw-heavy, but the mechanism
+is different from failed action CE:
+
+  collect counterfactual source-target plans on the legacy expert distribution
+  keep only high-gap best-plan-win states
+  train executed prefix actions, not single-step search labels
+
+The tiny 42-state dataset moved fixed-v5 same-seed min from 12.70% to 15.04%.
+Scaling this exact data source is now more promising than PPO, search-best CE,
+or checkpoint selection.
+```
+
+Current best wrapper:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+8x8 adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+flags:
+  --policy-adapter-scale 1.0
+  --policy-adapter-mode replace
+  --policy-adapter-max-grid-size 8
+```
+
+Do next:
+
+```text
+Scale the same legacy Plan-Q prefix collection:
+  more shards
+  keep main-stack source
+  compare heuristic vs enemy-general/belief target only after enough rows
+  keep filters: turn>=80, best-plan-win, gap>=0.25
+
+Train a v1 prefix adapter with:
+  1k-5k prefix rows after balancing if available
+  policy-head-only first
+  no PPO
+
+Promotion target:
+  fixed-v5 max250 512-row min > 17%
+  Expander 8/12/16 512-row min >= 79%
+```

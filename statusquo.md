@@ -1208,3 +1208,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat `v4 + legacy fixed-v5 iter30 adapter max-grid-size 8` as the current Expander diagnostic wrapper. Do not keep sweeping adapter scales; the next fixed-v5 improvement still needs decisive trajectory and finishability supervision.
 - **Context:** Legacy iter30 direct load validated at fixed-v5 max250 128-row min `16.41%`. Same-seed 512-row Expander gate improved from v4 base `71.88%` min to `78.91%` min by lifting 8p0/8p1 to `88.48%/89.26%` while 12/16 rows stayed unchanged. Same-seed fixed-v5 max250 improved from base `8.79%` min to `11.91%` min but remained high-draw, so this is not a fixed-v5 short-gate breakthrough.
+
+## [2026-06-20 15:06] Legacy Plan-Q Prefix Adapter
+- **Changes:** Exposed `--drop-mismatched-init-leaves` in `adaptive_strategy_supervised.py`, `adaptive_plan_q_dataset.py`, and `train_adaptive.py`, added `train_adaptive.py --teacher-drop-mismatched-init-leaves`, and documented GPU probes for legacy search-win CE, legacy fixed-v5 PPO, old-checkpoint selection, and legacy Plan-Q executed-prefix imitation.
+- **Status:** Completed
+- **Next Steps:** Scale `adaptive-plan-q-legacy-mainstack-fixedv5` collection with the same filters (`turn>=80`, best-plan-win, `plan_q_gap>=0.25`) and train a v1 policy-head prefix adapter. Do not continue fixed-v5 PPO or search-best action CE from legacy.
+- **Context:** Search-win CE from legacy underperformed same-seed legacy (`13.48%` vs `14.84%` fixed-v5 max250 512-row min), and both sparse PPO variants collapsed to `0.00%` min. The small legacy Plan-Q prefix dataset kept `42` high-gap winning plan states / `312` non-pass prefix rows and produced `adaptive-legacy-planq-prefix-policy-v0`, which improved same-seed fixed-v5 max250 512-row min from legacy `12.70%` to `15.04%` while keeping Expander 8/12/16 512-row min at `79.69%`.

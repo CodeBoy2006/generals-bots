@@ -1238,6 +1238,11 @@ def parse_args():
     parser.add_argument("--init-finish-head-mode", choices=("binary", "multi-horizon"), default="binary")
     parser.add_argument("--strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-strategy-spatial-aux", action="store_true")
+    parser.add_argument(
+        "--drop-mismatched-init-leaves",
+        action="store_true",
+        help="Load matching checkpoint leaves and reinitialize shape-mismatched legacy leaves.",
+    )
     parser.add_argument("--init-model-path", required=True)
     parser.add_argument("--model-path", default="runs/adaptive-strategy-supervised/generals-adaptive-strategy-supervised.eqx")
     parser.add_argument("--num-epochs", type=int, default=10)
@@ -1572,6 +1577,7 @@ def main():
         init_global_context=args.global_context,
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
+        drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
     )
     optimizer = optax.adamw(args.lr, weight_decay=args.weight_decay)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))

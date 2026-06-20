@@ -985,6 +985,11 @@ def parse_args():
     parser.add_argument("--init-strategy-aux", action="store_true")
     parser.add_argument("--init-strategy-spatial-aux", action="store_true")
     parser.add_argument("--init-strategy-finish-outputs", type=int, default=2)
+    parser.add_argument(
+        "--drop-mismatched-init-leaves",
+        action="store_true",
+        help="Load matching checkpoint leaves and reinitialize shape-mismatched legacy leaves.",
+    )
     parser.add_argument("--teacher-model-path", default=None)
     parser.add_argument("--teacher-kl-weight", type=float, default=0.0)
     parser.add_argument("--teacher-network-arch", choices=("cnn", "unet"), default="cnn")
@@ -999,6 +1004,11 @@ def parse_args():
     parser.add_argument("--teacher-outcome-head", action="store_true")
     parser.add_argument("--teacher-strategy-aux", action="store_true")
     parser.add_argument("--teacher-strategy-finish-outputs", type=int, default=2)
+    parser.add_argument(
+        "--teacher-drop-mismatched-init-leaves",
+        action="store_true",
+        help="Load matching teacher checkpoint leaves and reinitialize shape-mismatched legacy leaves.",
+    )
     parser.add_argument("--teacher-rollout-actions", action="store_true")
     parser.add_argument("--teacher-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--init-model-path", default=None)
@@ -1307,6 +1317,7 @@ def main():
         init_pyramid_context=args.init_pyramid_context,
         network_arch=args.network_arch,
         init_network_arch=args.init_network_arch,
+        drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
     )
     teacher_network = None
     teacher_input_channels = ADAPTIVE_INPUT_CHANNELS
@@ -1339,6 +1350,7 @@ def main():
             init_global_context=teacher_global_context,
             network_arch=args.teacher_network_arch,
             init_network_arch=args.teacher_network_arch,
+            drop_mismatched_init_leaves=args.teacher_drop_mismatched_init_leaves,
         )
         teacher_input_channels = adaptive_network_input_channels(teacher_network)
     opponent_policy_network = None
