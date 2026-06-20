@@ -392,6 +392,8 @@ def score_plan_candidates(
     )
 
     def rollout_result(initial_state, rollout_key, initial_scoreboard, initial_memory, source_index, target_index):
+        start_time = initial_state.time
+
         def body(carry, step_index):
             rollout_state, previous_scoreboard, memory, step_key = carry
             step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
@@ -461,7 +463,8 @@ def score_plan_candidates(
             jnp.where(final_info.is_done & ~truncated, final_info.winner, -1),
             learner_player,
         )
-        return score, outcome
+        time_to_terminal = (final_state.time - start_time).astype(jnp.int32)
+        return score, outcome, time_to_terminal
 
     def plan_score(source_index, target_index, plan_key):
         plan_action = plan_action_from_source_target(state, learner_player, source_index, target_index, pad_size)
@@ -473,7 +476,7 @@ def score_plan_candidates(
         )
         next_state, first_info = game.step(state, first_actions)
         rollout_keys = jrandom.split(plan_key, rollouts_per_plan)
-        scores, outcomes = jax.vmap(
+        scores, outcomes, rollout_times = jax.vmap(
             lambda rollout_key: rollout_result(
                 next_state,
                 rollout_key,
@@ -493,11 +496,13 @@ def score_plan_candidates(
         score = first_terminal + jnp.mean(scores)
         outcome = jnp.where(first_info.is_done, first_outcome, outcomes[best_rollout])
         action_index = plan_action_to_index(plan_action, pad_size)
-        return score, outcome, action_index
+        first_time = (next_state.time - state.time).astype(jnp.int32)
+        time_to_terminal = jnp.where(first_info.is_done, first_time, first_time + rollout_times[best_rollout])
+        return score, outcome, action_index, time_to_terminal
 
     del prior_weight  # Reserved for later variants that mix policy prior into plan scores.
     plan_keys = jrandom.split(key, source_count * target_count).reshape(source_count, target_count, 2)
-    scores, outcomes, action_indices = jax.vmap(
+    scores, outcomes, action_indices, time_to_terminal = jax.vmap(
         lambda source_index, row_keys: jax.vmap(
             lambda target_index, plan_key: plan_score(source_index, target_index, plan_key)
         )(target_indices, row_keys)
@@ -516,11 +521,109 @@ def score_plan_candidates(
         plan_q,
         outcomes,
         action_indices,
+        time_to_terminal,
         source_probs,
         target_probs,
         best_source_pos,
         best_target_pos,
     )
+
+
+@eqx.filter_jit
+def score_base_continuation(
+    network,
+    fixed_opponent_network,
+    state,
+    effective_size,
+    key,
+    truncation: int,
+    learner_player,
+    rollout_steps: int,
+    rollouts: int,
+    policy_mode: int,
+    opponent_id: int,
+    opponent_policy_mode: int,
+    opponent_policy_grid_size: int,
+    army_weight: float,
+    land_weight: float,
+    terminal_score: float,
+    score_scale: float,
+    pad_size: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    previous_scoreboard: jnp.ndarray,
+    fog_memory_enabled: bool,
+    fog_memory: AdaptiveFogMemory,
+):
+    """Score the unmodified base-policy continuation for causal prefix filters."""
+    opponent_player = 1 - learner_player
+
+    def rollout_result(rollout_key):
+        start_time = state.time
+
+        def body(carry, _):
+            rollout_state, previous_scoreboard, memory, step_key = carry
+            step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
+            learner_obs = game.get_observation(rollout_state, learner_player)
+            learner_action, current_scoreboard, current_memory = adaptive_policy_action_with_memory(
+                network,
+                learner_obs,
+                effective_size,
+                learner_key,
+                policy_mode,
+                pad_size,
+                global_context,
+                scoreboard_history_enabled,
+                previous_scoreboard,
+                fog_memory_enabled,
+                memory,
+            )
+            opponent_obs = game.get_observation(rollout_state, opponent_player)
+            opponent_action_value = opponent_policy_action(
+                fixed_opponent_network,
+                opponent_id,
+                opponent_key,
+                opponent_obs,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+            )
+            actions = jax.lax.cond(
+                learner_player == 0,
+                lambda _: jnp.stack([learner_action, opponent_action_value]),
+                lambda _: jnp.stack([opponent_action_value, learner_action]),
+                None,
+            )
+            next_state, _ = game.step(rollout_state, actions)
+            current_info = game.get_info(rollout_state)
+            already_done = current_info.is_done | (rollout_state.time >= truncation)
+            final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
+            final_info = game.get_info(final_state)
+            next_scoreboard = reset_adaptive_scoreboard_history(current_scoreboard, final_info.is_done)
+            next_memory = reset_single_fog_memory(current_memory, final_info.is_done)
+            return (final_state, next_scoreboard, next_memory, step_key), None
+
+        (final_state, _, _, _), _ = jax.lax.scan(
+            body,
+            (state, previous_scoreboard, fog_memory, rollout_key),
+            jnp.arange(rollout_steps),
+            length=rollout_steps,
+        )
+        final_info = game.get_info(final_state)
+        final_obs = game.get_observation(final_state, learner_player)
+        score = adaptive_score_observation(final_info, final_obs, learner_player, army_weight, land_weight, terminal_score)
+        truncated = (final_state.time >= truncation) & ~final_info.is_done
+        outcome = outcome_class_from_winner(
+            jnp.where(final_info.is_done & ~truncated, final_info.winner, -1),
+            learner_player,
+        )
+        time_to_terminal = (final_state.time - start_time).astype(jnp.int32)
+        return score, outcome, time_to_terminal
+
+    rollout_keys = jrandom.split(key, rollouts)
+    scores, outcomes, times = jax.vmap(rollout_result)(rollout_keys)
+    best_rollout = jnp.argmax(scores)
+    score = jnp.mean(scores)
+    return score, jnp.tanh(score / score_scale), outcomes[best_rollout], times[best_rollout]
 
 
 def plan_action_to_index(action: jnp.ndarray, pad_size: int) -> jnp.ndarray:
@@ -537,6 +640,7 @@ def collect_best_plan_worker_prefix(
     truncation: int,
     learner_player: int,
     plan_outputs,
+    base_outputs,
     worker_prefix_steps: int,
     opponent_id: int,
     opponent_policy_mode: int,
@@ -556,15 +660,20 @@ def collect_best_plan_worker_prefix(
         plan_q,
         plan_outcomes,
         _plan_action_indices,
+        plan_times,
         _source_probs,
         _target_probs,
         best_source_pos,
         best_target_pos,
     ) = plan_outputs
+    _base_score, base_q, base_outcome, base_time = base_outputs
     source_index = source_indices[best_source_pos]
     target_index = target_indices[best_target_pos]
     best_plan_q = plan_q[best_source_pos, best_target_pos]
     best_plan_outcome = plan_outcomes[best_source_pos, best_target_pos]
+    best_plan_time = plan_times[best_source_pos, best_target_pos]
+    plan_advantage = best_plan_q - base_q
+    plan_id = best_source_pos * plan_q.shape[-1] + best_target_pos
     opponent_player = 1 - learner_player
 
     def body(carry, _):
@@ -652,6 +761,12 @@ def collect_best_plan_worker_prefix(
     target_prefix = jnp.full((worker_prefix_steps,), target_index, dtype=jnp.int32)
     outcome_prefix = jnp.full((worker_prefix_steps,), best_plan_outcome, dtype=jnp.int8)
     q_prefix = jnp.full((worker_prefix_steps,), best_plan_q, dtype=jnp.float32)
+    advantage_prefix = jnp.full((worker_prefix_steps,), plan_advantage, dtype=jnp.float32)
+    step_prefix = jnp.arange(worker_prefix_steps, dtype=jnp.int32)
+    plan_id_prefix = jnp.full((worker_prefix_steps,), plan_id, dtype=jnp.int32)
+    base_outcome_prefix = jnp.full((worker_prefix_steps,), base_outcome, dtype=jnp.int8)
+    base_time_prefix = jnp.full((worker_prefix_steps,), base_time, dtype=jnp.int32)
+    plan_time_prefix = jnp.full((worker_prefix_steps,), best_plan_time, dtype=jnp.int32)
     return (
         obs_arr,
         masks,
@@ -664,6 +779,12 @@ def collect_best_plan_worker_prefix(
         target_prefix,
         outcome_prefix,
         q_prefix,
+        advantage_prefix,
+        step_prefix,
+        plan_id_prefix,
+        base_outcome_prefix,
+        base_time_prefix,
+        plan_time_prefix,
     )
 
 
@@ -865,6 +986,8 @@ def collect_plan_q_step(
     candidate_source_mode=0,
     candidate_target_mode=0,
     worker_prefix_steps=0,
+    save_base_continuation=False,
+    base_rollouts=1,
 ):
     """Collect one vectorized batch of plan-Q labels and advance behavior states."""
     num_envs = states.armies.shape[0]
@@ -940,7 +1063,7 @@ def collect_plan_q_step(
         model_target_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
         model_belief_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
 
-    key, plan_key, prefix_key, policy_key, opponent_key = jrandom.split(key, 5)
+    key, plan_key, prefix_key, base_key, policy_key, opponent_key = jrandom.split(key, 6)
     plan_keys = jrandom.split(plan_key, num_envs)
     plan_outputs = jax.vmap(
         lambda state, size, sample_key, prev_scoreboard, memory, source_logits, target_logits, belief_logits: score_plan_candidates(
@@ -988,9 +1111,51 @@ def collect_plan_q_step(
         model_target_logits,
         model_belief_logits,
     )
+    if save_base_continuation:
+        base_keys = jrandom.split(base_key, num_envs)
+        base_outputs = jax.vmap(
+            lambda state, size, sample_key, prev_scoreboard, memory: score_base_continuation(
+                network,
+                fixed_opponent_network,
+                state,
+                size,
+                sample_key,
+                truncation,
+                learner_player,
+                rollout_steps,
+                base_rollouts,
+                policy_mode,
+                opponent_id,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+                army_weight,
+                land_weight,
+                terminal_score,
+                score_scale,
+                pad_size,
+                global_context,
+                scoreboard_history_enabled,
+                prev_scoreboard,
+                fog_memory_enabled,
+                memory,
+            )
+        )(
+            states,
+            effective_sizes,
+            base_keys,
+            current_scoreboard,
+            current_fog_memory,
+        )
+    else:
+        base_outputs = (
+            jnp.zeros((num_envs,), dtype=jnp.float32),
+            jnp.zeros((num_envs,), dtype=jnp.float32),
+            jnp.full((num_envs,), -1, dtype=jnp.int8),
+            jnp.zeros((num_envs,), dtype=jnp.int32),
+        )
     prefix_keys = jrandom.split(prefix_key, num_envs)
     worker_prefix_outputs = jax.vmap(
-        lambda state, size, sample_key, prev_scoreboard, memory, plans: collect_best_plan_worker_prefix(
+        lambda state, size, sample_key, prev_scoreboard, memory, plans, base: collect_best_plan_worker_prefix(
             network,
             fixed_opponent_network,
             state,
@@ -999,6 +1164,7 @@ def collect_plan_q_step(
             truncation,
             learner_player,
             plans,
+            base,
             worker_prefix_steps,
             opponent_id,
             opponent_policy_mode,
@@ -1017,6 +1183,7 @@ def collect_plan_q_step(
         current_scoreboard,
         current_fog_memory,
         plan_outputs,
+        base_outputs,
     )
 
     policy_keys = jrandom.split(policy_key, num_envs)
@@ -1064,6 +1231,7 @@ def collect_plan_q_step(
         learner_action_indices,
         effective_sizes,
         plan_outputs,
+        base_outputs,
         dones,
         infos,
         worker_prefix_outputs,
@@ -1105,6 +1273,8 @@ def collect_plan_q_rollout(
     candidate_source_mode=0,
     candidate_target_mode=0,
     worker_prefix_steps=0,
+    save_base_continuation=False,
+    base_rollouts=1,
 ):
     """Collect multiple plan-Q steps for one learner seat."""
     step_data = []
@@ -1142,6 +1312,8 @@ def collect_plan_q_rollout(
             candidate_source_mode,
             candidate_target_mode,
             worker_prefix_steps,
+            save_base_continuation,
+            base_rollouts,
         )
         step_data.append(data)
     return states, effective_sizes, scoreboard_history, fog_memory, jax.tree.map(lambda *xs: jnp.stack(xs), *step_data), key
@@ -1184,6 +1356,8 @@ def collect_mixed_plan_q_rollout(
     candidate_source_mode=0,
     candidate_target_mode=0,
     worker_prefix_steps=0,
+    save_base_continuation=False,
+    base_rollouts=1,
 ):
     """Collect plan-Q data for both seats and concatenate env dimension."""
     key, p0_key, p1_key = jrandom.split(key, 3)
@@ -1221,6 +1395,8 @@ def collect_mixed_plan_q_rollout(
         candidate_source_mode,
         candidate_target_mode,
         worker_prefix_steps,
+        save_base_continuation,
+        base_rollouts,
     )
     states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, rollout_p1, _ = collect_plan_q_rollout(
         states_p1,
@@ -1256,6 +1432,8 @@ def collect_mixed_plan_q_rollout(
         candidate_source_mode,
         candidate_target_mode,
         worker_prefix_steps,
+        save_base_continuation,
+        base_rollouts,
     )
     rollout_data = jax.tree.map(lambda left, right: jnp.concatenate([left, right], axis=1), rollout_p0, rollout_p1)
     return (
@@ -1282,6 +1460,7 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         learner_action_indices,
         effective_sizes,
         plan_outputs,
+        base_outputs,
         dones,
         infos,
         worker_prefix_outputs,
@@ -1293,11 +1472,13 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         plan_q,
         plan_outcomes,
         plan_action_indices,
+        plan_times,
         source_probs,
         target_probs,
         best_source_pos,
         best_target_pos,
     ) = plan_outputs
+    base_scores, base_q, base_outcomes, base_times = base_outputs
     (
         worker_prefix_obs,
         worker_prefix_masks,
@@ -1310,6 +1491,12 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         worker_prefix_target_indices,
         worker_prefix_plan_outcome,
         worker_prefix_plan_q,
+        worker_prefix_plan_advantage,
+        worker_prefix_step_index,
+        worker_prefix_plan_id,
+        worker_prefix_base_outcome,
+        worker_prefix_base_time,
+        worker_prefix_plan_time,
     ) = worker_prefix_outputs
     learner_player_grid = jnp.broadcast_to(learner_players[None, :], dones.shape)
     best_plan_q = jnp.take_along_axis(
@@ -1317,7 +1504,13 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         (best_source_pos * plan_q.shape[-1] + best_target_pos)[..., None],
         axis=-1,
     )[..., 0]
+    best_plan_time = jnp.take_along_axis(
+        plan_times.reshape(*plan_times.shape[:2], -1),
+        (best_source_pos * plan_times.shape[-1] + best_target_pos)[..., None],
+        axis=-1,
+    )[..., 0]
     mean_plan_q = jnp.mean(plan_q, axis=(-2, -1))
+    plan_advantage = best_plan_q - base_q
 
     def flat(array):
         return np.asarray(array.reshape(array.shape[0] * array.shape[1], *array.shape[2:]))
@@ -1342,13 +1535,21 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
         "plan_scores": flat(plan_scores).astype(np.float16),
         "plan_q": flat(plan_q).astype(np.float16),
         "plan_outcomes": flat(plan_outcomes).astype(np.int8),
+        "plan_time_to_terminal": flat(plan_times).astype(np.int16),
         "source_score_probs": flat(source_probs).astype(np.float16),
         "target_score_probs": flat(target_probs).astype(np.float16),
         "best_source_pos": flat(best_source_pos).astype(np.int8),
         "best_target_pos": flat(best_target_pos).astype(np.int8),
         "best_plan_q": flat(best_plan_q).astype(np.float16),
+        "best_plan_time_to_terminal": flat(best_plan_time).astype(np.int16),
         "mean_plan_q": flat(mean_plan_q).astype(np.float16),
         "plan_q_gap": flat(best_plan_q - mean_plan_q).astype(np.float16),
+        "base_scores": flat(base_scores).astype(np.float16),
+        "base_q": flat(base_q).astype(np.float16),
+        "base_outcome": flat(base_outcomes).astype(np.int8),
+        "base_time_to_terminal": flat(base_times).astype(np.int16),
+        "base_continuation_known": (flat(base_outcomes).astype(np.int8) >= 0).astype(np.bool_),
+        "plan_advantage": flat(plan_advantage).astype(np.float16),
     }
     arrays.update(
         {
@@ -1367,6 +1568,14 @@ def flatten_plan_q_data(rollout_data, learner_players: jnp.ndarray, logit_dtype:
             "worker_prefix_target_index": flat(worker_prefix_target_indices).astype(np.int16),
             "worker_prefix_plan_outcome": flat(worker_prefix_plan_outcome).astype(np.int8),
             "worker_prefix_plan_q": flat(worker_prefix_plan_q).astype(np.float16),
+            "worker_prefix_plan_advantage": flat(worker_prefix_plan_advantage).astype(np.float16),
+            "worker_prefix_step_index": flat(worker_prefix_step_index).astype(np.int8),
+            "worker_prefix_plan_id": flat(worker_prefix_plan_id).astype(np.int16),
+            "worker_prefix_base_outcome": flat(worker_prefix_base_outcome).astype(np.int8),
+            "worker_prefix_base_time_to_terminal": flat(worker_prefix_base_time).astype(np.int16),
+            "worker_prefix_plan_time_to_terminal": flat(worker_prefix_plan_time).astype(np.int16),
+            "accepted_prefix_mask": flat(worker_prefix_valid).astype(np.bool_),
+            "rejected_prefix_mask": np.zeros_like(flat(worker_prefix_valid), dtype=np.bool_),
         }
     )
     return arrays
@@ -1386,20 +1595,65 @@ def filter_plan_q_arrays(
     require_best_plan_win: bool,
     min_save_turn: int,
     max_save_turn: int | None,
+    min_plan_advantage: float,
+    require_plan_improves_base: bool,
+    max_base_win_rate: float,
 ) -> tuple[dict[str, np.ndarray], int, int]:
     """Filter rows before writing a shard while preserving aligned array axes."""
     original_count = int(arrays["obs"].shape[0])
-    if min_plan_gap <= 0.0 and not require_best_plan_win and min_save_turn <= 0 and max_save_turn is None:
+    if (
+        min_plan_gap <= 0.0
+        and not require_best_plan_win
+        and min_save_turn <= 0
+        and max_save_turn is None
+        and min_plan_advantage <= 0.0
+        and not require_plan_improves_base
+        and max_base_win_rate >= 1.0
+    ):
         return arrays, original_count, original_count
     keep = np.ones((original_count,), dtype=np.bool_)
+    best_plan_outcomes = best_plan_outcomes_from_arrays(arrays, target_count)
     if min_plan_gap > 0.0:
         keep &= arrays["plan_q_gap"].astype(np.float32) >= min_plan_gap
     if require_best_plan_win:
-        keep &= best_plan_outcomes_from_arrays(arrays, target_count) == 2
+        keep &= best_plan_outcomes == 2
     if min_save_turn > 0:
         keep &= arrays["time"].astype(np.int32) >= min_save_turn
     if max_save_turn is not None:
         keep &= arrays["time"].astype(np.int32) <= max_save_turn
+    if min_plan_advantage > 0.0:
+        keep &= arrays["plan_advantage"].astype(np.float32) >= min_plan_advantage
+    if require_plan_improves_base:
+        base_known = arrays["base_continuation_known"].astype(np.bool_)
+        base_outcome = arrays["base_outcome"].astype(np.int32)
+        best_time = arrays["best_plan_time_to_terminal"].astype(np.int32)
+        base_time = arrays["base_time_to_terminal"].astype(np.int32)
+        outcome_improves = best_plan_outcomes.astype(np.int32) > base_outcome
+        faster_win = (
+            (best_plan_outcomes == 2)
+            & (base_outcome == 2)
+            & (best_time > 0)
+            & (base_time > 0)
+            & (best_time < base_time)
+        )
+        q_improves = arrays["plan_advantage"].astype(np.float32) > 0.0
+        keep &= base_known & (outcome_improves | faster_win | q_improves)
+    if max_base_win_rate < 1.0:
+        if max_base_win_rate < 0.0:
+            raise ValueError("max_base_win_rate must be non-negative")
+        kept_indices = np.flatnonzero(keep)
+        if kept_indices.size > 0:
+            base_win = arrays["base_outcome"].astype(np.int32) == 2
+            kept_base_win = kept_indices[base_win[kept_indices]]
+            kept_non_base_win = kept_indices[~base_win[kept_indices]]
+            if max_base_win_rate <= 0.0:
+                allowed_base_wins = 0
+            else:
+                allowed_base_wins = int(
+                    np.floor((max_base_win_rate * kept_non_base_win.size) / max(1.0 - max_base_win_rate, 1.0e-6))
+                )
+            if kept_base_win.size > allowed_base_wins:
+                keep[kept_base_win[allowed_base_wins:]] = False
     filtered = {name: value[keep] for name, value in arrays.items()}
     return filtered, original_count, int(np.sum(keep))
 
@@ -1461,6 +1715,17 @@ def parse_args():
     parser.add_argument("--plan-worker-steps", type=int, default=0)
     parser.add_argument("--save-worker-prefix-steps", type=int, default=0)
     parser.add_argument("--rollouts-per-plan", type=int, default=2)
+    parser.add_argument(
+        "--base-rollouts-per-plan",
+        type=int,
+        default=1,
+        help="Base-policy continuation rollouts per state when --save-base-continuation is enabled.",
+    )
+    parser.add_argument(
+        "--save-base-continuation",
+        action="store_true",
+        help="Save unmodified base-policy continuation outcome/Q/time for causal accepted-prefix filtering.",
+    )
     parser.add_argument("--score-scale", type=float, default=10.0)
     parser.add_argument("--score-temperature", type=float, default=0.25)
     parser.add_argument("--army-weight", type=float, default=12.0)
@@ -1485,6 +1750,23 @@ def parse_args():
     parser.add_argument("--logit-dtype", choices=("float32", "float16"), default="float16")
     parser.add_argument("--min-plan-gap", type=float, default=0.0)
     parser.add_argument("--require-best-plan-win", action="store_true")
+    parser.add_argument("--min-plan-advantage", type=float, default=0.0)
+    parser.add_argument(
+        "--require-plan-improves-base",
+        action="store_true",
+        help="Keep only rows where the best plan improves base continuation outcome, speed, or Q.",
+    )
+    parser.add_argument(
+        "--max-base-win-rate",
+        type=float,
+        default=1.0,
+        help="After other filters, cap the fraction of accepted rows whose base continuation already wins.",
+    )
+    parser.add_argument(
+        "--save-prefix-advantages",
+        action="store_true",
+        help="Compatibility flag; prefix advantage fields are always saved when worker prefixes are saved.",
+    )
     parser.add_argument("--min-save-turn", type=int, default=0)
     parser.add_argument("--max-save-turn", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -1562,6 +1844,8 @@ def parse_args():
         parser.error("--candidate-target belief requires --strategy-aux")
     if args.plan_rollout_steps <= 0 or args.rollouts_per_plan <= 0:
         parser.error("--plan-rollout-steps and --rollouts-per-plan must be positive")
+    if args.base_rollouts_per_plan <= 0:
+        parser.error("--base-rollouts-per-plan must be positive")
     if args.plan_worker_steps < 0:
         parser.error("--plan-worker-steps must be non-negative")
     if args.plan_worker_steps > args.plan_rollout_steps:
@@ -1574,6 +1858,12 @@ def parse_args():
         parser.error("--score-scale and --score-temperature must be positive")
     if args.min_plan_gap < 0.0:
         parser.error("--min-plan-gap must be non-negative")
+    if args.min_plan_advantage < 0.0:
+        parser.error("--min-plan-advantage must be non-negative")
+    if not (0.0 <= args.max_base_win_rate <= 1.0):
+        parser.error("--max-base-win-rate must be between 0 and 1")
+    if (args.require_plan_improves_base or args.min_plan_advantage > 0.0 or args.max_base_win_rate < 1.0) and not args.save_base_continuation:
+        parser.error("base-continuation filters require --save-base-continuation")
     if args.min_save_turn < 0:
         parser.error("--min-save-turn must be non-negative")
     if args.max_save_turn is not None and args.max_save_turn < args.min_save_turn:
@@ -1626,12 +1916,24 @@ def main():
         print(f"Plan worker:   {args.plan_worker_steps} extra target-conditioned steps")
     if args.save_worker_prefix_steps > 0:
         print(f"Worker prefix: saving {args.save_worker_prefix_steps} best-command steps")
+    if args.save_base_continuation:
+        print(f"Base cont.:    {args.base_rollouts_per_plan} rollouts/state saved")
     if args.warmup_steps > 0:
         print(f"Warmup:        {args.warmup_steps} behavior steps before scoring")
-    if args.min_plan_gap > 0.0 or args.require_best_plan_win or args.min_save_turn > 0 or args.max_save_turn is not None:
+    if (
+        args.min_plan_gap > 0.0
+        or args.require_best_plan_win
+        or args.min_plan_advantage > 0.0
+        or args.require_plan_improves_base
+        or args.max_base_win_rate < 1.0
+        or args.min_save_turn > 0
+        or args.max_save_turn is not None
+    ):
         print(
             "Save filter:   "
             f"min_gap={args.min_plan_gap:g}, require_best_win={args.require_best_plan_win}, "
+            f"min_adv={args.min_plan_advantage:g}, improves_base={args.require_plan_improves_base}, "
+            f"max_base_win={args.max_base_win_rate:g}, "
             f"turn=[{args.min_save_turn}, {args.max_save_turn if args.max_save_turn is not None else 'inf'}]"
         )
     print(f"Output:        {args.output_dir}")
@@ -1783,6 +2085,8 @@ def main():
         "plan_worker_steps": args.plan_worker_steps,
         "save_worker_prefix_steps": args.save_worker_prefix_steps,
         "rollouts_per_plan": args.rollouts_per_plan,
+        "base_rollouts_per_plan": args.base_rollouts_per_plan,
+        "save_base_continuation": args.save_base_continuation,
         "opponent": args.opponent,
         "opponent_policy_path": args.opponent_policy_path,
         "opponent_policy_mode": args.opponent_policy_mode,
@@ -1796,6 +2100,10 @@ def main():
         "score_temperature": args.score_temperature,
         "min_plan_gap": args.min_plan_gap,
         "require_best_plan_win": args.require_best_plan_win,
+        "min_plan_advantage": args.min_plan_advantage,
+        "require_plan_improves_base": args.require_plan_improves_base,
+        "max_base_win_rate": args.max_base_win_rate,
+        "save_prefix_advantages": args.save_prefix_advantages,
         "min_save_turn": args.min_save_turn,
         "max_save_turn": args.max_save_turn,
         "seed": args.seed,
@@ -1853,6 +2161,8 @@ def main():
             candidate_source_mode,
             candidate_target_mode,
             args.save_worker_prefix_steps,
+            args.save_base_continuation,
+            args.base_rollouts_per_plan,
         )
         jax.block_until_ready(states_p0.armies)
         arrays = flatten_plan_q_data(rollout_data, learner_players, args.logit_dtype)
@@ -1863,6 +2173,9 @@ def main():
             args.require_best_plan_win,
             args.min_save_turn,
             args.max_save_turn,
+            args.min_plan_advantage,
+            args.require_plan_improves_base,
+            args.max_base_win_rate,
         )
         if kept_samples == 0:
             print(
@@ -1884,7 +2197,10 @@ def main():
         print(
             f"Shard {shard_index:04d} | samples={arrays['obs'].shape[0]}/{original_samples} | "
             f"mean_gap={float(np.mean(arrays['plan_q_gap'])):.4f} | "
+            f"mean_adv={float(np.mean(arrays['plan_advantage'])):.4f} | "
             f"best_q={float(np.mean(arrays['best_plan_q'])):.4f} | "
+            f"base_q={float(np.mean(arrays['base_q'])):.4f} | "
+            f"base_win={float(np.mean(arrays['base_outcome'] == 2)):.3f} | "
             f"best_win={float(np.mean(best_plan_outcomes == 2)):.3f} | "
             f"best_draw={float(np.mean(best_plan_outcomes == 1)):.3f} | "
             f"path={shard_path} | time={time.time() - t0:.2f}s"

@@ -61,6 +61,9 @@ class AdaptiveEvalRow:
     draws: int
     num_games: int
     mean_time: float
+    adapter_trigger_rate: float = 0.0
+    adapter_used_rate: float = 0.0
+    adapter_action_diff_rate: float = 0.0
 
     @property
     def win_rate(self) -> float:
@@ -121,6 +124,8 @@ def _policy_action(
 ):
     logits, _ = network.logits_value(obs_arr, mask, active)
     adapter_trigger = jnp.asarray(0.0, dtype=logits.dtype)
+    adapter_used = jnp.asarray(0.0, dtype=logits.dtype)
+    adapter_action_diff = jnp.asarray(0.0, dtype=logits.dtype)
     needs_aux = (
         strategy_q_rerank_scale > 0.0
         or strategy_q_replace_threshold >= 0.0
@@ -134,6 +139,7 @@ def _policy_action(
     if needs_aux:
         aux = network.strategy_auxiliary(obs_arr, mask, active)
     if policy_adapter_scale > 0.0:
+        base_logits_for_adapter = logits
         adapter_logits, _ = policy_adapter_network.logits_value(obs_arr, mask, active)
         adapter_gate = jnp.asarray(1.0, dtype=logits.dtype)
         if policy_adapter_gate_threshold >= 0.0:
@@ -169,7 +175,7 @@ def _policy_action(
             adapter_gate = adapter_trigger
         adapter_gate = jnp.where(policy_adapter_commit_active > 0, 1.0, adapter_gate)
         adapter_weight = policy_adapter_scale * adapter_gate
-        logits = jax.lax.switch(
+        adapted_logits = jax.lax.switch(
             policy_adapter_mode,
             (
                 lambda _: policy_adapter_delta_logits(logits, adapter_logits, adapter_weight),
@@ -178,6 +184,12 @@ def _policy_action(
             ),
             None,
         )
+        legal = base_logits_for_adapter > -1.0e8
+        base_top = jnp.argmax(jnp.where(legal, base_logits_for_adapter, -1.0e9))
+        adapted_top = jnp.argmax(jnp.where(legal, adapted_logits, -1.0e9))
+        adapter_used = (adapter_gate > 0.0).astype(logits.dtype)
+        adapter_action_diff = adapter_used * (adapted_top != base_top).astype(logits.dtype)
+        logits = adapted_logits
     if strategy_q_rerank_scale > 0.0:
         logits = strategy_q_rerank_logits(logits[None, :], aux.action_q_values[None, :], strategy_q_rerank_scale)[0]
     if strategy_target_rerank_scale > 0.0:
@@ -326,7 +338,7 @@ def _policy_action(
             worker_supported = jnp.asarray(True)
         use_worker = (jrandom.uniform(worker_key) < worker_probability) & worker_supported
         index = jnp.where(use_worker, worker_index, index)
-    return adaptive_index_to_action(index, network.pad_size), adapter_trigger
+    return adaptive_index_to_action(index, network.pad_size), adapter_trigger, adapter_used, adapter_action_diff
 
 
 def strategy_q_rerank_logits(
@@ -761,11 +773,21 @@ def crop_observation(obs, size: int):
     )
 
 
-def summarize_row(info, grid_size: int, policy_player: int, num_games: int) -> AdaptiveEvalRow:
+def summarize_row(info, grid_size: int, policy_player: int, num_games: int, adapter_stats=None) -> AdaptiveEvalRow:
     opponent_player = 1 - policy_player
     wins = jnp.sum(info.winner == policy_player)
     losses = jnp.sum(info.winner == opponent_player)
     draws = jnp.sum(info.winner < 0)
+    if adapter_stats is None:
+        adapter_trigger_rate = jnp.asarray(0.0)
+        adapter_used_rate = jnp.asarray(0.0)
+        adapter_action_diff_rate = jnp.asarray(0.0)
+    else:
+        adapter_trigger_sum, adapter_used_sum, adapter_action_diff_sum, active_decision_sum = adapter_stats
+        denominator = jnp.maximum(active_decision_sum, 1.0)
+        adapter_trigger_rate = adapter_trigger_sum / denominator
+        adapter_used_rate = adapter_used_sum / denominator
+        adapter_action_diff_rate = adapter_action_diff_sum / denominator
     return AdaptiveEvalRow(
         grid_size=grid_size,
         policy_player=policy_player,
@@ -774,6 +796,9 @@ def summarize_row(info, grid_size: int, policy_player: int, num_games: int) -> A
         draws=draws,
         num_games=num_games,
         mean_time=jnp.mean(info.time),
+        adapter_trigger_rate=adapter_trigger_rate,
+        adapter_used_rate=adapter_used_rate,
+        adapter_action_diff_rate=adapter_action_diff_rate,
     )
 
 
@@ -927,7 +952,9 @@ def evaluate_batch(
 
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
-        policy_actions, adapter_triggers = jax.vmap(
+        pre_infos = jax.vmap(game.get_info)(states)
+        active_decisions = (~pre_infos.is_done).astype(jnp.float32)
+        policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
             lambda o, m, a, k, c: _policy_action(
                 network,
                 policy_adapter_network,
@@ -978,7 +1005,7 @@ def evaluate_batch(
         )
         actions = stack_learner_actions(policy_actions, opponent_actions, policy_player)
         new_states, infos = jax.vmap(game.step)(states, actions)
-        keep_old = jax.vmap(game.get_info)(states).is_done
+        keep_old = pre_infos.is_done
         final_states = jax.tree.map(
             lambda old, new: jnp.where(keep_old.reshape(num_envs, *([1] * (old.ndim - 1))), old, new),
             states,
@@ -991,15 +1018,22 @@ def evaluate_batch(
             jnp.asarray(policy_adapter_commit_steps, dtype=jnp.int32),
             decayed_commit,
         )
-        return (final_states, key, current_scoreboard, final_memory, next_adapter_commit), infos
+        adapter_stats = (
+            adapter_triggers * active_decisions,
+            adapter_used * active_decisions,
+            adapter_action_diff * active_decisions,
+            active_decisions,
+        )
+        return (final_states, key, current_scoreboard, final_memory, next_adapter_commit), (infos, adapter_stats)
 
-    (states, key, _, _, _), _ = jax.lax.scan(
+    (states, key, _, _, _), (_, adapter_stats_steps) = jax.lax.scan(
         body,
         (states, key, initial_history, initial_fog_memory, initial_adapter_commit),
         None,
         length=max_steps,
     )
-    return jax.vmap(game.get_info)(states)
+    adapter_stats = jax.tree.map(lambda value: jnp.sum(value), adapter_stats_steps)
+    return jax.vmap(game.get_info)(states), adapter_stats
 
 
 @eqx.filter_jit
@@ -1154,7 +1188,9 @@ def evaluate_policy_opponent_batch(
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
         opponent_keys = jrandom.split(opponent_key, num_envs)
-        policy_actions, adapter_triggers = jax.vmap(
+        pre_infos = jax.vmap(game.get_info)(states)
+        active_decisions = (~pre_infos.is_done).astype(jnp.float32)
+        policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
             lambda o, m, a, k, c: _policy_action(
                 network,
                 policy_adapter_network,
@@ -1203,7 +1239,7 @@ def evaluate_policy_opponent_batch(
         )(opponent_keys, opponent_obs)
         actions = stack_learner_actions(policy_actions, opponent_actions, policy_player)
         new_states, infos = jax.vmap(game.step)(states, actions)
-        keep_old = jax.vmap(game.get_info)(states).is_done
+        keep_old = pre_infos.is_done
         final_states = jax.tree.map(
             lambda old, new: jnp.where(keep_old.reshape(num_envs, *([1] * (old.ndim - 1))), old, new),
             states,
@@ -1216,15 +1252,22 @@ def evaluate_policy_opponent_batch(
             jnp.asarray(policy_adapter_commit_steps, dtype=jnp.int32),
             decayed_commit,
         )
-        return (final_states, key, current_scoreboard, final_memory, next_adapter_commit), infos
+        adapter_stats = (
+            adapter_triggers * active_decisions,
+            adapter_used * active_decisions,
+            adapter_action_diff * active_decisions,
+            active_decisions,
+        )
+        return (final_states, key, current_scoreboard, final_memory, next_adapter_commit), (infos, adapter_stats)
 
-    (states, key, _, _, _), _ = jax.lax.scan(
+    (states, key, _, _, _), (_, adapter_stats_steps) = jax.lax.scan(
         body,
         (states, key, initial_history, initial_fog_memory, initial_adapter_commit),
         None,
         length=max_steps,
     )
-    return jax.vmap(game.get_info)(states)
+    adapter_stats = jax.tree.map(lambda value: jnp.sum(value), adapter_stats_steps)
+    return jax.vmap(game.get_info)(states), adapter_stats
 
 
 def parse_args():
@@ -1855,7 +1898,7 @@ def main():
             states = pool.states
             t0 = time.time()
             if opponent_network is None:
-                info = evaluate_batch(
+                info, adapter_stats = evaluate_batch(
                     network,
                     policy_adapter_network,
                     policy_adapter_feature_network,
@@ -1901,7 +1944,7 @@ def main():
                     args.policy_adapter_commit_steps,
                 )
             else:
-                info = evaluate_policy_opponent_batch(
+                info, adapter_stats = evaluate_policy_opponent_batch(
                     network,
                     policy_adapter_network,
                     policy_adapter_feature_network,
@@ -1948,7 +1991,7 @@ def main():
                     args.policy_adapter_commit_steps,
                 )
             jax.block_until_ready(info.winner)
-            row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
+            row_jax = summarize_row(info, grid_size, policy_player, args.num_games, adapter_stats)
             row = AdaptiveEvalRow(
                 grid_size=grid_size,
                 policy_player=policy_player,
@@ -1957,10 +2000,20 @@ def main():
                 draws=int(row_jax.draws),
                 num_games=args.num_games,
                 mean_time=float(row_jax.mean_time),
+                adapter_trigger_rate=float(row_jax.adapter_trigger_rate),
+                adapter_used_rate=float(row_jax.adapter_used_rate),
+                adapter_action_diff_rate=float(row_jax.adapter_action_diff_rate),
             )
             rows.append(row)
             elapsed = time.time() - t0
-            print(f"{_row_to_printable(row)} | elapsed={elapsed:.2f}s")
+            adapter_label = ""
+            if args.policy_adapter_path is not None:
+                adapter_label = (
+                    f", adapter_used={row.adapter_used_rate * 100:.2f}%, "
+                    f"adapter_diff={row.adapter_action_diff_rate * 100:.2f}%, "
+                    f"adapter_trigger={row.adapter_trigger_rate * 100:.2f}%"
+                )
+            print(f"{_row_to_printable(row)}{adapter_label} | elapsed={elapsed:.2f}s")
 
     min_win_rate = min(row.win_rate for row in rows)
     payload = {

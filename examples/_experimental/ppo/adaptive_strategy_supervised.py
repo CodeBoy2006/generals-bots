@@ -134,6 +134,8 @@ def load_strategy_dataset(
         "search_scores": [],
         "search_outcomes": [],
         "search_score_gap": [],
+        "prefix_weight": [],
+        "prefix_base_action": [],
     }
     load_stats = {
         "rows": 0,
@@ -330,6 +332,8 @@ def load_strategy_dataset(
         if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
             action_weight = np.zeros_like(action_weight, dtype=np.bool_)
         chunks["action_weight"].append(action_weight.astype(np.float32))
+        chunks["prefix_weight"].append(action_weight.astype(np.float32))
+        chunks["prefix_base_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
 
     if not chunks["obs"]:
         raise ValueError("row filters kept no strategy-supervision samples")
@@ -368,6 +372,9 @@ def load_plan_q_prefix_strategy_dataset(
     require_outcome_nonwin: bool = False,
     min_search_score_gap: float = 0.0,
     min_teacher_action_logit_margin: float | None = None,
+    require_plan_advantage: float = 0.0,
+    prefix_advantage_weighting: bool = False,
+    prefix_step_decay: float = 0.0,
     drop_pass_labels: bool = True,
     return_stats: bool = False,
 ) -> dict[str, jnp.ndarray] | tuple[dict[str, jnp.ndarray], dict]:
@@ -402,6 +409,8 @@ def load_plan_q_prefix_strategy_dataset(
         "search_scores": [],
         "search_outcomes": [],
         "search_score_gap": [],
+        "prefix_weight": [],
+        "prefix_base_action": [],
     }
     load_stats = {
         "rows": 0,
@@ -468,6 +477,21 @@ def load_plan_q_prefix_strategy_dataset(
                 raise KeyError(f"{path} is missing plan_q_gap for --min-search-score-gap")
             gap = np.repeat(shard["plan_q_gap"].astype(np.float32)[:, None], prefix_steps, axis=1)
             add_prefix_filter(f"plan_q_gap>={min_search_score_gap:g}", gap >= min_search_score_gap)
+        if require_plan_advantage > 0.0:
+            if "worker_prefix_plan_advantage" in shard:
+                prefix_advantage_for_filter = shard["worker_prefix_plan_advantage"].astype(np.float32)
+            elif "plan_advantage" in shard:
+                prefix_advantage_for_filter = np.repeat(
+                    shard["plan_advantage"].astype(np.float32)[:, None],
+                    prefix_steps,
+                    axis=1,
+                )
+            else:
+                raise KeyError(f"{path} is missing plan_advantage for --require-plan-advantage")
+            add_prefix_filter(
+                f"plan_advantage>={require_plan_advantage:g}",
+                prefix_advantage_for_filter >= require_plan_advantage,
+            )
         if min_teacher_action_logit_margin is not None:
             flat_logits_for_margin = logits.reshape(total_prefix, logits.shape[-1])
             flat_labels_for_margin = labels.reshape(-1)
@@ -509,6 +533,16 @@ def load_plan_q_prefix_strategy_dataset(
             row_gap = np.repeat(shard["plan_q_gap"].astype(np.float32)[:, None], prefix_steps, axis=1).reshape(-1)
         else:
             row_gap = np.zeros((total_prefix,), dtype=np.float32)
+        if "worker_prefix_plan_advantage" in shard:
+            row_advantage = shard["worker_prefix_plan_advantage"].astype(np.float32).reshape(-1)
+        elif "plan_advantage" in shard:
+            row_advantage = np.repeat(shard["plan_advantage"].astype(np.float32)[:, None], prefix_steps, axis=1).reshape(-1)
+        else:
+            row_advantage = row_gap
+        if "worker_prefix_step_index" in shard:
+            row_step_index = shard["worker_prefix_step_index"].astype(np.float32).reshape(-1)
+        else:
+            row_step_index = np.tile(np.arange(prefix_steps, dtype=np.float32), num_rows)
 
         active_selected = flat_active[selected]
         outcome_selected = flat_outcomes[selected]
@@ -527,6 +561,14 @@ def load_plan_q_prefix_strategy_dataset(
             action_weight = np.ones_like(outcome_selected, dtype=np.bool_)
         if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
             action_weight = np.zeros_like(action_weight, dtype=np.bool_)
+        prefix_weight = action_weight.astype(np.float32)
+        selected_advantage = row_advantage[selected].astype(np.float32)
+        if prefix_advantage_weighting:
+            prefix_weight *= np.clip(selected_advantage / 0.5, 0.5, 4.0).astype(np.float32)
+        if prefix_step_decay > 0.0:
+            selected_step = row_step_index[selected].astype(np.float32)
+            prefix_weight *= np.exp(-np.log(2.0) * selected_step / prefix_step_decay).astype(np.float32)
+        flat_base_actions = np.argmax(np.where(flat_logits > -9999.0, flat_logits, -1.0e9), axis=1).astype(np.int32)
 
         domain_name = dataset_domain_name(path)
         domain_id = domain_to_id.setdefault(domain_name, len(domain_to_id))
@@ -545,7 +587,7 @@ def load_plan_q_prefix_strategy_dataset(
         chunks["target_heatmap"].append(heatmaps_from_indices(flat_targets[selected], active_selected))
         chunks["teacher_logits"].append(flat_logits[selected].astype(np.float32))
         chunks["teacher_action"].append(flat_labels[selected].astype(np.int32))
-        chunks["action_weight"].append(action_weight.astype(np.float32))
+        chunks["action_weight"].append(prefix_weight.astype(np.float32))
         chunks["grid_size"].append(row_grid_size[selected].astype(np.int32))
         chunks["seat"].append(row_seat[selected].astype(np.int32))
         chunks["domain"].append(np.full((selected.shape[0],), domain_id, dtype=np.int32))
@@ -554,6 +596,8 @@ def load_plan_q_prefix_strategy_dataset(
         chunks["search_scores"].append(np.full((selected.shape[0], 1), -1.0e4, dtype=np.float32))
         chunks["search_outcomes"].append(np.full((selected.shape[0], 1), -1, dtype=np.int32))
         chunks["search_score_gap"].append(row_gap[selected].astype(np.float32))
+        chunks["prefix_weight"].append(prefix_weight.astype(np.float32))
+        chunks["prefix_base_action"].append(flat_base_actions[selected].astype(np.int32))
 
     if not chunks["obs"]:
         raise ValueError("row filters kept no Plan-Q prefix strategy samples")
@@ -802,6 +846,8 @@ def train_step(
     value_target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    prefix_pairwise_margin_weight: float,
+    prefix_pairwise_margin: float,
     q_kl_weight: float,
     q_action_ce_weight: float,
     search_q_rank_weight: float,
@@ -835,6 +881,8 @@ def train_step(
         teacher_logits,
         teacher_actions,
         action_weights,
+        prefix_weights,
+        prefix_base_actions,
         search_candidate_indices,
         search_prior_scores,
         search_scores,
@@ -944,7 +992,9 @@ def train_step(
         policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
         action_ce = jnp.asarray(0.0, dtype=jnp.float32)
         teacher_action_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
-        if policy_kl_weight > 0.0 or action_ce_weight > 0.0:
+        prefix_pairwise_margin_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        prefix_pairwise_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        if policy_kl_weight > 0.0 or action_ce_weight > 0.0 or prefix_pairwise_margin_weight > 0.0:
             student_logits = jax.vmap(lambda o, m, a: net.logits_value(o, m, a)[0])(obs, masks, active)
             masked_teacher_logits = jnp.where(teacher_legal, teacher_logits, -1.0e9)
             teacher_log_probs = jax.nn.log_softmax(masked_teacher_logits, axis=-1)
@@ -959,6 +1009,20 @@ def train_step(
             teacher_action_accuracy = jnp.sum(
                 (jnp.argmax(student_logits, axis=-1) == teacher_actions).astype(jnp.float32) * action_weights
             ) / action_normalizer
+            if prefix_pairwise_margin_weight > 0.0:
+                action_count = student_logits.shape[-1]
+                safe_teacher_actions = jnp.clip(teacher_actions, 0, action_count - 1)
+                safe_base_actions = jnp.clip(prefix_base_actions, 0, action_count - 1)
+                accepted_logits = student_logits[jnp.arange(student_logits.shape[0]), safe_teacher_actions]
+                base_logits = student_logits[jnp.arange(student_logits.shape[0]), safe_base_actions]
+                pair_valid = (safe_teacher_actions != safe_base_actions).astype(jnp.float32)
+                pair_weights = prefix_weights * pair_valid
+                pair_losses = jax.nn.softplus(prefix_pairwise_margin - (accepted_logits - base_logits))
+                pair_normalizer = jnp.maximum(jnp.sum(pair_weights), 1.0)
+                prefix_pairwise_margin_loss = jnp.sum(pair_losses * pair_weights) / pair_normalizer
+                prefix_pairwise_accuracy = jnp.sum(
+                    ((accepted_logits > base_logits).astype(jnp.float32)) * pair_weights
+                ) / pair_normalizer
 
         q_policy_kl = jnp.asarray(0.0, dtype=jnp.float32)
         q_action_ce = jnp.asarray(0.0, dtype=jnp.float32)
@@ -1034,6 +1098,7 @@ def train_step(
             + value_target_weight * value_target_loss
             + policy_kl_weight * policy_kl
             + action_ce_weight * action_ce
+            + prefix_pairwise_margin_weight * prefix_pairwise_margin_loss
             + q_kl_weight * q_policy_kl
             + q_action_ce_weight * q_action_ce
             + search_q_rank_weight * search_q_rank_loss
@@ -1049,6 +1114,7 @@ def train_step(
             "value_target_loss": value_target_loss,
             "policy_kl": policy_kl,
             "action_ce": action_ce,
+            "prefix_pairwise_margin_loss": prefix_pairwise_margin_loss,
             "q_policy_kl": q_policy_kl,
             "q_action_ce": q_action_ce,
             "search_q_rank_loss": search_q_rank_loss,
@@ -1060,6 +1126,7 @@ def train_step(
             "outcome_accuracy": outcome_accuracy,
             "value_target_mae": value_target_mae,
             "teacher_action_accuracy": teacher_action_accuracy,
+            "prefix_pairwise_accuracy": prefix_pairwise_accuracy,
             "q_action_accuracy": q_action_accuracy,
             "search_q_rank_accuracy": search_q_rank_accuracy,
             "search_q_value_accuracy": search_q_value_accuracy,
@@ -1070,6 +1137,7 @@ def train_step(
             "outcome_weight_mean": jnp.mean(outcome_weights),
             "value_target_weight_mean": jnp.mean(outcome_weights),
             "action_weight_mean": jnp.mean(action_weights),
+            "prefix_weight_mean": jnp.mean(prefix_weights),
             "search_q_weight_mean": search_q_weight_mean,
             "search_q_value_weight_mean": search_q_value_weight_mean,
         }
@@ -1103,6 +1171,8 @@ def train_epoch(
     value_target_weight: float,
     policy_kl_weight: float,
     action_ce_weight: float,
+    prefix_pairwise_margin_weight: float,
+    prefix_pairwise_margin: float,
     q_kl_weight: float,
     q_action_ce_weight: float,
     search_q_rank_weight: float,
@@ -1145,6 +1215,8 @@ def train_epoch(
             dataset["teacher_logits"][idx],
             dataset["teacher_action"][idx],
             dataset["action_weight"][idx],
+            dataset["prefix_weight"][idx],
+            dataset["prefix_base_action"][idx],
             dataset["search_candidate_indices"][idx],
             dataset["search_prior_scores"][idx],
             dataset["search_scores"][idx],
@@ -1163,6 +1235,8 @@ def train_epoch(
             value_target_weight,
             policy_kl_weight,
             action_ce_weight,
+            prefix_pairwise_margin_weight,
+            prefix_pairwise_margin,
             q_kl_weight,
             q_action_ce_weight,
             search_q_rank_weight,
@@ -1288,6 +1362,36 @@ def parse_args():
     parser.add_argument("--balance-outcome-labels", action="store_true")
     parser.add_argument("--policy-kl-weight", type=float, default=0.0)
     parser.add_argument("--action-ce-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--prefix-pairwise-margin-weight",
+        type=float,
+        default=0.0,
+        help="For Plan-Q prefix rows, rank accepted executed-prefix action above base-policy action.",
+    )
+    parser.add_argument("--prefix-pairwise-margin", type=float, default=1.0)
+    parser.add_argument(
+        "--prefix-advantage-weighting",
+        action="store_true",
+        help="Scale Plan-Q prefix imitation weights by clipped plan_advantage / 0.5.",
+    )
+    parser.add_argument(
+        "--prefix-step-decay",
+        type=float,
+        default=0.0,
+        help="Half-life in prefix steps for weighting earlier executed-prefix actions; 0 disables.",
+    )
+    parser.add_argument(
+        "--prefix-negative-weight",
+        type=float,
+        default=0.0,
+        help="Reserved for rejected-prefix labels; currently accepted for command compatibility and kept at zero effect.",
+    )
+    parser.add_argument(
+        "--require-plan-advantage",
+        type=float,
+        default=0.0,
+        help="For Plan-Q prefix rows, keep only rows with saved plan_advantage at least this value.",
+    )
     parser.add_argument("--action-ce-weight-mode", choices=ACTION_CE_WEIGHT_MODES, default="all")
     parser.add_argument(
         "--action-ce-path-contains",
@@ -1396,6 +1500,8 @@ def parse_args():
             args.value_target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.prefix_pairwise_margin_weight,
+            args.prefix_negative_weight,
             args.q_kl_weight,
             args.q_action_ce_weight,
             args.search_q_rank_weight,
@@ -1425,6 +1531,16 @@ def parse_args():
             parser.error("--no-strategy-aux requires auxiliary/Q/source/target loss weights to be 0")
     if args.search_q_temperature <= 0.0:
         parser.error("--search-q-temperature must be positive")
+    if args.prefix_pairwise_margin_weight < 0.0:
+        parser.error("--prefix-pairwise-margin-weight must be non-negative")
+    if args.prefix_pairwise_margin < 0.0:
+        parser.error("--prefix-pairwise-margin must be non-negative")
+    if args.prefix_step_decay < 0.0:
+        parser.error("--prefix-step-decay must be non-negative")
+    if args.prefix_negative_weight < 0.0:
+        parser.error("--prefix-negative-weight must be non-negative")
+    if args.require_plan_advantage < 0.0:
+        parser.error("--require-plan-advantage must be non-negative")
     if args.search_q_score_scale <= 0.0:
         parser.error("--search-q-score-scale must be positive")
     if args.search_q_outcome_score_weight < 0.0:
@@ -1459,6 +1575,9 @@ def main():
             args.require_outcome_nonwin,
             args.min_search_score_gap,
             args.min_teacher_action_logit_margin,
+            args.require_plan_advantage,
+            args.prefix_advantage_weighting,
+            args.prefix_step_decay,
             not args.keep_pass_prefix_labels,
             True,
         )
@@ -1504,6 +1623,9 @@ def main():
             False,
             args.min_search_score_gap,
             args.min_teacher_action_logit_margin,
+            args.require_plan_advantage,
+            args.prefix_advantage_weighting,
+            args.prefix_step_decay,
             not args.keep_pass_prefix_labels,
             True,
         )
@@ -1552,6 +1674,8 @@ def main():
         f"balance_finish={args.balance_finish_labels}, balance_outcome={args.balance_outcome_labels}, "
         f"policy_kl={args.policy_kl_weight:g}, action_ce={args.action_ce_weight:g}, "
         f"action_ce_mode={args.action_ce_weight_mode}, "
+        f"prefix_pair={args.prefix_pairwise_margin_weight:g}, "
+        f"prefix_adv_weight={args.prefix_advantage_weighting}, prefix_step_decay={args.prefix_step_decay:g}, "
         f"q_kl={args.q_kl_weight:g}, q_action_ce={args.q_action_ce_weight:g}, "
         f"search_q_rank={args.search_q_rank_weight:g}, search_q_temp={args.search_q_temperature:g}, "
         f"search_q_value={args.search_q_value_weight:g}, search_q_score_scale={args.search_q_score_scale:g}, "
@@ -1621,6 +1745,8 @@ def main():
             args.value_target_weight,
             args.policy_kl_weight,
             args.action_ce_weight,
+            args.prefix_pairwise_margin_weight,
+            args.prefix_pairwise_margin,
             args.q_kl_weight,
             args.q_action_ce_weight,
             args.search_q_rank_weight,
@@ -1649,6 +1775,8 @@ def main():
             f"KL {float(metrics['policy_kl']):.4f} | "
             f"ActCE {float(metrics['action_ce']):.4f}/{float(metrics['teacher_action_accuracy']) * 100:5.1f}% | "
             f"ActW {float(metrics['action_weight_mean']):.3f} | "
+            f"Pair {float(metrics['prefix_pairwise_margin_loss']):.4f}/{float(metrics['prefix_pairwise_accuracy']) * 100:5.1f}% | "
+            f"PW {float(metrics['prefix_weight_mean']):.3f} | "
             f"QKL {float(metrics['q_policy_kl']):.4f} | "
             f"QCE {float(metrics['q_action_ce']):.4f}/{float(metrics['q_action_accuracy']) * 100:5.1f}% | "
             f"SQ {float(metrics['search_q_rank_loss']):.4f}/{float(metrics['search_q_rank_accuracy']) * 100:5.1f}% | "
