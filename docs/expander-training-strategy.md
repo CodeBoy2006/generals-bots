@@ -15639,90 +15639,6 @@ Next high-leverage step:
   avoid another tiny full-replace policy-head CE pass
 ```
 
-### 2026-06-20 23:42 - Online-Search Gate Hook and Negative First Gate
-
-Implementation:
-
-```text
-adaptive_online_search_gate_supervised.py:
-  trains a CommandGateNetwork from online-search trace shards
-  features:
-    search score stats, prior score stats, best prior rank,
-    fallback prior, best-minus-fallback prior, action-changed flag,
-    normalized time, seat, active fraction, visible enemy density, contact
-
-evaluate_adaptive_policy.py:
-  adds --online-search-gate-path
-  adds --online-search-gate-threshold
-  adds --online-search-gate-hidden-dim
-  gate runs after online search has scored candidates
-  if gate probability < threshold, fallback to the original policy action
-```
-
-This is a risk filter, not a compute-saving controller: it still pays the full
-online-search cost before deciding whether to accept the search action.
-
-Training:
-
-```text
-model:
-  runs/adaptive-online-search-gate-rpa2-improve-v0/
-    generals-adaptive-online-search-gate-rpa2-improve-v0.eqx
-
-datasets:
-  runs/adaptive-online-search-fixed-v5-max500-rpa2-v0/*.npz
-  runs/adaptive-online-search-fixed-v5-max500-rpa2-conversion-smoke/*.npz
-
-positive:
-  search_improves_continuation
-
-filters:
-  require_search_used
-  require_action_changed
-
-examples:
-  rows 972
-  kept changed-action examples 605
-  positives 84 = 13.88%
-
-final offline:
-  loss 0.6252
-  acc 68.9%
-  precision 27.0%
-  recall 64.0%
-  P+ 0.538
-  P- 0.415
-```
-
-Fixed-v5 max500, 128 games/seat, seed `104600`:
-
-```text
-gated rpa2, threshold 0.5:
-  p0 57.03%
-  p1 61.72%
-  min 57.03%
-  draw 7.03% / 7.03%
-
-ungated rpa2, same seed:
-  p0 64.06%
-  p1 58.59%
-  min 58.59%
-  draw 6.25% / 7.81%
-```
-
-Decision:
-
-```text
-Do not promote the first online-search gate.  It shifts strength from p0 to p1
-and lowers the same-seed min row.  The hook is useful because it gives us a
-runtime controller path for search actions, but the current 17-feature MLP is
-not enough to improve rpa2.  Next controller work should either:
-
-  1. train on a much larger rpa2 trace set,
-  2. add richer state/action features beyond score/prior statistics, or
-  3. move from post-search accept/reject to a cheaper pre-search entry policy.
-```
-
 ### 2026-06-20 23:15 - rpa2 Max500 Trace v1 and Offline Gate Negative
 
 Scaled the rpa2 fixed-v5 max500 trace collection from the first four shards to a
@@ -15816,4 +15732,177 @@ imprecise to control when to accept search actions.  The next controller should
 use richer state, route, model-embedding, or candidate-action features, or bypass
 gating by training a planner-aware conditional action head from the conversion
 rows.
+```
+
+### 2026-06-20 23:42 - Online-Search Gate Hook and Negative First Gate
+
+Implementation:
+
+```text
+adaptive_online_search_gate_supervised.py:
+  trains a CommandGateNetwork from online-search trace shards
+  features:
+    search score stats, prior score stats, best prior rank,
+    fallback prior, best-minus-fallback prior, action-changed flag,
+    normalized time, seat, active fraction, visible enemy density, contact
+
+evaluate_adaptive_policy.py:
+  adds --online-search-gate-path
+  adds --online-search-gate-threshold
+  adds --online-search-gate-hidden-dim
+  gate runs after online search has scored candidates
+  if gate probability < threshold, fallback to the original policy action
+```
+
+This is a risk filter, not a compute-saving controller: it still pays the full
+online-search cost before deciding whether to accept the search action.
+
+Training:
+
+```text
+model:
+  runs/adaptive-online-search-gate-rpa2-improve-v0/
+    generals-adaptive-online-search-gate-rpa2-improve-v0.eqx
+
+datasets:
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-v0/*.npz
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-conversion-smoke/*.npz
+
+positive:
+  search_improves_continuation
+
+filters:
+  require_search_used
+  require_action_changed
+
+examples:
+  rows 972
+  kept changed-action examples 605
+  positives 84 = 13.88%
+
+final offline:
+  loss 0.6252
+  acc 68.9%
+  precision 27.0%
+  recall 64.0%
+  P+ 0.538
+  P- 0.415
+```
+
+Fixed-v5 max500, 128 games/seat, seed `104600`:
+
+```text
+gated rpa2, threshold 0.5:
+  p0 57.03%
+  p1 61.72%
+  min 57.03%
+  draw 7.03% / 7.03%
+
+ungated rpa2, same seed:
+  p0 64.06%
+  p1 58.59%
+  min 58.59%
+  draw 6.25% / 7.81%
+```
+
+Decision:
+
+```text
+Do not promote the first online-search gate.  It shifts strength from p0 to p1
+and lowers the same-seed min row.  The hook is useful because it gives us a
+runtime controller path for search actions, but the current 17-feature MLP is
+not enough to improve rpa2.  Next controller work should either:
+
+  1. train on a much larger rpa2 trace set,
+  2. add richer state/action features beyond score/prior statistics, or
+  3. move from post-search accept/reject to a cheaper pre-search entry policy.
+```
+
+### 2026-06-20 23:50 - rpa2 Online-Search Candidate Scorer
+
+Added:
+
+```text
+examples/_experimental/ppo/adaptive_online_search_candidate_scorer.py
+```
+
+This is a richer offline controller probe than the 17-feature accept/reject
+gate.  Instead of predicting "accept search or not", it learns the top-k
+candidate ordering directly from observation/action-local features:
+
+```text
+candidate prior and prior rank
+candidate-vs-base prior delta and base-action indicator
+pass / half / direction / source / destination geometry
+source/destination active, legal, army, ownership, city, fog, visible enemy
+capture-margin approximations
+time, seat, active area, visible enemy density, contact
+source/destination local observation channels
+```
+
+Important bug caught during the probe:
+
+```text
+An initial version included candidate_is_search_action, which is label leakage
+because it directly marks the online-search-selected action.  The 98% validation
+top1 result from that leaked run is invalid.  The feature was removed before the
+results below.
+```
+
+GPU diagnostics on rpa2 v0+v1:
+
+```text
+all changed rows, soft rank:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-v1/
+  rows: 1317
+  prior top1/top2: 1.14% / 40.68% on validation split
+  best epoch: 7
+  val top1: 37.26%
+  val top2: 70.34%
+  val pair: 57.70%
+
+all changed rows, soft rank + hard-best CE:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-hard-v0/
+  rows: 1317
+  prior top1/top2: 0.38% / 36.12% on validation split
+  best epoch: 80
+  val top1: 38.78%
+  val top2: 69.96%
+  val pair: 59.94%
+
+strict search_converts_to_win rows, soft rank:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-v0/
+  rows: 101
+  prior top1/top2: 0.00% / 45.00% on validation split
+  best epoch: 38
+  val top1: 55.00%
+  val top2: 70.00%
+  val pair: 60.00%
+
+search_improves_continuation rows, soft rank:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-improve-v0/
+  rows: 174
+  prior top1/top2: 0.00% / 34.29% on validation split
+  best epoch: 36
+  val top1: 42.86%
+  val top2: 60.00%
+  val pair: 57.14%
+
+strict search_converts_to_win rows, hard-best CE:
+  model: runs/adaptive-online-search-candidate-scorer-rpa2-convert-hard-v0/
+  rows: 101
+  best val top1: 30.00%
+  final val top1: 10.00%
+```
+
+Decision:
+
+```text
+The richer candidate scorer has real signal and is materially better than
+score/prior-only gating, but it is not ready for direct gameplay integration.
+The strongest clean signal is on strict conversion rows with soft-rank
+supervision, not hard-best CE.  Next step should collect more strict conversion
+rows and train a planner-aware conditional action head or candidate scorer from
+those positives, then only wire evaluator inference after validation top1/top2
+is stable on independent shards/seeds.
 ```
