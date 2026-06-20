@@ -1472,3 +1472,15 @@
 - **Status:** Completed
 - **Next Steps:** Stop adding standalone scorer features. Train a U-Net-internal conditional action or policy-adapter head from strict max500 conversion rows so the planner signal can enter the policy head directly.
 - **Context:** The v4 trunk path loaded `runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx` as U-Net `64,96,128,64`, 35 input channels, shared HL-Gauss value. On v0+v1+v2-small -> v3-small (`217` train / `193` validation strict conversions), trunk-v0 reached only top1/top2/pair `32.12%/58.03%/51.82%`; smaller MLP `30.05%/60.10%/53.16%`; trunk with `local_channels=0` recovered `35.75%/66.32%/56.40%`; trunk+heatmap+local0 was `34.72%/62.69%/54.58%`. Frozen point features do not beat the plain/heatmap scorer enough to justify gameplay integration.
+
+## [2026-06-21 00:18] Strategy Supervised Validation Gate
+- **Changes:** Added `adaptive_strategy_supervised.py --val-dataset`, validation caps, `--selection-metric`, `.best.eqx` saving, JSON summaries, and ceil-batch epoch coverage; ran strict max500 one-step policy-head and strategy-Q probes.
+- **Status:** Completed
+- **Next Steps:** Stop one-step strict-conversion CE/Q distillation. Collect or train on executed-prefix / multi-step conditional action data so the model learns a short option, not just a replacement first action.
+- **Context:** Policy-head CE and policy-head top-k rank both stayed at `15.79%` independent holdout top1 on v4-convert. Strategy-Q rank reached `57.89%` holdout top1, but fixed-v5 max500 64 games/seat Q replacement regressed from same-seed base min `31.25%` to `25.00%`. The validation infrastructure is useful; the one-step label family is not enough.
+
+## [2026-06-21 00:30] v1-Init Max500 Policy-Head Fine-Tune
+- **Changes:** Trained `runs/adaptive-online-search-conversion-adapter-v1-rpa2-ft-v0/` from the static conversion adapter v1 using rpa2 max500 strict-conversion rows with independent validation and evaluated fixed-v5/Expander gates.
+- **Status:** Completed
+- **Next Steps:** Do not promote this fine-tune. Keep static conversion adapter v1 as the cheap max500 adapter baseline; next work should use executed-prefix option data or a separate conditional action/adapter head instead of overwriting the base policy head with one-step search actions.
+- **Context:** The fine-tune showed a 128 games/seat fixed-v5 max500 min of `39.06%`, but at 256 games/seat seed `120320` it scored `33.59%` min versus same-seed static v1 `36.72%`. Expander max750 128-row min was `78.12%`, so the failure is fixed-v5 conversion quality rather than catastrophic Expander forgetting.

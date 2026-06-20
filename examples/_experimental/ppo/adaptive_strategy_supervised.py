@@ -62,6 +62,18 @@ LABEL_SOURCE_MODES = (
     "search-continuation",
     "search-continuation-or-trajectory",
 )
+SELECTION_METRICS = (
+    "auto",
+    "loss",
+    "teacher_action_accuracy",
+    "search_policy_rank_accuracy",
+    "prefix_pairwise_accuracy",
+    "q_action_accuracy",
+    "search_q_rank_accuracy",
+    "search_q_value_accuracy",
+    "finish_accuracy",
+    "outcome_accuracy",
+)
 
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
@@ -1385,7 +1397,7 @@ def train_epoch(
     """Shuffle one full pass over the loaded shards."""
     num_samples = dataset["obs"].shape[0]
     permutation = jrandom.permutation(key, num_samples)
-    num_batches = max(num_samples // minibatch_size, 1)
+    num_batches = max((num_samples + minibatch_size - 1) // minibatch_size, 1)
     metrics_sum = None
     loss_sum = 0.0
     for batch_index in range(num_batches):
@@ -1452,9 +1464,218 @@ def train_epoch(
     return network, opt_state, loss_sum / num_batches, jax.tree.map(lambda value: value / num_batches, metrics_sum)
 
 
+def evaluate_epoch(
+    network,
+    opt_state,
+    dataset,
+    optimizer,
+    minibatch_size: int,
+    intent_weight: float,
+    finish_weight: float,
+    belief_weight: float,
+    outcome_weight: float,
+    value_target_weight: float,
+    policy_kl_weight: float,
+    action_ce_weight: float,
+    search_policy_rank_weight: float,
+    prefix_pairwise_margin_weight: float,
+    prefix_pairwise_margin: float,
+    q_kl_weight: float,
+    q_action_ce_weight: float,
+    search_q_rank_weight: float,
+    search_q_temperature: float,
+    search_q_value_weight: float,
+    search_q_score_scale: float,
+    search_q_outcome_score_weight: float,
+    source_weight: float,
+    target_weight: float,
+    balance_finish_labels: bool,
+    balance_outcome_labels: bool,
+    freeze_base: bool,
+    train_value_bottleneck: bool,
+    train_value_heads: bool,
+    train_policy_head: bool,
+    multi_horizon_finish: bool,
+):
+    """Evaluate one pass without mutating the caller's network.
+
+    This intentionally reuses ``train_step`` and discards the returned updated
+    tree.  It costs a backward pass, but keeps the validation path exactly
+    aligned with the training objective while these datasets are still small.
+    """
+    num_samples = dataset["obs"].shape[0]
+    num_batches = max((num_samples + minibatch_size - 1) // minibatch_size, 1)
+    metrics_sum = None
+    loss_sum = 0.0
+    for batch_index in range(num_batches):
+        start = batch_index * minibatch_size
+        end = min(start + minibatch_size, num_samples)
+        idx = jnp.arange(start, end)
+        batch = (
+            dataset["obs"][idx],
+            dataset["legal_mask"][idx],
+            dataset["active"][idx],
+            dataset["intent"][idx],
+            dataset["finish"][idx],
+            dataset["finish_weight"][idx],
+            dataset["outcome"][idx],
+            dataset["outcome_weight"][idx],
+            dataset["enemy_general"][idx],
+            dataset["source_heatmap"][idx],
+            dataset["target_heatmap"][idx],
+            dataset["teacher_logits"][idx],
+            dataset["teacher_action"][idx],
+            dataset["action_weight"][idx],
+            dataset["prefix_weight"][idx],
+            dataset["prefix_base_action"][idx],
+            dataset["search_candidate_indices"][idx],
+            dataset["search_prior_scores"][idx],
+            dataset["search_scores"][idx],
+            dataset["search_outcomes"][idx],
+            dataset["search_score_gap"][idx],
+        )
+        _, _, loss, metrics = train_step(
+            network,
+            opt_state,
+            batch,
+            optimizer,
+            intent_weight,
+            finish_weight,
+            belief_weight,
+            outcome_weight,
+            value_target_weight,
+            policy_kl_weight,
+            action_ce_weight,
+            search_policy_rank_weight,
+            prefix_pairwise_margin_weight,
+            prefix_pairwise_margin,
+            q_kl_weight,
+            q_action_ce_weight,
+            search_q_rank_weight,
+            search_q_temperature,
+            search_q_value_weight,
+            search_q_score_scale,
+            search_q_outcome_score_weight,
+            source_weight,
+            target_weight,
+            balance_finish_labels,
+            balance_outcome_labels,
+            freeze_base,
+            train_value_bottleneck,
+            train_value_heads,
+            train_policy_head,
+            multi_horizon_finish,
+        )
+        loss_sum += loss
+        metrics_sum = metrics if metrics_sum is None else jax.tree.map(lambda a, b: a + b, metrics_sum, metrics)
+    return loss_sum / num_batches, jax.tree.map(lambda value: value / num_batches, metrics_sum)
+
+
+def selection_metric_name(args) -> str:
+    """Choose a validation metric that matches the active policy signal."""
+    if args.selection_metric != "auto":
+        return args.selection_metric
+    if args.prefix_pairwise_margin_weight > 0.0:
+        return "prefix_pairwise_accuracy"
+    if args.action_ce_weight > 0.0:
+        return "teacher_action_accuracy"
+    if args.search_policy_rank_weight > 0.0:
+        return "search_policy_rank_accuracy"
+    if args.q_action_ce_weight > 0.0:
+        return "q_action_accuracy"
+    if args.search_q_rank_weight > 0.0:
+        return "search_q_rank_accuracy"
+    if args.search_q_value_weight > 0.0:
+        return "search_q_value_accuracy"
+    if args.finish_weight > 0.0:
+        return "finish_accuracy"
+    if args.outcome_weight > 0.0:
+        return "outcome_accuracy"
+    return "loss"
+
+
+def metric_score(loss, metrics, metric_name: str) -> float:
+    """Convert a validation metric to a larger-is-better scalar."""
+    if metric_name == "loss":
+        return -float(loss)
+    return float(metrics[metric_name])
+
+
+def load_primary_dataset_for_args(
+    args,
+    paths: list[Path],
+    max_samples: int | None,
+    max_samples_per_shard: int | None,
+    seed: int,
+):
+    """Load the main dataset format with the CLI-selected filters."""
+    if args.dataset_format == "plan-q-prefix":
+        return load_plan_q_prefix_strategy_dataset(
+            paths,
+            max_samples,
+            max_samples_per_shard,
+            seed,
+            args.finish_head_mode,
+            args.action_ce_weight_mode,
+            tuple(args.action_ce_path_contains),
+            args.min_row_turn,
+            args.max_row_turn,
+            args.require_outcome_win,
+            args.require_outcome_draw,
+            args.require_outcome_nonwin,
+            args.min_search_score_gap,
+            args.min_teacher_action_logit_margin,
+            args.require_plan_advantage,
+            args.prefix_advantage_weighting,
+            args.prefix_step_decay,
+            not args.keep_pass_prefix_labels,
+            True,
+        )
+    return load_strategy_dataset(
+        paths,
+        max_samples,
+        max_samples_per_shard,
+        seed,
+        args.finish_head_mode,
+        args.action_ce_weight_mode,
+        args.label_source,
+        tuple(args.action_ce_path_contains),
+        args.min_row_turn,
+        args.max_row_turn,
+        args.require_contact,
+        args.min_visible_enemy_cells,
+        args.min_visible_enemy_density,
+        args.require_outcome_win,
+        args.require_outcome_draw,
+        args.require_outcome_nonwin,
+        args.require_search_best_win,
+        args.require_search_used,
+        args.require_search_action_changed,
+        args.require_search_improves_continuation,
+        args.require_search_converts_to_win,
+        args.require_adapter_action_changed,
+        args.require_adapter_improves_continuation,
+        args.require_adapter_converts_to_win,
+        args.require_finish_within_250,
+        args.require_win_or_finish_within_250,
+        args.require_finish_within_500,
+        args.require_win_or_finish_within_500,
+        args.min_search_score_gap,
+        args.finish_target_horizon,
+        args.online_action_field,
+        True,
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train adaptive strategy auxiliary heads from NPZ shards.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
+    parser.add_argument(
+        "--val-dataset",
+        action="append",
+        default=[],
+        help="Independent NPZ shard path or glob for validation/best-checkpoint selection. Repeatable.",
+    )
     parser.add_argument(
         "--dataset-format",
         choices=DATASET_FORMAT_MODES,
@@ -1469,6 +1690,8 @@ def parse_args():
     )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-shard", type=int, default=None)
+    parser.add_argument("--max-val-samples", type=int, default=None)
+    parser.add_argument("--max-val-samples-per-shard", type=int, default=None)
     parser.add_argument("--min-row-turn", type=int, default=0)
     parser.add_argument("--max-row-turn", type=int, default=None)
     parser.add_argument("--require-contact", action="store_true")
@@ -1555,6 +1778,12 @@ def parse_args():
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument(
+        "--selection-metric",
+        choices=SELECTION_METRICS,
+        default="auto",
+        help="Validation metric used for .best checkpoint selection; auto picks the active policy/rank signal.",
+    )
     parser.add_argument(
         "--update-scope",
         choices=("strategy-heads", "strategy-value-heads", "policy-heads", "all"),
@@ -1677,6 +1906,10 @@ def parse_args():
         parser.error("--max-samples must be positive")
     if args.max_samples_per_shard is not None and args.max_samples_per_shard <= 0:
         parser.error("--max-samples-per-shard must be positive")
+    if args.max_val_samples is not None and args.max_val_samples <= 0:
+        parser.error("--max-val-samples must be positive")
+    if args.max_val_samples_per_shard is not None and args.max_val_samples_per_shard <= 0:
+        parser.error("--max-val-samples-per-shard must be positive")
     if args.min_row_turn < 0:
         parser.error("--min-row-turn must be non-negative")
     if args.max_row_turn is not None and args.max_row_turn < args.min_row_turn:
@@ -1809,63 +2042,13 @@ def parse_args():
 def main():
     args = parse_args()
     paths = expand_dataset_paths(args.dataset)
-    if args.dataset_format == "plan-q-prefix":
-        dataset, load_stats = load_plan_q_prefix_strategy_dataset(
-            paths,
-            args.max_samples,
-            args.max_samples_per_shard,
-            args.seed,
-            args.finish_head_mode,
-            args.action_ce_weight_mode,
-            tuple(args.action_ce_path_contains),
-            args.min_row_turn,
-            args.max_row_turn,
-            args.require_outcome_win,
-            args.require_outcome_draw,
-            args.require_outcome_nonwin,
-            args.min_search_score_gap,
-            args.min_teacher_action_logit_margin,
-            args.require_plan_advantage,
-            args.prefix_advantage_weighting,
-            args.prefix_step_decay,
-            not args.keep_pass_prefix_labels,
-            True,
-        )
-    else:
-        dataset, load_stats = load_strategy_dataset(
-            paths,
-            args.max_samples,
-            args.max_samples_per_shard,
-            args.seed,
-            args.finish_head_mode,
-            args.action_ce_weight_mode,
-            args.label_source,
-            tuple(args.action_ce_path_contains),
-            args.min_row_turn,
-            args.max_row_turn,
-            args.require_contact,
-            args.min_visible_enemy_cells,
-            args.min_visible_enemy_density,
-            args.require_outcome_win,
-            args.require_outcome_draw,
-            args.require_outcome_nonwin,
-            args.require_search_best_win,
-            args.require_search_used,
-            args.require_search_action_changed,
-            args.require_search_improves_continuation,
-            args.require_search_converts_to_win,
-            args.require_adapter_action_changed,
-            args.require_adapter_improves_continuation,
-            args.require_adapter_converts_to_win,
-            args.require_finish_within_250,
-            args.require_win_or_finish_within_250,
-            args.require_finish_within_500,
-            args.require_win_or_finish_within_500,
-            args.min_search_score_gap,
-            args.finish_target_horizon,
-            args.online_action_field,
-            True,
-        )
+    dataset, load_stats = load_primary_dataset_for_args(
+        args,
+        paths,
+        args.max_samples,
+        args.max_samples_per_shard,
+        args.seed,
+    )
     extra_load_stats = []
     if args.extra_plan_q_prefix_dataset:
         extra_paths = expand_dataset_paths(args.extra_plan_q_prefix_dataset)
@@ -1894,6 +2077,26 @@ def main():
         extra_load_stats.append({"paths": len(extra_paths), **extra_stats})
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
     dataset = apply_seat_loss_multipliers(dataset, args.seat_loss_multipliers)
+    val_dataset = None
+    val_load_stats = None
+    val_paths: list[Path] = []
+    if args.val_dataset:
+        val_paths = expand_dataset_paths(args.val_dataset)
+        val_dataset, val_load_stats = load_primary_dataset_for_args(
+            args,
+            val_paths,
+            args.max_val_samples,
+            args.max_val_samples_per_shard,
+            args.seed + 1,
+        )
+        for name, value in dataset.items():
+            if name not in val_dataset:
+                raise ValueError(f"--val-dataset is missing field {name}")
+            if value.shape[1:] != val_dataset[name].shape[1:]:
+                raise ValueError(
+                    f"--val-dataset field {name} has incompatible shape "
+                    f"{val_dataset[name].shape[1:]} != {value.shape[1:]}"
+                )
     if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:
         raise ValueError("--label-source search-best requires shards with search_best_outcome labels")
     key = jrandom.PRNGKey(args.seed)
@@ -1913,10 +2116,18 @@ def main():
     if extra_load_stats:
         print(f"Extra prefix:  {sum(item['paths'] for item in extra_load_stats)} shards")
     print(f"Samples:       {dataset['obs'].shape[0]}")
+    if val_dataset is not None:
+        print(f"Val shards:    {len(val_paths)}")
+        print(f"Val samples:   {val_dataset['obs'].shape[0]}")
     print(
         "Row filters:   "
         f"kept={load_stats['kept']}/{load_stats['rows']}, sampled={load_stats['sampled']}"
     )
+    if val_load_stats is not None:
+        print(
+            "Val filters:   "
+            f"kept={val_load_stats['kept']}/{val_load_stats['rows']}, sampled={val_load_stats['sampled']}"
+        )
     if load_stats["filters"]:
         labels = [item["name"] for item in load_stats["filters"]]
         print(f"Filters:       {', '.join(dict.fromkeys(labels))}")
@@ -1933,6 +2144,9 @@ def main():
     print(f"Warm start:    {args.init_model_path}")
     print(f"Finish head:   {args.finish_head_mode} ({finish_outputs} logits)")
     print(f"Label source:  {args.label_source}")
+    metric_name = selection_metric_name(args)
+    if val_dataset is not None:
+        print(f"Best metric:   {metric_name}")
     print(
         "Loss weights:  "
         f"intent={args.intent_weight:g}, finish={args.finish_weight:g}, "
@@ -1996,6 +2210,11 @@ def main():
     optimizer = optax.adamw(args.lr, weight_decay=args.weight_decay)
     opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
 
+    best_network = network
+    best_epoch = 0
+    best_score = -float("inf")
+    best_val_loss = None
+    best_val_metrics = None
     for epoch in range(1, args.num_epochs + 1):
         t0 = time.time()
         key, epoch_key = jrandom.split(key)
@@ -2058,10 +2277,84 @@ def main():
             f"Tgt {float(metrics['target_loss']):.4f}/{float(metrics['target_accuracy']) * 100:5.1f}% | "
             f"Time {time.time() - t0:.2f}s"
         )
+        if val_dataset is not None:
+            val_loss, val_metrics = evaluate_epoch(
+                network,
+                opt_state,
+                val_dataset,
+                optimizer,
+                args.minibatch_size,
+                args.intent_weight,
+                args.finish_weight,
+                args.belief_weight,
+                args.outcome_weight,
+                args.value_target_weight,
+                args.policy_kl_weight,
+                args.action_ce_weight,
+                args.search_policy_rank_weight,
+                args.prefix_pairwise_margin_weight,
+                args.prefix_pairwise_margin,
+                args.q_kl_weight,
+                args.q_action_ce_weight,
+                args.search_q_rank_weight,
+                args.search_q_temperature,
+                args.search_q_value_weight,
+                args.search_q_score_scale,
+                args.search_q_outcome_score_weight,
+                args.source_weight,
+                args.target_weight,
+                args.balance_finish_labels,
+                args.balance_outcome_labels,
+                args.update_scope in ("strategy-heads", "strategy-value-heads", "policy-heads"),
+                args.update_scope == "strategy-value-heads",
+                args.value_target_weight > 0.0,
+                args.update_scope == "policy-heads",
+                args.finish_head_mode == "multi-horizon",
+            )
+            score = metric_score(val_loss, val_metrics, metric_name)
+            if score > best_score:
+                best_score = score
+                best_epoch = epoch
+                best_network = network
+                best_val_loss = val_loss
+                best_val_metrics = val_metrics
+            print(
+                f"           Val Loss {float(val_loss):.4f} | "
+                f"Finish {float(val_metrics['finish_loss']):.4f}/{float(val_metrics['finish_accuracy']) * 100:5.1f}% | "
+                f"Outcome {float(val_metrics['outcome_loss']):.4f}/{float(val_metrics['outcome_accuracy']) * 100:5.1f}% | "
+                f"KL {float(val_metrics['policy_kl']):.4f} | "
+                f"ActCE {float(val_metrics['action_ce']):.4f}/{float(val_metrics['teacher_action_accuracy']) * 100:5.1f}% | "
+                f"SP {float(val_metrics['search_policy_rank_loss']):.4f}/{float(val_metrics['search_policy_rank_accuracy']) * 100:5.1f}% | "
+                f"Pair {float(val_metrics['prefix_pairwise_margin_loss']):.4f}/{float(val_metrics['prefix_pairwise_accuracy']) * 100:5.1f}% | "
+                f"metric={metric_name}:{score:.4f}"
+            )
 
     Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, network)
     print(f"\nModel saved to: {args.model_path}")
+    if val_dataset is not None:
+        best_path = Path(args.model_path).with_name(Path(args.model_path).stem + ".best" + Path(args.model_path).suffix)
+        eqx.tree_serialise_leaves(best_path, best_network)
+        summary_path = Path(args.model_path).with_suffix(".json")
+        summary = {
+            "model_path": str(args.model_path),
+            "best_model_path": str(best_path),
+            "best_epoch": best_epoch,
+            "selection_metric": metric_name,
+            "best_score": best_score,
+            "train_samples": int(dataset["obs"].shape[0]),
+            "val_samples": int(val_dataset["obs"].shape[0]),
+            "train_load_stats": load_stats,
+            "val_load_stats": val_load_stats,
+        }
+        if best_val_loss is not None and best_val_metrics is not None:
+            summary["best_val_loss"] = float(best_val_loss)
+            summary["best_val_metrics"] = {
+                name: float(value) for name, value in best_val_metrics.items()
+            }
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"Best model:     {best_path} (epoch {best_epoch}, {metric_name}={best_score:.4f})")
+        print(f"Summary saved:  {summary_path}")
 
 
 if __name__ == "__main__":

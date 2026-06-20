@@ -16356,3 +16356,162 @@ should train a policy-internal conditional action/adapter head from the same
 max500 conversion rows, so gradients can reshape the U-Net policy head rather
 than asking a small external scorer to infer the planner from frozen features.
 ```
+
+### 2026-06-21 00:18 - Strategy-Supervised Independent Validation and One-Step Distillation Check
+
+Extended `adaptive_strategy_supervised.py` with independent validation support:
+
+```text
+--val-dataset
+--max-val-samples
+--max-val-samples-per-shard
+--selection-metric auto|loss|teacher_action_accuracy|...
+```
+
+The trainer now loads validation shards with the same row filters, prints val
+metrics each epoch, saves the final checkpoint plus `.best.eqx`, and writes a
+JSON summary next to the model.  Epoch batching was also changed from floor to
+ceil so small strict-conversion datasets no longer silently drop the tail rows.
+
+Strict max500 one-step probes used:
+
+```text
+train:
+  rpa2 v0 + rpa2 v1 + partial v2-convert + v3-convert
+  filters: search_used, search_action_changed, search_converts_to_win
+  rows: 145
+
+validation:
+  rpa2 v4-convert
+  rows: 19
+```
+
+Policy-head CE probe:
+
+```text
+model: runs/adaptive-online-search-policy-head-ce-indval-v0/
+scope: policy-heads only, no strategy aux
+loss: policy_kl=2.0, action_ce=0.3
+selection: teacher_action_accuracy
+best epoch: 1
+val top1: 15.79%
+```
+
+Policy-head top-k rank probe:
+
+```text
+model: runs/adaptive-online-search-policy-head-rank-indval-v0/
+scope: policy-heads only, no strategy aux
+loss: policy_kl=2.0, search_policy_rank=0.5
+selection: search_policy_rank_accuracy
+best epoch: 1
+val top1: 15.79%
+```
+
+Strategy-Q rank probe:
+
+```text
+model: runs/adaptive-online-search-strategy-q-indval-v0/
+scope: strategy heads only, policy unchanged
+loss: search_q_rank=1.0
+selection: search_q_rank_accuracy
+best epoch: 42
+val top1: 57.89%
+```
+
+Gameplay check, fixed-v5 max500, seed `106300`, 64 games/seat:
+
+```text
+q-replace:
+  model: adaptive-online-search-strategy-q-indval-v0.best
+  threshold: 0.0
+  policy_margin: 2.0
+  p0: 25.00%
+  p1: 28.12%
+  min: 25.00%
+
+same-seed base:
+  model: adaptive-unet-ppo-v4
+  p0: 35.94%
+  p1: 31.25%
+  min: 31.25%
+```
+
+Decision:
+
+```text
+Single-step strict-conversion labels still do not transfer into useful gameplay
+control.  Policy-head CE/rank cannot fit the independent holdout.  Strategy-Q
+can rank held-out conversion candidates, but Q replacement regresses fixed-v5
+max500 gameplay.  Stop enlarging one-step strict-conversion CE/Q experiments.
+The next useful branch is executed-prefix / multi-step option data or a true
+conditional action head that sees the selected plan over several steps.
+```
+
+### 2026-06-21 00:30 - v1-Init Strict-Conversion Policy-Head Fine-Tune
+
+Used the new validation path for a small adapter fine-tune initialized from the
+current static max500 conversion adapter:
+
+```text
+init:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+train:
+  rpa2 v0 + rpa2 v1 + rpa2 v2-small
+  filters: search_used, search_action_changed, search_converts_to_win
+  kept: 217 rows, oversampled to 258 rows
+
+validation:
+  rpa2 v3-small
+  kept: 193 rows
+
+loss:
+  policy_kl=1.0
+  action_ce=0.4
+  prefix_pairwise_margin=0.4
+  update_scope=policy-heads
+```
+
+The offline validation action accuracy stayed at `0%`; `.best.eqx` selected
+epoch 1.  The final checkpoint still changed gameplay enough to test:
+
+```text
+checkpoint:
+  runs/adaptive-online-search-conversion-adapter-v1-rpa2-ft-v0/
+    generals-adaptive-online-search-conversion-adapter-v1-rpa2-ft-v0.eqx
+
+fixed-v5 max500, 128 games/seat, seed120300:
+  p0: 39.06%
+  p1: 40.62%
+  min: 39.06%
+  adapter_diff: ~37%-38%
+
+fixed-v5 max500, 256 games/seat, seed120320:
+  p0: 33.59%
+  p1: 41.02%
+  min: 33.59%
+
+same-seed static v1 baseline, 256 games/seat, seed120320:
+  p0: 36.72%
+  p1: 39.45%
+  min: 36.72%
+
+Expander max750, 128 games/row, seed120340:
+  min: 78.12%
+  8x rows: 85.16%, 84.38%
+  12x/16x rows use base due size gate
+```
+
+Decision:
+
+```text
+Do not promote the v1-init fine-tune.  It has a noisy 128-row positive signal
+but fails the 256-row same-seed comparison against static v1.  This reinforces
+the previous conclusion: single-step max500 strict-conversion action labels are
+not enough, even when initialized from the current best static adapter.  The next
+implementation should add a separate conditional adapter/action head or move
+back to executed-prefix option data, keeping static v1 as the cheap adapter
+baseline and rpa2 online search as the teacher.
+```
