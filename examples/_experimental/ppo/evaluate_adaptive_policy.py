@@ -539,6 +539,7 @@ def online_search_action_policy_opponent(
     state,
     effective_size: int,
     key,
+    opponent_first_action: jnp.ndarray,
     policy_player: int,
     policy_mode: int,
     opponent_policy_mode: int,
@@ -593,14 +594,6 @@ def online_search_action_policy_opponent(
     prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
     candidate_actions = jax.vmap(lambda index: adaptive_index_to_action(index, pad_size))(candidate_indices)
     opponent_player = 1 - policy_player
-    opponent_obs = game.get_observation(state, opponent_player)
-    key, opponent_first_key = jrandom.split(key)
-    opponent_first_action = policy_network_action(
-        opponent_network,
-        opponent_first_key,
-        crop_observation(opponent_obs, effective_size),
-        opponent_policy_mode,
-    )
 
     def rollout_result(initial_state, rollout_key):
         def body(carry, _):
@@ -1526,6 +1519,14 @@ def evaluate_policy_opponent_batch(
         opponent_keys = jrandom.split(opponent_key, num_envs)
         pre_infos = jax.vmap(game.get_info)(states)
         active_decisions = (~pre_infos.is_done).astype(jnp.float32)
+        opponent_actions = jax.vmap(
+            lambda k, obs: policy_network_action(
+                opponent_network,
+                k,
+                crop_observation(obs, effective_size),
+                opponent_policy_mode,
+            )
+        )(opponent_keys, opponent_obs)
         policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
             lambda o, m, a, k, c: _policy_action(
                 network,
@@ -1578,7 +1579,7 @@ def evaluate_policy_opponent_batch(
             search_contact_allowed = visible_contact | (not online_search_require_contact)
             use_online_search = (~pre_infos.is_done) & search_turn_allowed & search_contact_allowed
             policy_actions = jax.vmap(
-                lambda state, sample_key, base_action, row_history, row_memory, use_search: jax.lax.cond(
+                lambda state, sample_key, base_action, opponent_action_value, row_history, row_memory, use_search: jax.lax.cond(
                     use_search,
                     lambda _: online_search_action_policy_opponent(
                         network,
@@ -1587,6 +1588,7 @@ def evaluate_policy_opponent_batch(
                         state,
                         effective_size,
                         sample_key,
+                        opponent_action_value,
                         policy_player,
                         policy_mode,
                         opponent_policy_mode,
@@ -1612,10 +1614,7 @@ def evaluate_policy_opponent_batch(
                     lambda _: base_action,
                     None,
                 )
-            )(states, search_keys, policy_actions, history, current_memory, use_online_search)
-        opponent_actions = jax.vmap(
-            lambda k, obs: policy_network_action(opponent_network, k, crop_observation(obs, effective_size), opponent_policy_mode)
-        )(opponent_keys, opponent_obs)
+            )(states, search_keys, policy_actions, opponent_actions, history, current_memory, use_online_search)
         actions = stack_learner_actions(policy_actions, opponent_actions, policy_player)
         new_states, infos = jax.vmap(game.step)(states, actions)
         keep_old = pre_infos.is_done

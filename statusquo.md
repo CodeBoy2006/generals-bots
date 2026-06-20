@@ -1274,3 +1274,9 @@
 - **Status:** Completed
 - **Next Steps:** Run a 512-row confirmation for the exact `top_k=4, rollout_steps=16, turn>=80, contact-only` wrapper. Then collect online-search traces for DAgger-style distillation with search value/margin/enter-state labels. Add heuristic/Expander opponent support for 12/16 upper-bound diagnostics.
 - **Context:** GPU smoke passed. Against fixed-v5 max500, current wrapper same-seed 256-row min was `38.28%`; online search lifted it to `50.39%` with p0 `53.52%`, p1 `50.39%`, and draw below `7%` on both seats. This is the strongest fixed-v5 signal so far, but it is a planner/wrapper result, not a pure `.eqx` checkpoint.
+
+## [2026-06-20 18:20] Online Search Opponent First-Step Alignment
+- **Changes:** Fixed `evaluate_adaptive_policy.py` online search so candidate scoring reuses the exact fixed-opponent first action that the real environment step will execute, instead of sampling a different opponent first action inside search. Updated README, Chinese manual, and strategy notes with aligned max500 evidence.
+- **Status:** Completed
+- **Next Steps:** Collect aligned online-search traces for distillation: chosen action, candidate prior, search score, margin, search-enter state, and final episode outcome. Then add equivalent heuristic/Expander online-search support for 12/16 planner upper-bound checks.
+- **Context:** Same-seed fixed-v5 max500 512-row no-search baseline was p0 `44.14%`, p1 `41.99%`, min `41.99%`. Before alignment, online search min was only `44.73%`. After alignment, online search reached p0 `53.52%`, p1 `51.56%`, min `51.56%`, with draw `6.25%` / `4.69%`.

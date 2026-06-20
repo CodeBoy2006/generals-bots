@@ -13623,3 +13623,85 @@ Next:
   4. add the same online-search path for Expander/heuristic opponents so 12/16
      can get an equivalent planner upper-bound diagnostic
 ```
+
+### 2026-06-20 18:20 - Online Search First-Step Alignment Fix
+
+Issue:
+
+```text
+The first 512-row max500 confirmation was weaker than the 256-row signal:
+
+  no-search baseline seed99080:
+    p0 44.14%
+    p1 41.99%
+    min 41.99%
+
+  online search seed99080 before fix:
+    p0 55.08%
+    p1 44.73%
+    min 44.73%
+
+The p0 gain was large, but p1 barely moved. Inspection found that online
+search sampled an opponent first action inside candidate scoring, while the
+real environment step later sampled a different opponent action. That made
+every candidate plan evaluate against a different stochastic first response
+than the one actually executed.
+```
+
+Fix:
+
+```text
+evaluate_policy_opponent_batch now samples the real opponent action before
+online search and passes that action into online_search_action_policy_opponent.
+Candidate counterfactuals now force:
+
+  candidate learner first action
+  same opponent first action that the real step will execute
+
+The rest of the search rollout remains stochastic as before.
+```
+
+Aligned 512-row result:
+
+```text
+fixed-v5 max500
+seed: 99080
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+online search:
+  top_k=4
+  rollout_steps=16
+  rollouts/action=1
+  min_turn=80
+  require_contact=true
+
+baseline:
+  p0 44.14%
+  p1 41.99%
+  min 41.99%
+  draw 11.13% / 7.42%
+
+aligned online search:
+  p0 53.52%
+  p1 51.56%
+  min 51.56%
+  draw 6.25% / 4.69%
+```
+
+Interpretation:
+
+```text
+This is now a promotion-grade planner signal for max500 fixed-v5:
+
+  min gain vs same-seed baseline: +9.57pp
+  both seats above 50%
+  draw materially lower on both seats
+
+The result is still a wrapper/planner, not a pure model checkpoint. The next
+research move should be trace collection from the aligned online search path:
+chosen action, candidate priors, candidate scores, score margin, search-enter
+state, and whether the final episode converts draw/loss into win.
+```
