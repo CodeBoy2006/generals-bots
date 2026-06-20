@@ -296,10 +296,39 @@ def parse_args():
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
     parser.add_argument("--value-bins", type=int, default=128)
     parser.add_argument("--outcome-head", action="store_true")
+    parser.add_argument(
+        "--base-outcome-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Outcome-head schema for the base model. Defaults to --outcome-head.",
+    )
     parser.add_argument("--strategy-aux", action="store_true")
+    parser.add_argument(
+        "--base-strategy-aux",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Strategy-head schema for the base model. Defaults to --strategy-aux.",
+    )
     parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument(
+        "--base-strategy-spatial-aux",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Spatial strategy-head schema for the base model. Defaults to --strategy-spatial-aux.",
+    )
     parser.add_argument("--strategy-finish-outputs", type=int, default=3)
+    parser.add_argument(
+        "--base-strategy-finish-outputs",
+        type=int,
+        default=None,
+        help="Strategy finish output count for the base model. Defaults to --strategy-finish-outputs.",
+    )
     parser.add_argument("--positive-path-contains", action="append", default=[])
+    parser.add_argument(
+        "--drop-mismatched-init-leaves",
+        action="store_true",
+        help="Load matching checkpoint leaves and reinitialize shape-mismatched legacy leaves.",
+    )
     parser.add_argument("--allow-nondecisive-positives", action="store_true")
     parser.add_argument("--include-finish250-positives", action="store_true")
     parser.add_argument(
@@ -329,8 +358,14 @@ def parse_args():
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
     if args.strategy_finish_outputs <= 0:
         parser.error("--strategy-finish-outputs must be positive")
+    if args.base_strategy_finish_outputs is not None and args.base_strategy_finish_outputs <= 0:
+        parser.error("--base-strategy-finish-outputs must be positive")
     if not args.strategy_aux:
         parser.error("policy-adapter gate features require --strategy-aux")
+    if (args.base_strategy_spatial_aux if args.base_strategy_spatial_aux is not None else args.strategy_spatial_aux) and not (
+        args.base_strategy_aux if args.base_strategy_aux is not None else args.strategy_aux
+    ):
+        parser.error("--base-strategy-spatial-aux requires base strategy aux")
     if args.hidden_dim <= 0 or args.num_epochs <= 0 or args.minibatch_size <= 0 or args.feature_batch_size <= 0:
         parser.error("hidden dim, epochs, minibatch, and feature batch must be positive")
     if args.lr <= 0.0:
@@ -346,6 +381,16 @@ def main():
     key = jrandom.PRNGKey(args.seed)
     key, base_key, adapter_key, gate_key = jrandom.split(key, 4)
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
+    base_outcome_head = args.outcome_head if args.base_outcome_head is None else args.base_outcome_head
+    base_strategy_aux = args.strategy_aux if args.base_strategy_aux is None else args.base_strategy_aux
+    base_strategy_spatial_aux = (
+        args.strategy_spatial_aux if args.base_strategy_spatial_aux is None else args.base_strategy_spatial_aux
+    )
+    base_strategy_finish_outputs = (
+        args.strategy_finish_outputs
+        if args.base_strategy_finish_outputs is None
+        else args.base_strategy_finish_outputs
+    )
     base_network = load_or_create_adaptive_network(
         base_key,
         pad_size=16,
@@ -357,18 +402,19 @@ def main():
         init_value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
         value_bins=value_bins,
         init_value_bins=value_bins,
-        outcome_head=args.outcome_head,
-        init_outcome_head=args.outcome_head,
-        strategy_aux=args.strategy_aux,
-        init_strategy_aux=args.strategy_aux,
-        strategy_spatial_aux=args.strategy_spatial_aux,
-        init_strategy_spatial_aux=args.strategy_spatial_aux,
-        strategy_finish_outputs=args.strategy_finish_outputs,
-        init_strategy_finish_outputs=args.strategy_finish_outputs,
+        outcome_head=base_outcome_head,
+        init_outcome_head=base_outcome_head,
+        strategy_aux=base_strategy_aux,
+        init_strategy_aux=base_strategy_aux,
+        strategy_spatial_aux=base_strategy_spatial_aux,
+        init_strategy_spatial_aux=base_strategy_spatial_aux,
+        strategy_finish_outputs=base_strategy_finish_outputs,
+        init_strategy_finish_outputs=base_strategy_finish_outputs,
         global_context=args.global_context,
         init_global_context=args.global_context,
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
+        drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
     )
     adapter_network = load_or_create_adaptive_network(
         adapter_key,
@@ -393,6 +439,7 @@ def main():
         init_global_context=args.global_context,
         network_arch=args.network_arch,
         init_network_arch=args.network_arch,
+        drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
     )
     feature_network = None
     if args.feature_model_path is not None:
@@ -419,6 +466,7 @@ def main():
             init_global_context=args.global_context,
             network_arch=args.network_arch,
             init_network_arch=args.network_arch,
+            drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
         )
     dataset = build_gate_examples(
         paths,
@@ -445,6 +493,11 @@ def main():
     print(f"Decisive:      {stats['decisive']}")
     print(f"Base:          {args.base_model_path}")
     print(f"Adapter:       {args.adapter_model_path}")
+    print(
+        "Base schema:   "
+        f"outcome={base_outcome_head}, strategy_aux={base_strategy_aux}, "
+        f"spatial={base_strategy_spatial_aux}, finish_outputs={base_strategy_finish_outputs}"
+    )
     if args.feature_model_path is not None:
         print(f"Feature model: {args.feature_model_path}")
     print(f"Output:        {args.model_path}")
@@ -489,6 +542,10 @@ def main():
         "include_finish250_positives": args.include_finish250_positives,
         "keep_unchanged_negatives": args.keep_unchanged_negatives,
         "base_model_path": args.base_model_path,
+        "base_outcome_head": base_outcome_head,
+        "base_strategy_aux": base_strategy_aux,
+        "base_strategy_spatial_aux": base_strategy_spatial_aux,
+        "base_strategy_finish_outputs": base_strategy_finish_outputs,
         "adapter_model_path": args.adapter_model_path,
         "feature_model_path": args.feature_model_path,
         "datasets": [str(path) for path in paths],

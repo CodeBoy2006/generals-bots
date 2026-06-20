@@ -1220,3 +1220,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v1/v2 prefix adapters or the A1 trajectory adapters. Move the decisive data into finish/value/command gating or a plan-conditioned executor with an explicit enter/exit decision.
 - **Context:** Larger legacy prefix v1 data (`150` states / `1177` prefix steps) did not beat legacy same-seed fixed-v5 (`11.91%` vs `14.26%` min at 512 rows). Margin-filtered v2 trained much cleaner offline (`~75%` action accuracy) but still missed same-seed legacy (`13.28%` vs `13.87%` min). A1/terminal/rescue trajectory adapters showed only small fixed-v5 signal (`a1mix-v0` 256-row min `10.94%` vs v3 same-seed `7.42%`) and are not promotion candidates.
+
+## [2026-06-20 15:41] Deployment-Shaped Adapter Gate
+- **Changes:** Added base-model schema flags and legacy leaf dropping to `adaptive_policy_adapter_gate_supervised.py`, documented the new gate trainer usage, and logged GPU results for a learned gate on `a1mix-v0`.
+- **Status:** Completed
+- **Next Steps:** Do not threshold-sweep the a1mix gate. Use the result to justify stronger enter/exit-plan labels or better candidate behavior; current best remains the legacy Plan-Q prefix wrapper.
+- **Context:** The A1+terminal gate data had `3890` rows, `179` changed actions, and `52` positives (`29.05%` of changed-action examples), avoiding the old sparse-gate failure. The learned gate improved same-seed fixed-v5 max250 256-row min from a1mix ungated `10.55%` to `12.11%`, but 512-row confirmation was only `10.94%` min and same-seed legacy Plan-Q v0 was stronger at `14.06%`.

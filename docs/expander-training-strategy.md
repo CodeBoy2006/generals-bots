@@ -12739,3 +12739,99 @@ base:
   runs/adaptive-legacy-planq-prefix-policy-v0/
     generals-adaptive-legacy-planq-prefix-policy-v0.eqx
 ```
+
+## 2026-06-20 15:37 - Deployment-Shaped Policy Adapter Gate Probe
+
+Implemented a gate-trainer compatibility change:
+
+```text
+adaptive_policy_adapter_gate_supervised.py:
+  --base-outcome-head / --no-base-outcome-head
+  --base-strategy-aux / --no-base-strategy-aux
+  --base-strategy-spatial-aux / --no-base-strategy-spatial-aux
+  --base-strategy-finish-outputs
+  --drop-mismatched-init-leaves
+```
+
+This lets the gate train on the actual deployment shape:
+
+```text
+base:
+  adaptive-unet-ppo-v4
+  no strategy/outcome heads
+
+adapter:
+  a strategy-head checkpoint
+
+feature model:
+  adapter itself, or an explicit strategy-head model
+```
+
+Gate training:
+
+```text
+run:
+  runs/adaptive-policy-adapter-gate-a1mix-v0/
+
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-midgame-decisive-trajectory-a1mix-v0/
+    generals-adaptive-midgame-decisive-trajectory-a1mix-v0.eqx
+
+data:
+  adaptive-fixed-v5-searchwin-a1-v1
+  adaptive-midgame-terminal-searchwin-fixed-v5-safev3-v0
+
+examples:
+  rows 3890
+  changed actions 179
+  positives 52
+  positive fraction 29.05%
+
+final gate:
+  weighted acc about 71.5%
+  P+ 0.557
+  P- 0.402
+```
+
+Fixed-v5 gate:
+
+```text
+fixed-v5 max250, 256 games/seat, seed97020:
+  a1mix ungated:
+    p0 10.55%
+    p1 12.11%
+    min 10.55%
+
+  a1mix learned gate threshold 0.5:
+    p0 13.67%
+    p1 12.11%
+    min 12.11%
+
+  current best legacy Plan-Q v0 same seed:
+    p0 16.41%
+    p1 14.06%
+    min 14.06%
+
+fixed-v5 max250, 512 games/seat, seed97040:
+  a1mix learned gate threshold 0.5:
+    p0 10.94%
+    p1 11.13%
+    min 10.94%
+```
+
+Interpretation:
+
+```text
+The learned gate is no longer the old sparse-gate failure mode: the high-quality
+A1/terminal rows produce 29% positives among changed-action examples, and the
+gate improves a1mix on a same-seed 256-row fixed-v5 gate.
+
+The 512-row confirmation still falls back to about 11% min and remains below the
+legacy Plan-Q prefix wrapper. Do not sweep thresholds. The useful signal is that
+deployment-shaped gating can learn where an adapter is locally search-consistent;
+the missing piece is stronger candidate behavior and longer enter/exit-plan
+labels, not a better threshold.
+```
