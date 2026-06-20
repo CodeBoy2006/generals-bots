@@ -27,6 +27,7 @@ from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
     ADAPTIVE_MOVE_PLANES,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
+    ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS,
     adaptive_action_to_index,
     adaptive_input_channel_count,
     adaptive_index_to_action,
@@ -413,6 +414,30 @@ def policy_adapter_gate_features(
     army_log = obs_arr[0]
     finish_probability = strategy_finish_probability(finish_logits)
     outcome_probabilities = jax.nn.softmax(outcome_logits, axis=-1)
+    visible_enemy_density = jnp.sum(visible_enemy) / active_count
+    channel_count = obs_arr.shape[0]
+    scoreboard_time = jnp.asarray(0.0, dtype=obs_arr.dtype)
+    scoreboard_land_advantage = jnp.asarray(0.0, dtype=obs_arr.dtype)
+    scoreboard_army_advantage = jnp.asarray(0.0, dtype=obs_arr.dtype)
+    has_global = channel_count >= ADAPTIVE_INPUT_CHANNELS + ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS
+    if has_global:
+        has_history = (
+            channel_count
+            >= ADAPTIVE_INPUT_CHANNELS + ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS + ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS
+        )
+        global_width = ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS + (
+            ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS if has_history else 0
+        )
+        current_start = channel_count - global_width
+        current_scoreboard = jnp.stack(
+            [
+                jnp.sum(obs_arr[current_start + index] * active.astype(jnp.float32)) / active_count
+                for index in range(ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS)
+            ]
+        )
+        scoreboard_time = current_scoreboard[4]
+        scoreboard_land_advantage = current_scoreboard[0] - current_scoreboard[2]
+        scoreboard_army_advantage = current_scoreboard[1] - current_scoreboard[3]
     features = jnp.stack(
         [
             raw_delta[adapter_index],
@@ -423,12 +448,16 @@ def policy_adapter_gate_features(
             finish_probability,
             outcome_probabilities[1],
             outcome_probabilities[2],
-            jnp.sum(visible_enemy) / active_count,
+            visible_enemy_density,
             jnp.sum(army_log * visible_enemy) / active_count,
             jnp.sum(army_log * owned) / active_count,
             active_count / jnp.asarray(pad_size * pad_size, dtype=jnp.float32),
             (adapter_index != policy_index).astype(jnp.float32),
             jnp.asarray(policy_player, dtype=jnp.float32),
+            scoreboard_time,
+            scoreboard_land_advantage,
+            scoreboard_army_advantage,
+            (visible_enemy_density > 0.0).astype(jnp.float32),
         ]
     )
     return features[:feature_dim]

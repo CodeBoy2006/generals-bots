@@ -13255,3 +13255,141 @@ Next direction:
   3. convert accepted-prefix data into enter/exit-plan or finish/outcome labels,
   4. evaluate only if a candidate clears the current max500 512-row baseline.
 ```
+
+## 2026-06-20 17:20 - Prefix-Derived Policy Adapter Gate
+
+Extended `adaptive_policy_adapter_gate_supervised.py` so policy-adapter gates can
+train directly from executed Plan-Q prefix shards:
+
+```text
+new/changed:
+  --dataset-format strategy|plan-q-prefix
+  --min-prefix-plan-advantage
+  --allow-prefix-nonwin
+  --require-prefix-base-not-win
+  --max-prefix-plan-time-to-terminal
+  --max-prefix-step
+```
+
+For prefix shards, positive labels mean:
+
+```text
+adapter top action == executed accepted-prefix action
+and adapter changes the base top action
+and plan_outcome == win
+and plan_advantage >= threshold
+and optional base_outcome != win
+and optional plan_time / prefix_step filters pass
+```
+
+This is intentionally stricter than raw prefix imitation. It asks whether the
+current adapter already contains the useful accepted-prefix action, then learns
+when to let that adapter replace the base policy.
+
+Also extended `evaluate_adaptive_policy.py policy_adapter_gate_features` from
+14 to 18 features by appending:
+
+```text
+scoreboard_time
+scoreboard_land_advantage
+scoreboard_army_advantage
+contact_binary
+```
+
+Old gate sidecars remain compatible because evaluation slices by saved
+`feature_names` length.
+
+GPU training used the max500 accepted-prefix data from the previous section:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+feature model:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+    generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+
+filters:
+  min_prefix_plan_advantage = 0.25
+  require_prefix_base_not_win = true
+  max_prefix_plan_time_to_terminal = 80
+  max_prefix_step = 7
+```
+
+First gate without phase/contact features:
+
+```text
+output:
+  runs/adaptive-prefix-policy-adapter-gate-max500-v0/
+
+examples:
+  3085 changed-action examples
+  positives: 21.72%
+  valid prefix rows: 8951
+  label domain: 5477
+  prefix action matches: 1020
+
+offline final:
+  acc 59.7%
+  P+ 0.534
+  P- 0.475
+
+fixed-v5 max500 256-row seed98460:
+  threshold 0.5:
+    trigger 100%
+    p0 42.97%
+    p1 46.09%
+    min 42.97%
+  threshold 0.6:
+    trigger 100%
+    min 42.97%
+  threshold 0.8:
+    trigger 100%
+    min 42.97%
+```
+
+Interpretation: without phase/contact features, the gate cannot distinguish
+opening from accepted-prefix midgame states. It just reproduces the ungated v0
+adapter.
+
+Phase/contact gate:
+
+```text
+output:
+  runs/adaptive-prefix-policy-adapter-gate-max500-v1-phase/
+
+offline final:
+  acc 72.3%
+  P+ 0.604
+  P- 0.388
+
+fixed-v5 max500 256-row seed98460:
+  threshold 0.5:
+    p0 39.06%
+    p1 42.19%
+    min 39.06%
+    trigger p0 86.74%, p1 80.27%
+    adapter_diff p0 27.49%, p1 22.45%
+```
+
+The phase-aware gate is technically useful: it suppresses a meaningful share of
+adapter actions and learns the offline prefix label much better. Gameplay still
+falls below the same-seed ungated v0 baseline (`42.97%` min), so do not promote
+it or continue threshold sweeps.
+
+Updated diagnosis:
+
+```text
+Accepted-prefix data is useful, but current v0 adapter's top action only matches
+the accepted prefix on a subset of changed states. A binary gate over the old
+adapter cannot synthesize missing plan execution. It can only choose when to use
+the old adapter.
+
+Next higher-yield route:
+  train an explicit enter/exit plan policy or plan-conditioned Worker from these
+  prefixes, then gate that executor. The gate needs phase/contact features, but
+  the executor must be capable of producing the accepted prefix action.
+```

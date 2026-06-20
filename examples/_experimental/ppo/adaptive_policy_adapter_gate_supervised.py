@@ -29,6 +29,7 @@ from evaluate_adaptive_policy import policy_adapter_gate_features
 from generals.agents.ppo_policy_agent import parse_policy_channels
 from train_adaptive import OUTCOME_WIN
 
+DATASET_FORMATS = ("strategy", "plan-q-prefix")
 POLICY_ADAPTER_GATE_FEATURE_NAMES = (
     "adapter_delta_at_adapter_top",
     "adapter_delta_at_policy_top",
@@ -44,6 +45,10 @@ POLICY_ADAPTER_GATE_FEATURE_NAMES = (
     "active_fraction",
     "adapter_changes_action",
     "seat",
+    "scoreboard_time",
+    "scoreboard_land_advantage",
+    "scoreboard_army_advantage",
+    "contact_binary",
 )
 
 
@@ -129,6 +134,14 @@ def _compute_adapter_features(
     )
 
 
+def _balanced_binary_weights(labels: np.ndarray) -> np.ndarray:
+    """Give positives and negatives equal total weight."""
+    positive = labels > 0.5
+    pos_count = max(int(np.sum(positive)), 1)
+    neg_count = max(int(np.sum(~positive)), 1)
+    return (np.where(positive, 0.5 / pos_count, 0.5 / neg_count).astype(np.float32) * labels.shape[0])
+
+
 def build_gate_examples(
     paths: list[Path],
     base_network,
@@ -195,10 +208,7 @@ def build_gate_examples(
             continue
         kept_features = features[keep].astype(np.float32)
         kept_labels = labels[keep].astype(np.float32)
-        positive = kept_labels > 0.5
-        pos_count = max(int(np.sum(positive)), 1)
-        neg_count = max(int(np.sum(~positive)), 1)
-        weights = np.where(positive, 0.5 / pos_count, 0.5 / neg_count).astype(np.float32) * kept_labels.shape[0]
+        weights = _balanced_binary_weights(kept_labels)
         feature_chunks.append(kept_features)
         label_chunks.append(kept_labels)
         weight_chunks.append(weights)
@@ -211,6 +221,135 @@ def build_gate_examples(
 
     if not feature_chunks:
         raise ValueError("No policy-adapter gate examples selected")
+    features = np.concatenate(feature_chunks, axis=0)
+    labels = np.concatenate(label_chunks, axis=0)
+    weights = np.concatenate(weight_chunks, axis=0)
+    if max_examples is not None and features.shape[0] > max_examples:
+        indices = np.sort(rng.choice(features.shape[0], size=max_examples, replace=False))
+        features = features[indices]
+        labels = labels[indices]
+        weights = weights[indices]
+    feature_mean = features.mean(axis=0).astype(np.float32)
+    feature_std = np.maximum(features.std(axis=0).astype(np.float32), 1.0e-6)
+    return {
+        "features": jnp.asarray(features),
+        "labels": jnp.asarray(labels),
+        "weights": jnp.asarray(weights),
+        "feature_mean": jnp.asarray(feature_mean),
+        "feature_std": jnp.asarray(feature_std),
+        "stats": stats,
+    }
+
+
+def build_prefix_gate_examples(
+    paths: list[Path],
+    base_network,
+    adapter_network,
+    feature_network,
+    feature_batch_size: int,
+    keep_unchanged_negatives: bool,
+    max_examples: int | None,
+    seed: int,
+    min_plan_advantage: float,
+    require_plan_win: bool,
+    require_base_not_win: bool,
+    max_plan_time_to_terminal: int | None,
+    max_prefix_step: int | None,
+) -> dict[str, object]:
+    """Construct gate examples from executed accepted-prefix Plan-Q shards."""
+    rng = np.random.default_rng(seed)
+    feature_chunks: list[np.ndarray] = []
+    label_chunks: list[np.ndarray] = []
+    weight_chunks: list[np.ndarray] = []
+    stats = {
+        "rows": 0,
+        "prefix_rows": 0,
+        "valid_prefix": 0,
+        "accepted_prefix": 0,
+        "label_domain": 0,
+        "changed": 0,
+        "positive": 0,
+        "prefix_action_match": 0,
+    }
+    for path in paths:
+        shard = np.load(path)
+        if "worker_prefix_obs" not in shard:
+            raise KeyError(f"{path} does not contain worker_prefix_obs; use --dataset-format strategy for strategy shards")
+        prefix_obs = shard["worker_prefix_obs"].astype(np.float32)
+        num_rows, prefix_len = prefix_obs.shape[:2]
+        obs = prefix_obs.reshape((-1,) + prefix_obs.shape[2:])
+        legal_mask = shard["worker_prefix_legal_mask"].astype(np.bool_).reshape((-1,) + shard["worker_prefix_legal_mask"].shape[2:])
+        active = shard["worker_prefix_active"].astype(np.bool_).reshape((-1,) + shard["worker_prefix_active"].shape[2:])
+        seats = np.broadcast_to(shard["seat"][:, None], (num_rows, prefix_len)).reshape(-1).astype(np.float32)
+        prefix_actions = shard["worker_prefix_action_index"].astype(np.int32).reshape(-1)
+        valid = shard["worker_prefix_valid"].astype(np.bool_).reshape(-1)
+        accepted = shard["accepted_prefix_mask"].astype(np.bool_).reshape(-1) if "accepted_prefix_mask" in shard else valid
+        plan_outcomes = shard["worker_prefix_plan_outcome"].astype(np.int32).reshape(-1)
+        plan_advantages = shard["worker_prefix_plan_advantage"].astype(np.float32).reshape(-1)
+        base_outcomes = (
+            shard["worker_prefix_base_outcome"].astype(np.int32).reshape(-1)
+            if "worker_prefix_base_outcome" in shard
+            else np.full((prefix_actions.shape[0],), -1, dtype=np.int32)
+        )
+        plan_times = (
+            shard["worker_prefix_plan_time_to_terminal"].astype(np.int32).reshape(-1)
+            if "worker_prefix_plan_time_to_terminal" in shard
+            else np.full((prefix_actions.shape[0],), 1_000_000, dtype=np.int32)
+        )
+        prefix_steps = (
+            shard["worker_prefix_step_index"].astype(np.int32).reshape(-1)
+            if "worker_prefix_step_index" in shard
+            else np.tile(np.arange(prefix_len, dtype=np.int32), num_rows)
+        )
+        pass_index = ADAPTIVE_MOVE_PLANES * active.shape[-1] * active.shape[-1]
+        non_pass = prefix_actions != pass_index
+        label_domain = accepted & (plan_advantages >= min_plan_advantage)
+        if require_plan_win:
+            label_domain &= plan_outcomes == OUTCOME_WIN
+        if require_base_not_win:
+            label_domain &= base_outcomes != OUTCOME_WIN
+        if max_plan_time_to_terminal is not None:
+            label_domain &= plan_times <= max_plan_time_to_terminal
+        if max_prefix_step is not None:
+            label_domain &= prefix_steps <= max_prefix_step
+        feature_keep = valid & non_pass
+        if not np.any(feature_keep):
+            continue
+        features, policy_indices, adapter_indices = _compute_adapter_features(
+            base_network,
+            adapter_network,
+            feature_network,
+            obs[feature_keep],
+            legal_mask[feature_keep],
+            active[feature_keep],
+            seats[feature_keep],
+            feature_batch_size,
+        )
+        kept_prefix_actions = prefix_actions[feature_keep]
+        kept_label_domain = label_domain[feature_keep]
+        changed = (adapter_indices != policy_indices) & (adapter_indices != pass_index)
+        prefix_match = adapter_indices == kept_prefix_actions
+        labels = (changed & prefix_match & kept_label_domain).astype(np.float32)
+        keep = np.ones_like(changed, dtype=np.bool_) if keep_unchanged_negatives else changed
+        if not np.any(keep):
+            continue
+        kept_features = features[keep].astype(np.float32)
+        kept_labels = labels[keep].astype(np.float32)
+        weights = _balanced_binary_weights(kept_labels)
+        feature_chunks.append(kept_features)
+        label_chunks.append(kept_labels)
+        weight_chunks.append(weights)
+        stats["rows"] += int(num_rows)
+        stats["prefix_rows"] += int(prefix_actions.shape[0])
+        stats["valid_prefix"] += int(np.sum(valid & non_pass))
+        stats["accepted_prefix"] += int(np.sum(accepted & valid & non_pass))
+        stats["label_domain"] += int(np.sum(label_domain & valid & non_pass))
+        stats["changed"] += int(np.sum(changed))
+        stats["positive"] += int(np.sum(labels[keep] > 0.5))
+        stats["prefix_action_match"] += int(np.sum(changed & prefix_match))
+
+    if not feature_chunks:
+        raise ValueError("No plan-q-prefix policy-adapter gate examples selected")
     features = np.concatenate(feature_chunks, axis=0)
     labels = np.concatenate(label_chunks, axis=0)
     weights = np.concatenate(weight_chunks, axis=0)
@@ -280,6 +419,7 @@ def train_epoch(gate, opt_state, dataset, optimizer, key, minibatch_size: int):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a learned gate for policy-adapter deltas.")
     parser.add_argument("--dataset", action="append", required=True, help="NPZ shard path or glob. Repeatable.")
+    parser.add_argument("--dataset-format", choices=DATASET_FORMATS, default="strategy")
     parser.add_argument("--base-model-path", required=True)
     parser.add_argument("--adapter-model-path", required=True)
     parser.add_argument(
@@ -332,6 +472,34 @@ def parse_args():
     parser.add_argument("--allow-nondecisive-positives", action="store_true")
     parser.add_argument("--include-finish250-positives", action="store_true")
     parser.add_argument(
+        "--min-prefix-plan-advantage",
+        type=float,
+        default=0.25,
+        help="For --dataset-format plan-q-prefix, require this plan advantage for positive labels.",
+    )
+    parser.add_argument(
+        "--allow-prefix-nonwin",
+        action="store_true",
+        help="For --dataset-format plan-q-prefix, allow non-winning plan outcomes to form positive labels.",
+    )
+    parser.add_argument(
+        "--require-prefix-base-not-win",
+        action="store_true",
+        help="For --dataset-format plan-q-prefix, positives require base continuation not already winning.",
+    )
+    parser.add_argument(
+        "--max-prefix-plan-time-to-terminal",
+        type=int,
+        default=None,
+        help="For --dataset-format plan-q-prefix, positives require plan terminal time at or below this value.",
+    )
+    parser.add_argument(
+        "--max-prefix-step",
+        type=int,
+        default=None,
+        help="For --dataset-format plan-q-prefix, positives use only early executed-prefix steps up to this index.",
+    )
+    parser.add_argument(
         "--keep-unchanged-negatives",
         action="store_true",
         help="Keep rows where the adapter and base greedy actions match as negative examples.",
@@ -372,6 +540,12 @@ def parse_args():
         parser.error("--lr must be positive")
     if args.max_examples is not None and args.max_examples <= 0:
         parser.error("--max-examples must be positive")
+    if args.min_prefix_plan_advantage < 0.0:
+        parser.error("--min-prefix-plan-advantage must be non-negative")
+    if args.max_prefix_plan_time_to_terminal is not None and args.max_prefix_plan_time_to_terminal <= 0:
+        parser.error("--max-prefix-plan-time-to-terminal must be positive")
+    if args.max_prefix_step is not None and args.max_prefix_step < 0:
+        parser.error("--max-prefix-step must be non-negative")
     return args
 
 
@@ -468,29 +642,52 @@ def main():
             init_network_arch=args.network_arch,
             drop_mismatched_init_leaves=args.drop_mismatched_init_leaves,
         )
-    dataset = build_gate_examples(
-        paths,
-        base_network,
-        adapter_network,
-        feature_network,
-        args.feature_batch_size,
-        tuple(args.positive_path_contains),
-        not args.allow_nondecisive_positives,
-        args.include_finish250_positives,
-        args.keep_unchanged_negatives,
-        args.max_examples,
-        args.seed,
-    )
+    if args.dataset_format == "strategy":
+        dataset = build_gate_examples(
+            paths,
+            base_network,
+            adapter_network,
+            feature_network,
+            args.feature_batch_size,
+            tuple(args.positive_path_contains),
+            not args.allow_nondecisive_positives,
+            args.include_finish250_positives,
+            args.keep_unchanged_negatives,
+            args.max_examples,
+            args.seed,
+        )
+    else:
+        dataset = build_prefix_gate_examples(
+            paths,
+            base_network,
+            adapter_network,
+            feature_network,
+            args.feature_batch_size,
+            args.keep_unchanged_negatives,
+            args.max_examples,
+            args.seed,
+            args.min_prefix_plan_advantage,
+            not args.allow_prefix_nonwin,
+            args.require_prefix_base_not_win,
+            args.max_prefix_plan_time_to_terminal,
+            args.max_prefix_step,
+        )
     labels = np.asarray(dataset["labels"])
     stats = dataset["stats"]
     print("Adaptive policy-adapter gate supervised training")
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
+    print(f"Data format:   {args.dataset_format}")
     print(f"Examples:      {dataset['features'].shape[0]}")
     print(f"Positive:      {float(np.mean(labels)) * 100:.2f}%")
     print(f"Rows/changed:  {stats['rows']} / {stats['changed']}")
-    print(f"Teacher match: {stats['teacher_match']}")
-    print(f"Decisive:      {stats['decisive']}")
+    if args.dataset_format == "strategy":
+        print(f"Teacher match: {stats['teacher_match']}")
+        print(f"Decisive:      {stats['decisive']}")
+    else:
+        print(f"Prefix rows:   {stats['valid_prefix']} valid / {stats['accepted_prefix']} accepted")
+        print(f"Label domain:  {stats['label_domain']}")
+        print(f"Prefix match:  {stats['prefix_action_match']}")
     print(f"Base:          {args.base_model_path}")
     print(f"Adapter:       {args.adapter_model_path}")
     print(
@@ -534,6 +731,7 @@ def main():
         "feature_mean": np.asarray(gate.feature_mean).tolist(),
         "feature_std": np.asarray(gate.feature_std).tolist(),
         "hidden_dim": args.hidden_dim,
+        "dataset_format": args.dataset_format,
         "examples": int(dataset["features"].shape[0]),
         "positive_fraction": float(np.mean(labels)),
         "stats": stats,
@@ -541,6 +739,11 @@ def main():
         "require_search_best_win": not args.allow_nondecisive_positives,
         "include_finish250_positives": args.include_finish250_positives,
         "keep_unchanged_negatives": args.keep_unchanged_negatives,
+        "min_prefix_plan_advantage": args.min_prefix_plan_advantage,
+        "allow_prefix_nonwin": args.allow_prefix_nonwin,
+        "require_prefix_base_not_win": args.require_prefix_base_not_win,
+        "max_prefix_plan_time_to_terminal": args.max_prefix_plan_time_to_terminal,
+        "max_prefix_step": args.max_prefix_step,
         "base_model_path": args.base_model_path,
         "base_outcome_head": base_outcome_head,
         "base_strategy_aux": base_strategy_aux,
