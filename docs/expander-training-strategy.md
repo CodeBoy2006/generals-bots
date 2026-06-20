@@ -14845,3 +14845,163 @@ For current fixed-v5 work, prefer:
 
 Use max750 only as a longer confirmation or ablation horizon.
 ```
+
+### 2026-06-20 22:01 - Static v1 + Online Search Confirmation and v3 Distill Negative
+
+Context:
+
+```text
+The fixed-v5 diagnostic gate is now max500.  The current static max500
+adapter remains:
+
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+Previous learned gates and policy-head continuation runs failed to beat this
+adapter.  The next question was whether static v1 plus online counterfactual
+search should become the current deployment/teacher wrapper, and whether a
+larger v1-policy search-conversion shard can be compressed back into a static
+policy head.
+```
+
+Static v1 plus online search:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+fixed-v5 max500 search:
+  top_k=4
+  rollout_steps=16
+  rollouts_per_action=1
+  min_turn=80
+  require_contact=true
+  max_grid_size=8
+
+128 games/seat, seed101060:
+  p0 52.34%
+  p1 50.78%
+  min 50.78%
+  draw 6.25% / 7.81%
+
+256 games/seat, seed101080:
+  p0 52.34%
+  p1 51.17%
+  min 51.17%
+  draw 6.64% / 4.69%
+```
+
+This confirms a stable wrapper-level breakthrough against fixed-v5 max500:
+both seats are above 50% at 256 games/seat with low draw.  It is still not a
+pure `.eqx` checkpoint, but it is now the strongest fixed-v5 deployment/teacher
+configuration.
+
+Expander smoke with the same base/adapter and online search on all active
+sizes:
+
+```text
+settings:
+  opponent=expander
+  max_steps=750
+  num_games=64/row
+  online_search_max_grid_size=16
+  policy_adapter_max_grid_size=8
+  seed101100
+
+results:
+  8p0 84.38%
+  8p1 79.69%
+  12p0 84.38%
+  12p1 90.62%
+  16p0 81.25%
+  16p1 89.06%
+  min 79.69%
+```
+
+The 64-row Expander smoke is not a promotion gate, but it shows the wrapper does
+not obviously damage the larger-map rows.  The 12/16 rows remain strong, and
+16x draw is down to single digits.
+
+New v1-policy online-search conversion data:
+
+```text
+path:
+  runs/adaptive-online-search-fixed-v5-max500-v1search-v2/
+
+collection:
+  model = v4 base
+  policy_adapter = static conversion adapter v1
+  fixed-v5 sample opponent
+  truncation = 500
+  conversion_rollout_steps = 500
+  search = top_k=4, rollout_steps=16, contact-only, min_turn=80
+  num_envs=32, num_steps=32, shards=4
+
+rows:
+  total 3491
+  search_action_changed 2173
+  search_improves_continuation 350
+  search_converts_to_win 260
+  search_converts_draw_to_win 160
+  p0/p1 rows 1733 / 1758
+  p0/p1 converts 132 / 128
+  mean search_score_gap 4.277
+```
+
+This is a cleaner and more balanced v1-policy conversion set than the earlier
+small DAgger shard.
+
+Static distillation attempt:
+
+```text
+model:
+  runs/adaptive-online-search-conversion-adapter-v3-v1search/
+    generals-adaptive-online-search-conversion-adapter-v3-v1search.eqx
+
+init:
+  static conversion adapter v1
+
+loss:
+  policy_kl=2.0
+  action_ce=0.25 on search_converts_to_win rows
+  online_action_field=search_action_index
+  pairwise search_action > base_action weight=0.25
+  lr=1e-5
+  epochs=60
+
+offline final:
+  KL 0.0041
+  ActCE 2.7473
+  action accuracy 28.3%
+  Pair 4.4659
+  pair accuracy 0.0%
+
+fixed-v5 max500 128 games/seat, seed101040:
+  p0 47.66%
+  p1 34.38%
+  min 34.38%
+```
+
+Decision:
+
+```text
+Do not promote v3.  Even with 260 balanced conversion positives, direct static
+policy-head compression of v1-policy online-search actions still hurts p1 and
+falls below static v1's same-seed 40.62% min.
+
+Current best fixed-v5 route:
+  v4 base + static conversion adapter v1 + online search top_k=4 rollout=16
+  contact-only after turn 80
+
+Next useful research move:
+  keep the online-search wrapper as the teacher/deployment upper bound, and
+  stop trying to directly CE-compress its primitive action labels into a full
+  replace policy head.  The next compression attempt needs either a learned
+  enter/exit mechanism with richer state features, or a planner-aware action
+  head that can represent conditional search actions without shifting the whole
+  8x8 policy surface.
+```

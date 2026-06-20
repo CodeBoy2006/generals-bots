@@ -1352,3 +1352,9 @@
 - **Status:** Completed
 - **Next Steps:** Use `--truncation 500`, `--conversion-rollout-steps 500`, and `--finish-target-horizon 500` for current fixed-v5 max500 shards; keep max750 for longer confirmation.
 - **Context:** The old `finish_within_250` path remains available for historical shards and compressed ablations. Targeted py_compile and CLI help checks passed; help commands still print the expected sandbox CUDA warning before exiting successfully.
+
+## [2026-06-20 22:01] Max500 Online Search Teacher
+- **Changes:** Collected `runs/adaptive-online-search-fixed-v5-max500-v1search-v2/`, trained diagnostic `runs/adaptive-online-search-conversion-adapter-v3-v1search/generals-adaptive-online-search-conversion-adapter-v3-v1search.eqx`, and appended the fixed-v5/Expander results to `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote v3. Treat `v4 base + static conversion adapter v1 + online search top_k=4 rollout=16 contact-only turn>=80` as the current fixed-v5 max500 teacher/deployment wrapper; the next compression attempt needs richer gating or a planner-aware conditional head rather than direct policy-head CE.
+- **Context:** Static v1 plus online search reached fixed-v5 max500 256-row min `51.17%` with draw below `7%`. Expander 8/12/16 64-row smoke min was `79.69%`, with 12/16 rows at `81.25%`-`90.62%`. The new v1-search shard had `3491` rows and `260` balanced search-converts-to-win positives, but v3 static compression dropped to fixed-v5 max500 128-row min `34.38%`, below static v1 same-seed `40.62%`.
