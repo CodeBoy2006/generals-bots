@@ -1166,3 +1166,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote the A1 policy-head checkpoints or sweep action CE. Use fixed-search data for finish/value/command labels, command-gated executor positives, or advantage-labeled changed actions; revisit the legacy fixed-v5 imitation checkpoint only if a loader adapter is worth the time.
 - **Context:** A1 collection wrote `2,168` high-gap/search-win rows under ignored `runs/adaptive-fixed-v5-searchwin-a1-v1/`. Best smoke was base-KL policy-head v2 at fixed-v5 max250 128-row min `12.50%`, but Expander 128-row min regressed to `70.31%`. Starting from `adaptive-fixed-v5-imitation-v5` iter 30 failed on an old value-head shape mismatch.
+
+## [2026-06-20 13:04] Fixed-Search Mixed Label Probes
+- **Changes:** Added `adaptive_strategy_supervised.py --label-source search-best-or-trajectory` with a loader test, documented the flag, and logged GPU value/PPO/Q probes from fixed-search A1 data.
+- **Status:** Completed
+- **Next Steps:** Do not continue valuecal->PPO or current strategy-Q replacement on the A1 fixed-search shard. Next collect changed-action counterfactual rows where the base action draws/loses and fixed-search replacement later wins, then train a gate/executor on that changed-action outcome.
+- **Context:** Mixed-label value calibration learned offline only modestly (`finish 56.1%`, outcome `62.5%`, value CE `3.3793`). The 192-env PPO variant OOMed during compile; the 96-env run completed but fixed-v5 max250 stayed at `10.94%` min and Expander 128-row min was `74.22%`. The A1 Q probe kept weak search-Q accuracy (`26.5%`) and conservative Q replacement fell to fixed-v5 min `9.38%`.

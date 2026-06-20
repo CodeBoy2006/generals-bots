@@ -11449,3 +11449,154 @@ Next useful use of fixed-search data:
   legacy-loader experiment only if we need to fine-tune the fixed-v5 imitation
   checkpoint directly
 ```
+
+### 2026-06-20: Fixed-Search Mixed Labels and Value/Q Probes
+
+The previous `search-best` label mode could not mix fixed-search positives with
+ordinary draw/loss contrast shards: rows without `search_best_outcome` received
+zero finish/outcome weight. Added:
+
+```text
+adaptive_strategy_supervised.py:
+  --label-source search-best-or-trajectory
+
+behavior:
+  if search_best_outcome is present:
+    finish/outcome/value target comes from search-best
+  else:
+    finish/outcome/value target falls back to trajectory labels
+```
+
+The loader test now verifies the mixed behavior on a synthetic shard.
+
+Fixed-search mixed-label value calibration:
+
+```text
+run:
+  runs/adaptive-fixed-search-mixedlabel-valuecal-v0/
+
+init:
+  adaptive-midgame-contact-searchwin-imitation-v3
+
+data:
+  runs/adaptive-fixed-v5-searchwin-a1-v1/*.npz
+  runs/adaptive-midgame-draw-fixed-v5-v0/*.npz
+
+label_source:
+  search-best-or-trajectory
+
+balance:
+  size-seat-domain
+
+samples:
+  kept 5921/5921
+  balanced 5606
+
+training:
+  update_scope strategy-value-heads
+  action CE 0
+  finish 0.60, outcome 0.40, value 0.50
+  belief 0.20, intent 0.10
+```
+
+Training signal:
+
+```text
+loss:      3.3112 -> 2.5039
+finish:    50.9% -> 56.1%
+outcome:   55.4% -> 62.5%
+value CE:  4.8389 -> 3.3793
+value MAE: 0.424 -> 0.431
+```
+
+Short controlled PPO from the value-calibrated checkpoint:
+
+```text
+failed large run:
+  runs/adaptive-ppo-fixedsearch-valuecal-mixed-v0/
+  192 envs, minibatch 4096
+  stopped during compile after repeated GPU allocator OOM warnings
+
+completed run:
+  runs/adaptive-ppo-fixedsearch-valuecal-mixed-v1/
+  96 envs
+  rollout 128
+  iterations 20
+  minibatch 1024
+  mixed fixed-v5/Expander opponent p=0.5 on 8x rows
+  terminal reward 20
+  top advantage 0.25 stratified
+  EMA 0.999
+  teacher KL 0.05 to valuecal checkpoint
+```
+
+Results:
+
+```text
+fixed-v5 max250, 128 games/seat, seed 93300:
+  p0 10.94%
+  p1 10.94%
+  min 10.94%
+  draw 56.25% / 50.00%
+
+Expander adaptive, 128 games/row, seed 93320:
+  8p0  74.22%
+  8p1  82.81%
+  12p0 83.59%
+  12p1 81.25%
+  16p0 79.69%
+  16p1 76.56%
+  min 74.22%
+```
+
+Fixed-search A1 Q-value probe:
+
+```text
+run:
+  runs/adaptive-fixed-search-a1-qvalue-v0/
+
+data:
+  runs/adaptive-fixed-v5-searchwin-a1-v1/*.npz
+
+training:
+  update_scope strategy-heads
+  search_q_value_weight 1.0
+  search_q_rank_weight 0.5
+  search_q_outcome_score_weight 0.1
+  no policy update
+
+offline:
+  search-Q value loss 13.0544 -> 10.3694
+  search-Q value accuracy stayed weak at 26.5%
+```
+
+Single conservative replacement gate:
+
+```text
+eval:
+  --strategy-q-replace-threshold 0.5
+  --strategy-q-replace-policy-margin 4.0
+
+fixed-v5 max250, 128 games/seat, seed 93440:
+  p0 9.38%
+  p1 9.38%
+  min 9.38%
+```
+
+Conclusion:
+
+```text
+The mixed label mode is useful infrastructure, but this A1 fixed-search data is
+still too small/noisy to become a policy improvement through value calibration,
+short PPO, or current strategy-Q replacement.
+
+Stop:
+  fixed-search A1 valuecal -> short PPO
+  fixed-search A1 strategy-Q replacement
+  larger minibatch/env PPO on this path unless memory is redesigned
+
+Next useful step should change the data/control target, not the weights:
+  collect changed-action counterfactual rows where base action draws/loses and
+  fixed-search replacement later wins, then train a gate/executor on that
+  changed-action outcome rather than all best actions.
+```

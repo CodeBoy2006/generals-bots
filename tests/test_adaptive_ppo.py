@@ -1122,6 +1122,8 @@ def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
         intent=np.zeros((samples,), dtype=np.int8),
         outcome=np.array([OUTCOME_WIN, OUTCOME_DRAW, OUTCOME_DRAW, OUTCOME_WIN], dtype=np.int8),
         outcome_known=np.ones((samples,), dtype=np.float16),
+        finish_within_50=np.array([1, 0, 0, 1], dtype=np.float16),
+        finish_within_100=np.array([1, 0, 1, 1], dtype=np.float16),
         finish_within_250=np.array([1, 0, 0, 1], dtype=np.float16),
         enemy_general_heatmap=np.zeros((samples, pad_size, pad_size), dtype=np.float16),
         source_heatmap=np.zeros((samples, pad_size, pad_size), dtype=np.float16),
@@ -1157,6 +1159,22 @@ def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
     )
     assert nonwin_search_win["obs"].shape[0] == 1
     assert int(nonwin_search_win["teacher_action"][0]) == 1
+
+    mixed_labels = load_strategy_dataset([path], label_source="search-best-or-trajectory")
+    assert jnp.array_equal(mixed_labels["outcome"], jnp.array([OUTCOME_DRAW, OUTCOME_WIN, OUTCOME_DRAW, OUTCOME_WIN]))
+    assert jnp.allclose(mixed_labels["outcome_weight"], jnp.ones((samples,)))
+    assert jnp.array_equal(mixed_labels["finish"], jnp.array([0, 1, 0, 1]))
+    assert jnp.allclose(mixed_labels["finish_weight"], jnp.ones((samples,)))
+
+    mixed_horizon_labels = load_strategy_dataset(
+        [path],
+        label_source="search-best-or-trajectory",
+        finish_head_mode="multi-horizon",
+    )
+    assert jnp.array_equal(
+        mixed_horizon_labels["finish"],
+        jnp.array([[0, 0, 0], [1, 1, 1], [0, 1, 0], [1, 1, 1]], dtype=jnp.float32),
+    )
 
     unbalanced = {name: value[jnp.array([0, 1, 2])] for name, value in dataset.items()}
     balanced = balance_strategy_dataset(unbalanced, "size-seat", seed=0)

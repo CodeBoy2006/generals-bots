@@ -38,7 +38,7 @@ BALANCE_STRATA_MODES = (
     "size-seat-oversample",
     "size-seat-domain-oversample",
 )
-LABEL_SOURCE_MODES = ("trajectory", "search-best")
+LABEL_SOURCE_MODES = ("trajectory", "search-best", "search-best-or-trajectory")
 
 
 def expand_dataset_paths(patterns: list[str]) -> list[Path]:
@@ -223,35 +223,56 @@ def load_strategy_dataset(
             search_best_outcome = shard["search_best_outcome"][shard_indices].astype(np.int32)
         else:
             search_best_outcome = np.full((shard_indices.shape[0],), -1, dtype=np.int32)
-        if label_source == "search-best":
+        label_known = search_best_outcome >= 0
+        if label_source in ("search-best", "search-best-or-trajectory"):
             if np.any(search_best_outcome >= 0):
-                label_known = search_best_outcome >= 0
-                outcome_target = np.where(label_known, search_best_outcome, OUTCOME_DRAW).astype(np.int32)
-                outcome_weight = label_known.astype(np.float32)
-                finish_target = (search_best_outcome == OUTCOME_WIN).astype(np.float32)
+                if label_source == "search-best-or-trajectory":
+                    outcome_target = np.where(label_known, search_best_outcome, trajectory_outcome).astype(np.int32)
+                    outcome_weight = np.where(label_known, 1.0, trajectory_outcome_weight).astype(np.float32)
+                    finish_target = np.where(
+                        label_known,
+                        search_best_outcome == OUTCOME_WIN,
+                        shard["finish_within_250"][shard_indices].astype(np.float32) > 0.5,
+                    ).astype(np.float32)
+                else:
+                    outcome_target = np.where(label_known, search_best_outcome, OUTCOME_DRAW).astype(np.int32)
+                    outcome_weight = label_known.astype(np.float32)
+                    finish_target = (search_best_outcome == OUTCOME_WIN).astype(np.float32)
             else:
                 shard_count = shard_indices.shape[0]
-                outcome_target = np.full((shard_count,), OUTCOME_DRAW, dtype=np.int32)
-                outcome_weight = np.zeros((shard_count,), dtype=np.float32)
-                finish_target = np.zeros((shard_count,), dtype=np.float32)
+                if label_source == "search-best-or-trajectory":
+                    outcome_target = trajectory_outcome
+                    outcome_weight = trajectory_outcome_weight
+                    finish_target = shard["finish_within_250"][shard_indices].astype(np.float32)
+                else:
+                    outcome_target = np.full((shard_count,), OUTCOME_DRAW, dtype=np.int32)
+                    outcome_weight = np.zeros((shard_count,), dtype=np.float32)
+                    finish_target = np.zeros((shard_count,), dtype=np.float32)
         else:
             outcome_target = trajectory_outcome
             outcome_weight = trajectory_outcome_weight
             finish_target = shard["finish_within_250"][shard_indices].astype(np.float32)
         if finish_head_mode == "multi-horizon":
-            if label_source == "search-best":
+            trajectory_finish_targets = np.stack(
+                [
+                    shard["finish_within_50"][shard_indices],
+                    shard["finish_within_100"][shard_indices],
+                    shard["finish_within_250"][shard_indices],
+                ],
+                axis=-1,
+            ).astype(np.float32)
+            if label_source == "search-best-or-trajectory":
+                # Search-best labels are horizon-free; repeat them only for rows
+                # that actually have local search labels. Ordinary contrast rows
+                # keep their trajectory horizon labels.
+                search_finish_targets = np.repeat(finish_target[:, None], 3, axis=1)
+                finish_targets = np.where(label_known[:, None], search_finish_targets, trajectory_finish_targets)
+            elif label_source == "search-best":
                 # Search-best labels are horizon-free; repeat the same target so
                 # multi-output checkpoints can still learn the search win signal.
                 finish_targets = np.repeat(finish_target[:, None], 3, axis=1)
             else:
-                finish_targets = np.stack(
-                    [
-                        shard["finish_within_50"][shard_indices],
-                        shard["finish_within_100"][shard_indices],
-                        shard["finish_within_250"][shard_indices],
-                    ],
-                    axis=-1,
-                )
+                finish_targets = trajectory_finish_targets
             chunks["finish"].append(finish_targets.astype(np.float32))
         else:
             chunks["finish"].append((finish_target > 0.5).astype(np.int32))
@@ -920,7 +941,10 @@ def parse_args():
         "--label-source",
         choices=LABEL_SOURCE_MODES,
         default="trajectory",
-        help="Use trajectory outcome labels or rollout-search best-action outcome labels for finish/outcome heads.",
+        help=(
+            "Use trajectory labels, rollout-search best-action labels, or search labels "
+            "with trajectory fallback for finish/outcome/value heads."
+        ),
     )
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
