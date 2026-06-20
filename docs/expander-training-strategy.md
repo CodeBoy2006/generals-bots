@@ -13131,3 +13131,127 @@ legacy Plan-Q adapter. The next attempt should use the same collector but either
 
 Do not promote v0/v1/v2.
 ```
+
+## 2026-06-20 17:03 - Max500 Counterfactual Prefix Seat-Balanced Scaling
+
+Changed the fixed-v5 diagnostic gate from `max250` to `max500` and added a
+single-seat collection control to the Plan-Q collector:
+
+```text
+adaptive_plan_q_dataset.py:
+  --learner-seat mixed|p0|p1
+```
+
+The default remains `mixed`. The new `p0`/`p1` modes are for accepted-prefix
+collection where the causal filter can heavily favor one learner seat; without
+this control, `adaptive_strategy_supervised.py --balance-strata size-seat`
+throws away most of the useful rows.
+
+GPU data collection used the current legacy Plan-Q prefix adapter distribution,
+fixed-v5 sample opponent, max500 truncation, strict causal filtering, and 6x6
+main-stack/heuristic plan candidates:
+
+```text
+base model:
+  runs/adaptive-legacy-planq-prefix-policy-v0/generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+mixed-seat v4-c6:
+  output: runs/adaptive-plan-q-legacy-prefix-accepted-max500-v4-c6/
+  accepted states: 279
+  prefix rows: 3284
+  seat counts: p0 33, p1 246
+  base win rate: 3.6%
+  mean plan advantage: 1.171
+  median best-plan time-to-terminal: 20
+
+p0补数 v4-c6-p0:
+  output: runs/adaptive-plan-q-legacy-prefix-accepted-max500-v4-c6-p0/
+  accepted states: 415
+  prefix rows: 4929
+  seat counts: p0 415
+  base win rate: 7.7%
+  mean plan advantage: 0.952
+  median best-plan time-to-terminal: 26
+
+combined max500 prefix set:
+  shards: 81
+  accepted states: 759
+  accepted prefix rows: 8993
+  seat counts: p0 462, p1 297
+  base win rate: 5.7%
+  mean plan advantage: 1.026
+  mean plan-Q gap: 1.123
+  median best-plan time-to-terminal: 24
+```
+
+Training/eval:
+
+```text
+v4-c6balanced:
+  output: runs/adaptive-legacy-planq-prefix-policy-v4-max500-c6balanced/
+  init: legacy Plan-Q prefix v0
+  update: policy heads only
+  policy_kl: 1.0
+  action_ce: 0.2
+  prefix_pairwise_margin: 0.2
+  epochs: 20
+  lr: 3e-5
+  final KL: 0.026
+
+fixed-v5 max500, 256 games/seat, seed98460:
+  p0 35.16%
+  p1 42.19%
+  min 35.16%
+  adapter_diff ~38.9%
+
+v4-c6balanced-conservative:
+  output: runs/adaptive-legacy-planq-prefix-policy-v4-max500-c6balanced-conservative/
+  policy_kl: 2.0
+  action_ce: 0.05
+  prefix_pairwise_margin: 0.05
+  epochs: 10
+  lr: 1e-5
+  final KL: 0.0007
+
+fixed-v5 max500, 256 games/seat, seed98460:
+  p0 36.33%
+  p1 42.19%
+  min 36.33%
+  adapter_diff ~38.4%
+
+current best legacy Plan-Q v0 wrapper:
+  base: runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+  adapter: runs/adaptive-legacy-planq-prefix-policy-v0/generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+  mode: replace
+  max_grid_size: 8
+
+fixed-v5 max500, 256 games/seat, seed98460:
+  p0 42.97%
+  p1 46.09%
+  min 42.97%
+
+fixed-v5 max500, 512 games/seat, seed98800:
+  p0 38.09%
+  p1 41.41%
+  min 38.09%
+  draw: p0 12.70%, p1 9.57%
+```
+
+Interpretation:
+
+```text
+The 6x6 accepted-prefix data is much higher volume and has strong offline
+counterfactual advantage, but direct policy-head imitation still regresses
+gameplay. This is now evidence against simply scaling executed-prefix CE/margin
+training, even with better seat balance and max500 truncation.
+
+The current best deployment remains v4 base + legacy Plan-Q v0 adapter. For
+max500, the promotion baseline should be the 512-row min 38.09%, not the noisier
+256-row 42.97%.
+
+Next direction:
+  1. keep --learner-seat for data balancing,
+  2. stop training v0 further from raw prefix actions,
+  3. convert accepted-prefix data into enter/exit-plan or finish/outcome labels,
+  4. evaluate only if a candidate clears the current max500 512-row baseline.
+```

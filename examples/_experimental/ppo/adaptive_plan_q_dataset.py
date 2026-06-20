@@ -1737,6 +1737,12 @@ def parse_args():
     parser.add_argument("--opponent-policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--opponent-channels", default=None)
     parser.add_argument("--opponent-input-channels", type=int, default=9)
+    parser.add_argument(
+        "--learner-seat",
+        choices=("mixed", "p0", "p1"),
+        default="mixed",
+        help="Collect labels for both learner seats or force a single seat.",
+    )
     parser.add_argument("--map-generator", choices=("simple", "generated"), default="generated")
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
@@ -1802,8 +1808,10 @@ def parse_args():
         args.init_strategy_finish_outputs = args.strategy_finish_outputs
     if args.pad_to < max(args.grid_sizes):
         parser.error("--pad-to must be at least the maximum grid size")
-    if args.num_envs < 2:
+    if args.learner_seat == "mixed" and args.num_envs < 2:
         parser.error("num_envs must be at least 2 for mixed-seat collection")
+    if args.learner_seat != "mixed" and args.num_envs < 1:
+        parser.error("num_envs must be positive for single-seat collection")
     if args.pool_size < args.num_envs:
         parser.error("--pool-size must be at least num_envs")
     if args.num_steps <= 0 or args.num_shards <= 0:
@@ -1906,7 +1914,8 @@ def main():
 
     print("Adaptive Plan-Q dataset collection")
     print(f"Device:        {jax.devices()[0]}")
-    print(f"Environments:  {args.num_envs} mixed seats")
+    seat_desc = "mixed seats" if args.learner_seat == "mixed" else f"learner {args.learner_seat}"
+    print(f"Environments:  {args.num_envs} {seat_desc}")
     print(f"Grid sizes:    {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
     print(f"Model:         {args.model_path}")
     print(f"Plans/state:   {args.source_count}x{args.target_count}")
@@ -1996,73 +2005,113 @@ def main():
         args.grid_size_weights,
     )
     jax.block_until_ready(pool.states.armies)
-    p0_envs, p1_envs = split_mixed_env_counts(args.num_envs)
-    states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
-    states_p0 = jax.tree.map(lambda value: value[:p0_envs], states)
-    states_p1 = jax.tree.map(lambda value: value[p0_envs:], states)
-    effective_sizes_p0 = effective_sizes[:p0_envs]
-    effective_sizes_p1 = effective_sizes[p0_envs:]
-    scoreboard_history_p0 = empty_scoreboard_history(p0_envs)
-    scoreboard_history_p1 = empty_scoreboard_history(p1_envs)
-    fog_memory_p0 = empty_adaptive_fog_memory(p0_envs, args.pad_to)
-    fog_memory_p1 = empty_adaptive_fog_memory(p1_envs, args.pad_to)
-    learner_players = jnp.concatenate(
-        [
-            jnp.zeros((p0_envs,), dtype=jnp.int32),
-            jnp.ones((p1_envs,), dtype=jnp.int32),
-        ]
-    )
+    if args.learner_seat == "mixed":
+        p0_envs, p1_envs = split_mixed_env_counts(args.num_envs)
+        states, effective_sizes = make_adaptive_initial_states(pool, args.num_envs)
+        states_p0 = jax.tree.map(lambda value: value[:p0_envs], states)
+        states_p1 = jax.tree.map(lambda value: value[p0_envs:], states)
+        effective_sizes_p0 = effective_sizes[:p0_envs]
+        effective_sizes_p1 = effective_sizes[p0_envs:]
+        scoreboard_history_p0 = empty_scoreboard_history(p0_envs)
+        scoreboard_history_p1 = empty_scoreboard_history(p1_envs)
+        fog_memory_p0 = empty_adaptive_fog_memory(p0_envs, args.pad_to)
+        fog_memory_p1 = empty_adaptive_fog_memory(p1_envs, args.pad_to)
+        learner_players = jnp.concatenate(
+            [
+                jnp.zeros((p0_envs,), dtype=jnp.int32),
+                jnp.ones((p1_envs,), dtype=jnp.int32),
+            ]
+        )
+    else:
+        learner_player = 0 if args.learner_seat == "p0" else 1
+        states_single, effective_sizes_single = make_adaptive_initial_states(pool, args.num_envs)
+        scoreboard_history_single = empty_scoreboard_history(args.num_envs)
+        fog_memory_single = empty_adaptive_fog_memory(args.num_envs, args.pad_to)
+        learner_players = jnp.full((args.num_envs,), learner_player, dtype=jnp.int32)
     if args.warmup_steps > 0:
         t0 = time.time()
-        key, p0_warmup_key, p1_warmup_key = jrandom.split(key, 3)
-        states_p0, effective_sizes_p0, scoreboard_history_p0, fog_memory_p0, _, p0_resets = warmup_behavior_rollout(
-            states_p0,
-            effective_sizes_p0,
-            pool,
-            network,
-            fixed_opponent_network,
-            p0_warmup_key,
-            args.warmup_steps,
-            args.truncation,
-            opponent_id,
-            0,
-            policy_mode,
-            opponent_policy_mode,
-            opponent_policy_grid_size,
-            args.pad_to,
-            network_global_context,
-            scoreboard_history_p0,
-            args.scoreboard_history,
-            fog_memory_p0,
-            args.fog_memory,
-        )
-        states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, _, p1_resets = warmup_behavior_rollout(
-            states_p1,
-            effective_sizes_p1,
-            pool,
-            network,
-            fixed_opponent_network,
-            p1_warmup_key,
-            args.warmup_steps,
-            args.truncation,
-            opponent_id,
-            1,
-            policy_mode,
-            opponent_policy_mode,
-            opponent_policy_grid_size,
-            args.pad_to,
-            network_global_context,
-            scoreboard_history_p1,
-            args.scoreboard_history,
-            fog_memory_p1,
-            args.fog_memory,
-        )
-        jax.block_until_ready(states_p0.armies)
-        jax.block_until_ready(states_p1.armies)
-        print(
-            f"Warmup done | p0_resets={p0_resets} p1_resets={p1_resets} | "
-            f"time={time.time() - t0:.2f}s"
-        )
+        if args.learner_seat == "mixed":
+            key, p0_warmup_key, p1_warmup_key = jrandom.split(key, 3)
+            states_p0, effective_sizes_p0, scoreboard_history_p0, fog_memory_p0, _, p0_resets = warmup_behavior_rollout(
+                states_p0,
+                effective_sizes_p0,
+                pool,
+                network,
+                fixed_opponent_network,
+                p0_warmup_key,
+                args.warmup_steps,
+                args.truncation,
+                opponent_id,
+                0,
+                policy_mode,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+                args.pad_to,
+                network_global_context,
+                scoreboard_history_p0,
+                args.scoreboard_history,
+                fog_memory_p0,
+                args.fog_memory,
+            )
+            states_p1, effective_sizes_p1, scoreboard_history_p1, fog_memory_p1, _, p1_resets = warmup_behavior_rollout(
+                states_p1,
+                effective_sizes_p1,
+                pool,
+                network,
+                fixed_opponent_network,
+                p1_warmup_key,
+                args.warmup_steps,
+                args.truncation,
+                opponent_id,
+                1,
+                policy_mode,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+                args.pad_to,
+                network_global_context,
+                scoreboard_history_p1,
+                args.scoreboard_history,
+                fog_memory_p1,
+                args.fog_memory,
+            )
+            jax.block_until_ready(states_p0.armies)
+            jax.block_until_ready(states_p1.armies)
+            print(
+                f"Warmup done | p0_resets={p0_resets} p1_resets={p1_resets} | "
+                f"time={time.time() - t0:.2f}s"
+            )
+        else:
+            key, warmup_key = jrandom.split(key)
+            (
+                states_single,
+                effective_sizes_single,
+                scoreboard_history_single,
+                fog_memory_single,
+                _,
+                resets,
+            ) = warmup_behavior_rollout(
+                states_single,
+                effective_sizes_single,
+                pool,
+                network,
+                fixed_opponent_network,
+                warmup_key,
+                args.warmup_steps,
+                args.truncation,
+                opponent_id,
+                learner_player,
+                policy_mode,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+                args.pad_to,
+                network_global_context,
+                scoreboard_history_single,
+                args.scoreboard_history,
+                fog_memory_single,
+                args.fog_memory,
+            )
+            jax.block_until_ready(states_single.armies)
+            print(f"Warmup done | {args.learner_seat}_resets={resets} | time={time.time() - t0:.2f}s")
     metadata_base = {
         "grid_sizes": list(args.grid_sizes),
         "pad_to": args.pad_to,
@@ -2090,6 +2139,7 @@ def main():
         "opponent": args.opponent,
         "opponent_policy_path": args.opponent_policy_path,
         "opponent_policy_mode": args.opponent_policy_mode,
+        "learner_seat": args.learner_seat,
         "num_envs": args.num_envs,
         "num_steps": args.num_steps,
         "warmup_steps": args.warmup_steps,
@@ -2113,58 +2163,105 @@ def main():
     for shard_index in range(args.num_shards):
         t0 = time.time()
         key, rollout_key = jrandom.split(key)
-        (
-            states_p0,
-            effective_sizes_p0,
-            scoreboard_history_p0,
-            fog_memory_p0,
-            states_p1,
-            effective_sizes_p1,
-            scoreboard_history_p1,
-            fog_memory_p1,
-            rollout_data,
-            key,
-        ) = collect_mixed_plan_q_rollout(
-            states_p0,
-            effective_sizes_p0,
-            states_p1,
-            effective_sizes_p1,
-            pool,
-            network,
-            fixed_opponent_network,
-            rollout_key,
-            args.num_steps,
-            args.truncation,
-            opponent_id,
-            args.source_count,
-            args.target_count,
-            args.plan_rollout_steps,
-            args.rollouts_per_plan,
-            args.plan_worker_steps,
-            policy_mode,
-            opponent_policy_mode,
-            opponent_policy_grid_size,
-            args.army_weight,
-            args.land_weight,
-            args.prior_weight,
-            args.terminal_score,
-            args.score_scale,
-            args.score_temperature,
-            args.pad_to,
-            network_global_context,
-            scoreboard_history_p0,
-            scoreboard_history_p1,
-            args.scoreboard_history,
-            fog_memory_p0,
-            fog_memory_p1,
-            args.fog_memory,
-            candidate_source_mode,
-            candidate_target_mode,
-            args.save_worker_prefix_steps,
-            args.save_base_continuation,
-            args.base_rollouts_per_plan,
-        )
-        jax.block_until_ready(states_p0.armies)
+        if args.learner_seat == "mixed":
+            (
+                states_p0,
+                effective_sizes_p0,
+                scoreboard_history_p0,
+                fog_memory_p0,
+                states_p1,
+                effective_sizes_p1,
+                scoreboard_history_p1,
+                fog_memory_p1,
+                rollout_data,
+                key,
+            ) = collect_mixed_plan_q_rollout(
+                states_p0,
+                effective_sizes_p0,
+                states_p1,
+                effective_sizes_p1,
+                pool,
+                network,
+                fixed_opponent_network,
+                rollout_key,
+                args.num_steps,
+                args.truncation,
+                opponent_id,
+                args.source_count,
+                args.target_count,
+                args.plan_rollout_steps,
+                args.rollouts_per_plan,
+                args.plan_worker_steps,
+                policy_mode,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+                args.army_weight,
+                args.land_weight,
+                args.prior_weight,
+                args.terminal_score,
+                args.score_scale,
+                args.score_temperature,
+                args.pad_to,
+                network_global_context,
+                scoreboard_history_p0,
+                scoreboard_history_p1,
+                args.scoreboard_history,
+                fog_memory_p0,
+                fog_memory_p1,
+                args.fog_memory,
+                candidate_source_mode,
+                candidate_target_mode,
+                args.save_worker_prefix_steps,
+                args.save_base_continuation,
+                args.base_rollouts_per_plan,
+            )
+            jax.block_until_ready(states_p0.armies)
+        else:
+            (
+                states_single,
+                effective_sizes_single,
+                scoreboard_history_single,
+                fog_memory_single,
+                rollout_data,
+                key,
+            ) = collect_plan_q_rollout(
+                states_single,
+                effective_sizes_single,
+                pool,
+                network,
+                fixed_opponent_network,
+                rollout_key,
+                args.num_steps,
+                args.truncation,
+                opponent_id,
+                learner_player,
+                args.source_count,
+                args.target_count,
+                args.plan_rollout_steps,
+                args.rollouts_per_plan,
+                args.plan_worker_steps,
+                policy_mode,
+                opponent_policy_mode,
+                opponent_policy_grid_size,
+                args.army_weight,
+                args.land_weight,
+                args.prior_weight,
+                args.terminal_score,
+                args.score_scale,
+                args.score_temperature,
+                args.pad_to,
+                network_global_context,
+                scoreboard_history_single,
+                args.scoreboard_history,
+                fog_memory_single,
+                args.fog_memory,
+                candidate_source_mode,
+                candidate_target_mode,
+                args.save_worker_prefix_steps,
+                args.save_base_continuation,
+                args.base_rollouts_per_plan,
+            )
+            jax.block_until_ready(states_single.armies)
         arrays = flatten_plan_q_data(rollout_data, learner_players, args.logit_dtype)
         arrays, original_samples, kept_samples = filter_plan_q_arrays(
             arrays,
