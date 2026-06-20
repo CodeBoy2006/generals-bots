@@ -1184,3 +1184,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep the prefix infrastructure but stop expanding oracle-only prefix data. Next collect inference-matched model-worker/model or belief-main-stack prefixes whose executed plans later win or reduce draw, then mix a small oracle slice as regularization.
 - **Context:** Small oracle-prefix v0 had only `8` winning states / `96` prefix labels but weakly improved fixed-v5 max250 seed `93900` min from `4.69%` to `9.38%` and held seed `93700` at `10.94%`; Expander smoke with Worker limited to 8x8 improved 8p0 and left larger rows unchanged. Larger oracle-prefix v1 (`186` states / `2195` labels, offline action `98.6%`) regressed fixed-v5 to `7.03%` and `9.38%` min, indicating oracle command-distribution mismatch.
+
+## [2026-06-20 13:40] Belief-Matched Prefix Worker
+- **Changes:** Added inference-matched Plan-Q candidate modes: `--candidate-target belief` uses `enemy_general_logits`, and `--candidate-source main-stack` uses army mass plus route distance with no source-head prior. Added parser coverage and documented the GPU belief-prefix probe.
+- **Status:** Completed
+- **Next Steps:** Stop Worker-rerank scale/data sweeps. Use prefix data for main-policy/finish gating or a command policy that learns when to enter and exit a plan.
+- **Context:** Belief/main-stack collection produced `186` winning states and `2176` non-pass prefix labels with mean gap `0.732`; the Worker fit offline (`97.8%` action/useful), but fixed-v5 max250 stayed weak: seed `93900` min `7.81%` vs baseline `4.69%`, and seed `93700` regressed to `9.38%` vs baseline `10.94%`.

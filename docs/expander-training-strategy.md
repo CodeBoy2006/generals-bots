@@ -11884,3 +11884,129 @@ Next useful variant:
     save executed prefixes only when the plan later wins or sharply reduces draw
   mix a small oracle slice as regularization rather than the whole Worker target.
 ```
+
+### 2026-06-20: Inference-Matched Belief Prefix Probe
+
+Added inference-matched candidate modes to the Plan-Q collector:
+
+```text
+adaptive_plan_q_dataset.py:
+  --candidate-target belief
+    use strategy enemy_general_logits as target logits
+
+  --candidate-source main-stack
+    use army mass and route distance to the top target, with no source-head prior
+
+This matches:
+  evaluate_adaptive_policy.py --strategy-plan-worker-command-source belief-main-stack
+```
+
+Parser guards:
+
+```text
+--candidate-source belief:
+  rejected
+
+--candidate-target model-worker/main-stack:
+  rejected
+
+--candidate-target belief:
+  requires --strategy-aux
+```
+
+GPU smoke:
+
+```text
+runs/adaptive-plan-q-prefix-belief-smoke-v0/
+  4 envs
+  2 rollout steps
+  2x2 plans
+  plan_rollout_steps 8
+  plan_worker_steps 4
+  save_worker_prefix_steps 4
+
+result:
+  shard saved successfully
+  samples 8/8
+  best_win 0.0
+  best_draw 1.0
+```
+
+Inference-matched winning prefix collection:
+
+```text
+run:
+  runs/adaptive-plan-q-prefix-belief-win-v0/
+
+settings:
+  candidate_source main-stack
+  candidate_target belief
+  require_best_plan_win
+  warmup 80
+  plan_rollout_steps 48
+  plan_worker_steps 12
+  save_worker_prefix_steps 12
+  fixed-v5 sample opponent
+
+data:
+  186 winning command states
+  2176 valid non-pass prefix steps
+  mean plan_q_gap 0.732
+  min plan_q_gap 0.426
+```
+
+Worker training:
+
+```text
+run:
+  runs/adaptive-plan-worker-prefix-belief-win-v0/
+
+architecture:
+  U-Net 32,48,64,32
+
+epoch 60:
+  action/useful accuracy 97.8%
+  source accuracy 97.9%
+  direction accuracy 98.2%
+```
+
+Fixed-v5 max250 evaluation:
+
+```text
+seed 93900 baseline:
+  p0 4.69%
+  p1 12.50%
+  min 4.69%
+
+seed 93900 belief-prefix Worker, scale 0.02:
+  p0 7.81%
+  p1 9.38%
+  min 7.81%
+
+seed 93700 historical baseline:
+  p0 10.94%
+  p1 10.94%
+  min 10.94%
+
+seed 93700 belief-prefix Worker, scale 0.02:
+  p0 9.38%
+  p1 9.38%
+  min 9.38%
+```
+
+Conclusion:
+
+```text
+The inference-matched collector works and produces enough winning prefix data.
+Direct Worker imitation/rerank still does not solve fixed-v5; it improves a weak
+seed only partially and regresses the stronger seed.
+
+Stop:
+  more Worker-rerank scale sweeps
+  larger pure prefix imitation datasets
+
+Next useful route:
+  use prefix data as supervision for main-policy/finish gating or train a
+  command policy that decides when to enter/exits a plan, rather than forcing
+  centered Worker logits into every state.
+```

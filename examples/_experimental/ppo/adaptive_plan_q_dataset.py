@@ -56,7 +56,7 @@ from train import random_action, stack_learner_actions
 from train_adaptive import crop_observation, split_mixed_env_counts
 
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
-CANDIDATE_MODE_TO_ID = {"heuristic": 0, "model": 1, "model-worker": 2}
+CANDIDATE_MODE_TO_ID = {"heuristic": 0, "model": 1, "model-worker": 2, "belief": 3, "main-stack": 4}
 
 
 def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
@@ -140,6 +140,27 @@ def model_worker_candidate_source_indices(
     route_distance = jnp.abs(rows - target_row) + jnp.abs(cols - target_col)
     source_scores = source_logits + army_score - 0.05 * route_distance.astype(jnp.float32)
     return topk_indices(jnp.where(movable, source_scores, -1.0e9), count)
+
+
+def main_stack_candidate_source_indices(
+    state,
+    learner_player: int,
+    effective_size: int,
+    pad_size: int,
+    count: int,
+    target_index: jnp.ndarray,
+) -> jnp.ndarray:
+    """Pick source candidates like belief-main-stack inference: army mass and route distance."""
+    zero_source_logits = jnp.zeros((pad_size, pad_size), dtype=jnp.float32)
+    return model_worker_candidate_source_indices(
+        state,
+        learner_player,
+        effective_size,
+        pad_size,
+        count,
+        zero_source_logits,
+        target_index,
+    )
 
 
 def model_candidate_target_indices(
@@ -307,6 +328,7 @@ def score_plan_candidates(
     candidate_target_mode: int,
     model_source_logits: jnp.ndarray,
     model_target_logits: jnp.ndarray,
+    model_belief_logits: jnp.ndarray,
 ):
     """Score source-target plans by forcing the first move and rolling out the base policy."""
     if candidate_target_mode == CANDIDATE_MODE_TO_ID["model"]:
@@ -316,6 +338,14 @@ def score_plan_candidates(
             pad_size,
             target_count,
             model_target_logits,
+        )
+    elif candidate_target_mode == CANDIDATE_MODE_TO_ID["belief"]:
+        target_indices = model_candidate_target_indices(
+            state,
+            effective_size,
+            pad_size,
+            target_count,
+            model_belief_logits,
         )
     else:
         target_indices = candidate_target_indices(state, learner_player, effective_size, pad_size, target_count)
@@ -336,6 +366,15 @@ def score_plan_candidates(
             pad_size,
             source_count,
             model_source_logits,
+            target_indices[0],
+        )
+    elif candidate_source_mode == CANDIDATE_MODE_TO_ID["main-stack"]:
+        source_indices = main_stack_candidate_source_indices(
+            state,
+            learner_player,
+            effective_size,
+            pad_size,
+            source_count,
             target_indices[0],
         )
     else:
@@ -879,23 +918,28 @@ def collect_plan_q_step(
     )
     if (
         candidate_source_mode in (CANDIDATE_MODE_TO_ID["model"], CANDIDATE_MODE_TO_ID["model-worker"])
-        or candidate_target_mode == CANDIDATE_MODE_TO_ID["model"]
+        or candidate_target_mode in (CANDIDATE_MODE_TO_ID["model"], CANDIDATE_MODE_TO_ID["belief"])
     ):
         aux_outputs = jax.vmap(lambda obs, mask, active_mask: network.strategy_auxiliary(obs, mask, active_mask))(
             obs_arr,
             masks,
             active,
         )
-        model_source_logits = aux_outputs.source_logits
-        model_target_logits = aux_outputs.target_logits
+        model_source_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
+        model_target_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
+        if aux_outputs.source_logits is not None and aux_outputs.target_logits is not None:
+            model_source_logits = aux_outputs.source_logits
+            model_target_logits = aux_outputs.target_logits
+        model_belief_logits = aux_outputs.enemy_general_logits
     else:
         model_source_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
         model_target_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
+        model_belief_logits = jnp.zeros((num_envs, pad_size, pad_size), dtype=jnp.float32)
 
     key, plan_key, prefix_key, policy_key, opponent_key = jrandom.split(key, 5)
     plan_keys = jrandom.split(plan_key, num_envs)
     plan_outputs = jax.vmap(
-        lambda state, size, sample_key, prev_scoreboard, memory, source_logits, target_logits: score_plan_candidates(
+        lambda state, size, sample_key, prev_scoreboard, memory, source_logits, target_logits, belief_logits: score_plan_candidates(
             network,
             fixed_opponent_network,
             state,
@@ -928,6 +972,7 @@ def collect_plan_q_step(
             candidate_target_mode,
             source_logits,
             target_logits,
+            belief_logits,
         )
     )(
         states,
@@ -937,6 +982,7 @@ def collect_plan_q_step(
         current_fog_memory,
         model_source_logits,
         model_target_logits,
+        model_belief_logits,
     )
     prefix_keys = jrandom.split(prefix_key, num_envs)
     worker_prefix_outputs = jax.vmap(
@@ -1448,14 +1494,18 @@ def parse_args():
         parser.error("--strategy-finish-outputs must be positive")
     if args.source_count <= 0 or args.target_count <= 0:
         parser.error("--source-count and --target-count must be positive")
+    if args.candidate_source == "belief":
+        parser.error("--candidate-source belief is not supported; use --candidate-target belief")
+    if args.candidate_target in ("model-worker", "main-stack"):
+        parser.error("--candidate-target model-worker/main-stack is not supported")
     if (
         args.candidate_source in ("model", "model-worker") or args.candidate_target == "model"
     ) and not (
         args.strategy_aux and args.strategy_spatial_aux
     ):
         parser.error("--candidate-source/--candidate-target model requires --strategy-aux --strategy-spatial-aux")
-    if args.candidate_target == "model-worker":
-        parser.error("--candidate-target model-worker is not supported; use --candidate-target model")
+    if args.candidate_target == "belief" and not args.strategy_aux:
+        parser.error("--candidate-target belief requires --strategy-aux")
     if args.plan_rollout_steps <= 0 or args.rollouts_per_plan <= 0:
         parser.error("--plan-rollout-steps and --rollouts-per-plan must be positive")
     if args.plan_worker_steps < 0:

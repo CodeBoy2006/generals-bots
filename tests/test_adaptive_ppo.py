@@ -1262,6 +1262,46 @@ def test_plan_worker_prefix_dataset_loads_executed_command_rows(tmp_path):
     assert float(dataset["obs"][0, 6, 3, 3]) == 1.0
 
 
+def test_plan_q_dataset_parse_args_accepts_belief_main_stack_candidates(monkeypatch):
+    import pytest
+
+    from examples._experimental.ppo.adaptive_plan_q_dataset import parse_args
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "adaptive_plan_q_dataset.py",
+            "4",
+            "--model-path",
+            "model.eqx",
+            "--strategy-aux",
+            "--candidate-source",
+            "main-stack",
+            "--candidate-target",
+            "belief",
+        ],
+    )
+    args = parse_args()
+
+    assert args.candidate_source == "main-stack"
+    assert args.candidate_target == "belief"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "adaptive_plan_q_dataset.py",
+            "4",
+            "--model-path",
+            "model.eqx",
+            "--strategy-aux",
+            "--candidate-source",
+            "belief",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_accepted_replacement_weights_prefer_outcome_then_score():
     from examples._experimental.ppo.adaptive_search_distill import accepted_replacement_weights
 
