@@ -13833,3 +13833,169 @@ reward sweep:
     train policy/action-Q/finish heads to reproduce high-margin search choices
     only where the online search changes outcome timing or draw risk.
 ```
+
+### 2026-06-20 19:11 - Aligned Online-Search Trace Dataset
+
+Implementation:
+
+```text
+Added:
+  examples/_experimental/ppo/adaptive_online_search_trace_dataset.py
+
+Purpose:
+  collect the deployment-shaped online-search wrapper decisions as NPZ shards
+  for later distillation, instead of trying to hand-tune online-search scales.
+
+Core saved fields:
+  obs
+  legal_mask
+  active
+  teacher_logits          # deployment base + optional adapter logits
+  teacher_action_index    # executed action: search action when search is active
+  base_action_index
+  search_action_index
+  search_candidate_indices
+  search_prior_scores
+  search_scores
+  search_outcomes
+  search_best_position
+  search_best_score
+  search_score_gap
+  search_best_outcome
+  search_used
+  search_action_changed
+  grid_size
+  seat
+  time
+  contact / visible_enemy_count / visible_enemy_density
+  weak intent + enemy_general/source/target heatmaps
+
+Important:
+  --warmup-steps advances the deployment policy before saving rows.
+  This is necessary because the useful wrapper gate starts around turn 80 and
+  often requires visible contact. Without warmup, small shards mostly save
+  opening states that are not the demonstrated improvement distribution.
+```
+
+GPU smoke:
+
+```text
+command shape:
+  num_envs=2
+  grid_sizes=8
+  warmup_steps=1
+  num_steps=2
+  top_k=2
+  rollout_steps=2
+
+result:
+  wrote 4 rows
+  NPZ fields: 34
+  obs shape: (4, 35, 16, 16)
+  teacher_logits shape: (4, 2049)
+  search_candidate_indices shape: (4, 2)
+  all numeric trace fields finite
+```
+
+First real Expander shard:
+
+```text
+path:
+  runs/adaptive-online-search-expander-midgame-v0/
+    online-search-expander-00000.npz
+
+settings:
+  num_envs=12 mixed seats
+  grid_sizes=8,12,16
+  warmup_steps=80
+  num_steps=8
+  opponent=expander
+  top_k=4
+  rollout_steps=16
+  search_min_turn=80
+  require_contact=true
+  require_search_used=true
+
+rows:
+  saved 57 / 96
+  grid_size distribution:
+    8: 8
+    12: 32
+    16: 17
+  seat distribution:
+    p0: 41
+    p1: 16
+  time:
+    min 80
+    max 87
+    mean 83.56
+  search_action_changed:
+    64.9%
+  mean search_score_gap:
+    9.19
+  search_best_outcome:
+    draw: 50
+    win: 7
+```
+
+First real fixed-v5 shard:
+
+```text
+path:
+  runs/adaptive-online-search-fixed-v5-midgame-v0/
+    online-search-fixed-v5-00000.npz
+
+settings:
+  num_envs=12 mixed seats
+  grid_sizes=8
+  warmup_steps=80
+  num_steps=8
+  opponent_policy_path:
+    /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+  truncation=500
+  top_k=4
+  rollout_steps=16
+  search_min_turn=80
+  require_contact=true
+  require_search_used=true
+
+rows:
+  saved 88 / 96
+  seat distribution:
+    p0: 40
+    p1: 48
+  time:
+    min 80
+    max 87
+    mean 83.50
+  search_action_changed:
+    56.8%
+  mean search_score_gap:
+    3.55
+  search_best_outcome:
+    draw: 88
+```
+
+Interpretation:
+
+```text
+The collector is now usable as the bridge from planner upper bound to model
+training. The fixed-v5 short rollouts still mostly label best_outcome=draw, so
+the first distillation pass should not require search_best_outcome=win. Better
+filters:
+
+  search_used
+  search_action_changed
+  search_score_gap
+  min turn/contact
+  later, final long-episode outcome after wrapper execution
+
+The Expander shard already contains some short-horizon win labels; the fixed-v5
+shard mostly provides high-margin action/value preferences in states where the
+512-row wrapper proved the long-game conversion effect.
+
+Next:
+  1. add dataset-format online-search to adaptive_strategy_supervised.py
+  2. train with KL-to-base + top-k search soft CE + action-Q/value margin
+  3. evaluate pure checkpoint/wrapper-free against fixed-v5 max500 and Expander
+```

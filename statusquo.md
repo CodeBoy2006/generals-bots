@@ -1286,3 +1286,9 @@
 - **Status:** Completed
 - **Next Steps:** Build an aligned online-search trace dataset for distillation rather than sweeping search parameters. Save base action, search action, candidate scores, score margin, search-enter flag, and final outcome; train policy/action-Q/finish heads on high-margin states.
 - **Context:** Expander 8/12/16 max750 same-seed 256-row baseline min was `76.95%` with 16x draw `14.45%` on both seats. Online search `top_k=4, rollout_steps=16, turn>=80, contact-only, max_grid=16` reached min `85.16%`, with all six rows above `85%` and 16x draw down to `5.47%` / `6.25%`. This is a planner/wrapper upper bound, not a pure checkpoint.
+
+## [2026-06-20 19:11] Online Search Trace Dataset
+- **Changes:** Added `examples/_experimental/ppo/adaptive_online_search_trace_dataset.py` to collect aligned deployment online-search traces into ignored `runs/` NPZ shards. The collector supports fixed checkpoint and heuristic opponents, warmup before saving, size/turn/contact gates, policy adapters, top-k candidate scores, score margins, weak belief/intent labels, and strategy-compatible core fields. Updated README, Chinese manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Add `dataset-format online-search` training support in `adaptive_strategy_supervised.py`: KL-to-base plus top-k soft CE/search-Q/margin losses, filtering on `search_used`, `search_action_changed`, `search_score_gap`, turn/contact, and balanced size/seat strata.
+- **Context:** GPU smoke wrote finite NPZ trace fields. First real Expander shard saved `57/96` midgame rows across 8/12/16 with action-change rate `64.9%`, mean gap `9.19`, and `7` short-horizon win labels. First fixed-v5 max500 shard saved `88/96` 8x rows with balanced seats, action-change rate `56.8%`, and mean gap `3.55`; short rollouts still labeled all best outcomes draw, so fixed-v5 distillation should not filter only on `search_best_outcome=win`.
