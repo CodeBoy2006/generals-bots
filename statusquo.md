@@ -1268,3 +1268,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep fixed-v5 diagnostics on max500. Do not promote the max500 Plan-Worker rerank; current best deployment remains v4 base plus legacy Plan-Q prefix policy v0 adapter.
 - **Context:** Trained `runs/adaptive-plan-worker-prefix-max500-mainstack-heuristic-v0/` on 8958 winning max500 prefix rows. Same-seed 256-row wrapper+Worker moved min 36.72% -> 39.45%, but 512-row seed98800 fell below the existing wrapper baseline: 36.52% vs 38.09% min.
+
+## [2026-06-20 17:54] Online Counterfactual Search Wrapper
+- **Changes:** Added fixed-opponent online rollout search to `evaluate_adaptive_policy.py` via `--online-search-*` flags. The evaluator now composes the base policy plus optional policy adapter, scores top-k primitive actions by short counterfactual rollouts against `--opponent-policy-path`, and executes the best scored action. Updated README, Chinese manual, and strategy notes.
+- **Status:** Completed
+- **Next Steps:** Run a 512-row confirmation for the exact `top_k=4, rollout_steps=16, turn>=80, contact-only` wrapper. Then collect online-search traces for DAgger-style distillation with search value/margin/enter-state labels. Add heuristic/Expander opponent support for 12/16 upper-bound diagnostics.
+- **Context:** GPU smoke passed. Against fixed-v5 max500, current wrapper same-seed 256-row min was `38.28%`; online search lifted it to `50.39%` with p0 `53.52%`, p1 `50.39%`, and draw below `7%` on both seats. This is the strongest fixed-v5 signal so far, but it is a planner/wrapper result, not a pure `.eqx` checkpoint.

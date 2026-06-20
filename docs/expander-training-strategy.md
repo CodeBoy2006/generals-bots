@@ -13496,3 +13496,130 @@ Current deployment reference remains:
   v4 base + legacy Plan-Q prefix policy v0 adapter
   max500 512-row reference min: 38.09%
 ```
+
+### 2026-06-20 17:54 - Online Counterfactual Search Wrapper
+
+Rationale:
+
+```text
+The last several runs show that accepted-prefix data is real but hard to
+compress into a single policy head, Worker, or gate. The next high-yield
+diagnostic is to keep the counterfactual evaluator online and measure the
+planner upper bound directly.
+```
+
+Implementation:
+
+```text
+evaluate_adaptive_policy.py:
+  added --online-search-top-k
+  added --online-search-rollout-steps
+  added --online-search-rollouts-per-action
+  added --online-search-min-turn
+  added --online-search-require-contact
+  added --online-search-min-grid-size / --online-search-max-grid-size
+  added search scoring weights:
+    --online-search-army-weight
+    --online-search-land-weight
+    --online-search-prior-weight
+    --online-search-terminal-score
+
+scope:
+  supports fixed checkpoint opponents via --opponent-policy-path
+  composes the base policy with the deployment policy adapter
+  scores top-k primitive prior actions by short rollout against the fixed opponent
+  executes the best-scoring action in the real game
+```
+
+GPU smoke:
+
+```text
+num_games=2
+max_steps=10
+top_k=2
+rollout_steps=2
+rollouts/action=1
+result: ran on cuda:0
+```
+
+Main probe:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+opponent:
+  /home/codeboy/research/generals-bots/generals-ppo-8x8-expander-gpu-v5.eqx
+  mode sample
+
+gate:
+  fixed-v5 max500
+
+online search:
+  top_k=4
+  rollout_steps=16
+  rollouts/action=1
+  min_turn=80
+  require_contact=true
+  max_grid_size=8
+```
+
+Results:
+
+```text
+64 games/seat seed99020:
+  baseline:
+    p0 42.19%
+    p1 32.81%
+    min 32.81%
+  online search:
+    p0 53.12%
+    p1 43.75%
+    min 43.75%
+
+128 games/seat seed99040:
+  baseline:
+    p0 32.03%
+    p1 39.84%
+    min 32.03%
+  online search:
+    p0 42.19%
+    p1 50.78%
+    min 42.19%
+
+256 games/seat seed99060:
+  baseline:
+    p0 41.80%
+    p1 38.28%
+    min 38.28%
+    draw 10.94% / 11.33%
+  online search:
+    p0 53.52%
+    p1 50.39%
+    min 50.39%
+    draw 6.64% / 5.86%
+```
+
+Conclusion:
+
+```text
+This is the strongest fixed-v5 max500 result so far.
+
+The online counterfactual wrapper improved same-seed 256-row min by +12.11pp
+over the current best policy-adapter wrapper and pushed both seats to roughly
+50% against v5 sample. It is not a pure .eqx checkpoint, but it proves the
+missing capability is present in short counterfactual evaluation and not in the
+current policy head.
+
+Next:
+  1. run 512-row confirmation for this exact wrapper
+  2. collect online-search action traces as high-confidence DAgger data
+  3. distill not only the chosen action, but search value, action margin,
+     and search-enter state features
+  4. add the same online-search path for Expander/heuristic opponents so 12/16
+     can get an equivalent planner upper-bound diagnostic
+```

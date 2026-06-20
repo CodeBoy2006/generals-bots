@@ -38,6 +38,7 @@ from adaptive_common import (
     empty_adaptive_fog_memory,
     make_adaptive_state_pool,
     parse_grid_sizes,
+    reset_adaptive_scoreboard_history,
     update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
@@ -420,6 +421,264 @@ def policy_adapter_blend_logits(
     weight = jnp.clip(jnp.asarray(scale, dtype=policy_logits.dtype), 0.0, 1.0)
     blended = (1.0 - weight) * policy_logits + weight * adapter_logits
     return jnp.where(legal, blended, policy_logits)
+
+
+def adapter_composed_policy_logits(
+    network,
+    policy_adapter_network,
+    obs_arr: jnp.ndarray,
+    mask: jnp.ndarray,
+    active: jnp.ndarray,
+    effective_size: int,
+    policy_adapter_scale: float,
+    policy_adapter_mode: int,
+    policy_adapter_min_grid_size: int,
+    policy_adapter_max_grid_size: int,
+) -> jnp.ndarray:
+    """Return base policy logits with the deployment policy adapter composed in."""
+    logits, _ = network.logits_value(obs_arr, mask, active)
+    if policy_adapter_network is None or policy_adapter_scale <= 0.0:
+        return logits
+    size_allowed = (policy_adapter_min_grid_size <= 0 or effective_size >= policy_adapter_min_grid_size) and (
+        policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size
+    )
+    adapter_logits, _ = policy_adapter_network.logits_value(obs_arr, mask, active)
+    adapted_logits = jax.lax.switch(
+        policy_adapter_mode,
+        (
+            lambda _: policy_adapter_delta_logits(logits, adapter_logits, policy_adapter_scale),
+            lambda _: policy_adapter_blend_logits(logits, adapter_logits, policy_adapter_scale),
+            lambda _: adapter_logits,
+        ),
+        None,
+    )
+    return jnp.where(size_allowed, adapted_logits, logits)
+
+
+def scalar_reset_fog_memory(memory, done: jnp.ndarray):
+    """Reset one scalar fog-memory state after a terminal search rollout."""
+    keep = (~done).astype(jnp.float32)
+    return jax.tree.map(lambda value: value * keep, memory)
+
+
+def search_score_observation(info, obs, player: int, army_weight: float, land_weight: float, terminal_score: float):
+    """Score a search rollout leaf from one player's perspective."""
+    army_balance = (obs.owned_army_count.astype(jnp.float32) - obs.opponent_army_count.astype(jnp.float32)) / jnp.maximum(
+        obs.owned_army_count + obs.opponent_army_count,
+        1,
+    )
+    land_balance = (obs.owned_land_count.astype(jnp.float32) - obs.opponent_land_count.astype(jnp.float32)) / obs.armies.size
+    terminal = jnp.where(
+        info.winner == player,
+        terminal_score,
+        jnp.where(info.winner == 1 - player, -terminal_score, 0.0),
+    )
+    return terminal + army_weight * army_balance + land_weight * land_balance
+
+
+def adapter_policy_action_with_memory(
+    network,
+    policy_adapter_network,
+    obs,
+    effective_size: int,
+    key,
+    policy_mode: int,
+    pad_size: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    previous_scoreboard: jnp.ndarray,
+    fog_memory_enabled: bool,
+    fog_memory,
+    policy_adapter_scale: float,
+    policy_adapter_mode: int,
+    policy_adapter_min_grid_size: int,
+    policy_adapter_max_grid_size: int,
+):
+    """Dispatch the deployment policy while carrying one-player context."""
+    current_memory = update_adaptive_fog_memory(fog_memory, obs) if fog_memory_enabled else fog_memory
+    current_scoreboard = adaptive_scoreboard_features(obs, effective_size)
+    history_context = (
+        adaptive_scoreboard_history_context(previous_scoreboard, current_scoreboard)
+        if scoreboard_history_enabled
+        else None
+    )
+    obs_arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size,
+        pad_size,
+        include_global_context=global_context,
+        scoreboard_history=history_context,
+        fog_memory=current_memory if fog_memory_enabled else None,
+    )
+    mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
+    logits = adapter_composed_policy_logits(
+        network,
+        policy_adapter_network,
+        obs_arr,
+        mask,
+        active,
+        effective_size,
+        policy_adapter_scale,
+        policy_adapter_mode,
+        policy_adapter_min_grid_size,
+        policy_adapter_max_grid_size,
+    )
+    index = jax.lax.cond(
+        policy_mode == 0,
+        lambda _: jnp.argmax(logits),
+        lambda _: jrandom.categorical(key, logits),
+        None,
+    )
+    return adaptive_index_to_action(index, pad_size), current_scoreboard, current_memory
+
+
+def online_search_action_policy_opponent(
+    network,
+    policy_adapter_network,
+    opponent_network,
+    state,
+    effective_size: int,
+    key,
+    policy_player: int,
+    policy_mode: int,
+    opponent_policy_mode: int,
+    pad_size: int,
+    max_steps: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    previous_scoreboard: jnp.ndarray,
+    fog_memory_enabled: bool,
+    fog_memory,
+    policy_adapter_scale: float,
+    policy_adapter_mode: int,
+    policy_adapter_min_grid_size: int,
+    policy_adapter_max_grid_size: int,
+    top_k: int,
+    rollout_steps: int,
+    rollouts_per_action: int,
+    army_weight: float,
+    land_weight: float,
+    prior_weight: float,
+    terminal_score: float,
+) -> jnp.ndarray:
+    """Choose a primitive action by online counterfactual rollout search against a fixed policy."""
+    obs = game.get_observation(state, policy_player)
+    current_scoreboard = adaptive_scoreboard_features(obs, effective_size)
+    history_context = (
+        adaptive_scoreboard_history_context(previous_scoreboard, current_scoreboard)
+        if scoreboard_history_enabled
+        else None
+    )
+    obs_arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size,
+        pad_size,
+        include_global_context=global_context,
+        scoreboard_history=history_context,
+        fog_memory=fog_memory if fog_memory_enabled else None,
+    )
+    mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
+    logits = adapter_composed_policy_logits(
+        network,
+        policy_adapter_network,
+        obs_arr,
+        mask,
+        active,
+        effective_size,
+        policy_adapter_scale,
+        policy_adapter_mode,
+        policy_adapter_min_grid_size,
+        policy_adapter_max_grid_size,
+    )
+    prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
+    candidate_actions = jax.vmap(lambda index: adaptive_index_to_action(index, pad_size))(candidate_indices)
+    opponent_player = 1 - policy_player
+    opponent_obs = game.get_observation(state, opponent_player)
+    key, opponent_first_key = jrandom.split(key)
+    opponent_first_action = policy_network_action(
+        opponent_network,
+        opponent_first_key,
+        crop_observation(opponent_obs, effective_size),
+        opponent_policy_mode,
+    )
+
+    def rollout_result(initial_state, rollout_key):
+        def body(carry, _):
+            rollout_state, prev_scoreboard, memory, step_key = carry
+            step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
+            learner_obs = game.get_observation(rollout_state, policy_player)
+            learner_action, next_scoreboard, next_memory = adapter_policy_action_with_memory(
+                network,
+                policy_adapter_network,
+                learner_obs,
+                effective_size,
+                learner_key,
+                policy_mode,
+                pad_size,
+                global_context,
+                scoreboard_history_enabled,
+                prev_scoreboard,
+                fog_memory_enabled,
+                memory,
+                policy_adapter_scale,
+                policy_adapter_mode,
+                policy_adapter_min_grid_size,
+                policy_adapter_max_grid_size,
+            )
+            opponent_obs = game.get_observation(rollout_state, opponent_player)
+            opponent_action_value = policy_network_action(
+                opponent_network,
+                opponent_key,
+                crop_observation(opponent_obs, effective_size),
+                opponent_policy_mode,
+            )
+            actions = jax.lax.cond(
+                policy_player == 0,
+                lambda _: jnp.stack([learner_action, opponent_action_value]),
+                lambda _: jnp.stack([opponent_action_value, learner_action]),
+                None,
+            )
+            next_state, _ = game.step(rollout_state, actions)
+            current_info = game.get_info(rollout_state)
+            already_done = current_info.is_done | (rollout_state.time >= max_steps)
+            final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
+            final_info = game.get_info(final_state)
+            final_scoreboard = reset_adaptive_scoreboard_history(next_scoreboard, final_info.is_done)
+            final_memory = scalar_reset_fog_memory(next_memory, final_info.is_done)
+            return (final_state, final_scoreboard, final_memory, step_key), None
+
+        (final_state, _, _, _), _ = jax.lax.scan(
+            body,
+            (initial_state, current_scoreboard, fog_memory, rollout_key),
+            None,
+            length=rollout_steps,
+        )
+        final_info = game.get_info(final_state)
+        truncated = (final_state.time >= max_steps) & ~final_info.is_done
+        scored_info = final_info._replace(winner=jnp.where(truncated, -1, final_info.winner))
+        final_obs = game.get_observation(final_state, policy_player)
+        return search_score_observation(scored_info, final_obs, policy_player, army_weight, land_weight, terminal_score)
+
+    def score_candidate(action, prior_score, candidate_key):
+        first_actions = jax.lax.cond(
+            policy_player == 0,
+            lambda _: jnp.stack([action, opponent_first_action]),
+            lambda _: jnp.stack([opponent_first_action, action]),
+            None,
+        )
+        next_state, first_info = game.step(state, first_actions)
+        rollout_keys = jrandom.split(candidate_key, rollouts_per_action)
+        rollout_scores = jax.vmap(lambda rollout_key: rollout_result(next_state, rollout_key))(rollout_keys)
+        first_terminal = jnp.where(
+            first_info.winner == policy_player,
+            terminal_score,
+            jnp.where(first_info.winner == opponent_player, -terminal_score, 0.0),
+        )
+        return first_terminal + jnp.mean(rollout_scores) + prior_weight * prior_score
+
+    candidate_keys = jrandom.split(key, top_k)
+    scores = jax.vmap(score_candidate)(candidate_actions, prior_scores, candidate_keys)
+    return candidate_actions[jnp.argmax(scores)]
 
 
 def policy_adapter_gate_features(
@@ -1143,6 +1402,17 @@ def evaluate_policy_opponent_batch(
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
     policy_adapter_commit_steps=0,
+    online_search_top_k=0,
+    online_search_rollout_steps=16,
+    online_search_rollouts_per_action=1,
+    online_search_min_turn=0,
+    online_search_require_contact=False,
+    online_search_min_grid_size=0,
+    online_search_max_grid_size=0,
+    online_search_army_weight=1.0,
+    online_search_land_weight=10.0,
+    online_search_prior_weight=0.001,
+    online_search_terminal_score=100.0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1164,6 +1434,11 @@ def evaluate_policy_opponent_batch(
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
     effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    online_search_size_allowed = (
+        (online_search_min_grid_size <= 0 or effective_size >= online_search_min_grid_size)
+        and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
+    )
+    online_search_enabled = online_search_top_k > 0 and online_search_size_allowed
     initial_adapter_commit = jnp.zeros((num_envs,), dtype=jnp.int32)
 
     def body(carry, _):
@@ -1295,6 +1570,49 @@ def evaluate_policy_opponent_batch(
             policy_keys,
             adapter_commit,
         )
+        if online_search_enabled:
+            key, search_key = jrandom.split(key)
+            search_keys = jrandom.split(search_key, num_envs)
+            visible_contact = jnp.sum(policy_obs.opponent_cells.reshape(num_envs, -1), axis=-1) > 0
+            search_turn_allowed = states.time >= online_search_min_turn
+            search_contact_allowed = visible_contact | (not online_search_require_contact)
+            use_online_search = (~pre_infos.is_done) & search_turn_allowed & search_contact_allowed
+            policy_actions = jax.vmap(
+                lambda state, sample_key, base_action, row_history, row_memory, use_search: jax.lax.cond(
+                    use_search,
+                    lambda _: online_search_action_policy_opponent(
+                        network,
+                        policy_adapter_network,
+                        opponent_network,
+                        state,
+                        effective_size,
+                        sample_key,
+                        policy_player,
+                        policy_mode,
+                        opponent_policy_mode,
+                        pad_size,
+                        max_steps,
+                        global_context,
+                        scoreboard_history,
+                        row_history,
+                        fog_memory,
+                        row_memory,
+                        effective_policy_adapter_scale,
+                        policy_adapter_mode,
+                        policy_adapter_min_grid_size,
+                        policy_adapter_max_grid_size,
+                        online_search_top_k,
+                        online_search_rollout_steps,
+                        online_search_rollouts_per_action,
+                        online_search_army_weight,
+                        online_search_land_weight,
+                        online_search_prior_weight,
+                        online_search_terminal_score,
+                    ),
+                    lambda _: base_action,
+                    None,
+                )
+            )(states, search_keys, policy_actions, history, current_memory, use_online_search)
         opponent_actions = jax.vmap(
             lambda k, obs: policy_network_action(opponent_network, k, crop_observation(obs, effective_size), opponent_policy_mode)
         )(opponent_keys, opponent_obs)
@@ -1454,6 +1772,22 @@ def parse_args():
         default=0,
         help="After an adapter gate/finish trigger, force the adapter for this many following policy turns.",
     )
+    parser.add_argument(
+        "--online-search-top-k",
+        type=int,
+        default=0,
+        help="If positive, replace the policy action with online rollout search over the top-k prior actions.",
+    )
+    parser.add_argument("--online-search-rollout-steps", type=int, default=16)
+    parser.add_argument("--online-search-rollouts-per-action", type=int, default=1)
+    parser.add_argument("--online-search-min-turn", type=int, default=0)
+    parser.add_argument("--online-search-require-contact", action="store_true")
+    parser.add_argument("--online-search-min-grid-size", type=int, default=0)
+    parser.add_argument("--online-search-max-grid-size", type=int, default=0)
+    parser.add_argument("--online-search-army-weight", type=float, default=1.0)
+    parser.add_argument("--online-search-land-weight", type=float, default=10.0)
+    parser.add_argument("--online-search-prior-weight", type=float, default=0.001)
+    parser.add_argument("--online-search-terminal-score", type=float, default=100.0)
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -1665,6 +1999,30 @@ def parse_args():
         and args.policy_adapter_min_grid_size > args.policy_adapter_max_grid_size
     ):
         parser.error("--policy-adapter-min-grid-size must be <= --policy-adapter-max-grid-size")
+    if args.online_search_top_k < 0:
+        parser.error("--online-search-top-k must be non-negative")
+    if args.online_search_top_k > 0 and args.opponent_policy_path is None:
+        parser.error("--online-search-top-k currently requires --opponent-policy-path")
+    if args.online_search_top_k > 0 and args.policy_adapter_gate_threshold >= 0.0:
+        parser.error("--online-search-top-k currently supports ungated policy adapters only")
+    if args.online_search_top_k > 0 and args.policy_adapter_finish_threshold >= 0.0:
+        parser.error("--online-search-top-k currently supports ungated policy adapters only")
+    if args.online_search_top_k > 0 and args.policy_adapter_commit_steps > 0:
+        parser.error("--online-search-top-k currently does not support policy-adapter commit state")
+    if args.online_search_rollout_steps <= 0:
+        parser.error("--online-search-rollout-steps must be positive")
+    if args.online_search_rollouts_per_action <= 0:
+        parser.error("--online-search-rollouts-per-action must be positive")
+    if args.online_search_min_turn < 0:
+        parser.error("--online-search-min-turn must be non-negative")
+    if args.online_search_min_grid_size < 0 or args.online_search_max_grid_size < 0:
+        parser.error("--online-search-min-grid-size/max-grid-size must be non-negative")
+    if (
+        args.online_search_min_grid_size > 0
+        and args.online_search_max_grid_size > 0
+        and args.online_search_min_grid_size > args.online_search_max_grid_size
+    ):
+        parser.error("--online-search-min-grid-size must be <= --online-search-max-grid-size")
     try:
         args.strategy_plan_worker_channels = parse_policy_channels(args.strategy_plan_worker_channels)
     except ValueError as exc:
@@ -1937,6 +2295,20 @@ def main():
             print(f"Policy adapter gate: feature_dim={command_gate_feature_dim}")
         if args.policy_adapter_commit_steps > 0:
             print(f"Policy adapter commit: {args.policy_adapter_commit_steps} steps")
+    if args.online_search_top_k > 0:
+        if args.online_search_min_grid_size > 0 or args.online_search_max_grid_size > 0:
+            min_label = args.online_search_min_grid_size if args.online_search_min_grid_size > 0 else "-inf"
+            max_label = args.online_search_max_grid_size if args.online_search_max_grid_size > 0 else "inf"
+            size_label = f", size=[{min_label},{max_label}]"
+        else:
+            size_label = ""
+        contact_label = ", contact-only" if args.online_search_require_contact else ""
+        print(
+            "Online search: "
+            f"top_k={args.online_search_top_k}, rollout_steps={args.online_search_rollout_steps}, "
+            f"rollouts/action={args.online_search_rollouts_per_action}, min_turn={args.online_search_min_turn}"
+            f"{contact_label}{size_label}"
+        )
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -2057,6 +2429,17 @@ def main():
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
                     args.policy_adapter_commit_steps,
+                    args.online_search_top_k,
+                    args.online_search_rollout_steps,
+                    args.online_search_rollouts_per_action,
+                    args.online_search_min_turn,
+                    args.online_search_require_contact,
+                    args.online_search_min_grid_size,
+                    args.online_search_max_grid_size,
+                    args.online_search_army_weight,
+                    args.online_search_land_weight,
+                    args.online_search_prior_weight,
+                    args.online_search_terminal_score,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games, adapter_stats)
@@ -2141,6 +2524,17 @@ def main():
         "policy_adapter_gate_threshold": args.policy_adapter_gate_threshold,
         "policy_adapter_gate_hidden_dim": args.policy_adapter_gate_hidden_dim,
         "policy_adapter_commit_steps": args.policy_adapter_commit_steps,
+        "online_search_top_k": args.online_search_top_k,
+        "online_search_rollout_steps": args.online_search_rollout_steps,
+        "online_search_rollouts_per_action": args.online_search_rollouts_per_action,
+        "online_search_min_turn": args.online_search_min_turn,
+        "online_search_require_contact": args.online_search_require_contact,
+        "online_search_min_grid_size": args.online_search_min_grid_size,
+        "online_search_max_grid_size": args.online_search_max_grid_size,
+        "online_search_army_weight": args.online_search_army_weight,
+        "online_search_land_weight": args.online_search_land_weight,
+        "online_search_prior_weight": args.online_search_prior_weight,
+        "online_search_terminal_score": args.online_search_terminal_score,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }
