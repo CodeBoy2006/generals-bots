@@ -1376,3 +1376,9 @@
 - **Status:** Completed
 - **Next Steps:** Run future fixed-v5 data collection, supervised distillation, and promotion gates at `max500`; use `max750` or longer only for confirmation/ablation after a candidate clears max500.
 - **Context:** This aligns the CLI default with the current fixed-v5 evidence and avoids accidentally training new finish heads on old `finish_within_250` labels. Old shards without `finish_within_500` still fall back to `finish_within_250` for compatibility.
+
+## [2026-06-20 22:31] Higher-Budget Online Search Teacher
+- **Changes:** Evaluated `v4 base + static conversion adapter v1 + online search top_k=4 rollout_steps=16 rollouts/action=2`, saved results under `runs/adaptive-online-search-conversion-adapter-v1/`, and documented the fixed-v5/Expander smoke in README, Chinese manual, and the strategy log.
+- **Status:** Completed
+- **Next Steps:** Treat rollouts/action `2` as the current high-budget teacher candidate. Collect rpa2 traces/continuations next, then train a planner-aware conditional head or controller; do not resume direct full-replace action CE as the main route.
+- **Context:** Fixed-v5 max500 128-row seed `101060` improved from rpa1 min `50.78%` to rpa2 min `60.16%` (`65.62%` p0, `60.16%` p1). Expander 8/12/16 32-row smoke min was `81.25%`, with 8/12 rows above `90%` and 16x p0 `96.88%`.

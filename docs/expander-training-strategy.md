@@ -15184,6 +15184,107 @@ Keep --online-search-min-score-gap as a diagnostic/risk-control switch, but
 default 0.0 remains the current best deployment/teacher setting.
 ```
 
+### 2026-06-20 22:31 - Higher-Budget Online Search Teacher
+
+Question:
+
+```text
+Direct static compression of online-search actions keeps failing, but runtime
+online search is strong.  The next high-leverage teacher question is whether
+the planner is limited by noisy one-rollout candidate scoring.  I increased
+rollouts_per_action from 1 to 2 while keeping top_k=4 and rollout_steps=16.
+```
+
+Fixed-v5 max500:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+search:
+  top_k=4
+  rollout_steps=16
+  rollouts_per_action=2
+  min_turn=80
+  require_contact=true
+  max_grid_size=8
+  min_score_gap=0
+
+64 games/seat, seed101060:
+  p0 70.31%
+  p1 59.38%
+  min 59.38%
+  draw 9.38% / 4.69%
+
+128 games/seat, seed101060:
+  p0 65.62%
+  p1 60.16%
+  min 60.16%
+  draw 3.91% / 8.59%
+```
+
+Comparison:
+
+```text
+same seed 128-row, rollouts_per_action=1:
+  p0 52.34%
+  p1 50.78%
+  min 50.78%
+
+rollouts_per_action=2 gain:
+  +13.28pp p0
+  +9.38pp p1
+  +9.38pp min
+```
+
+Expander smoke:
+
+```text
+settings:
+  opponent=expander
+  grid_sizes=8,12,16
+  num_games=32/row
+  max_steps=750
+  online_search_max_grid_size=16
+  policy_adapter_max_grid_size=8
+  seed101120
+
+results:
+  8p0 93.75%
+  8p1 90.62%
+  12p0 93.75%
+  12p1 90.62%
+  16p0 96.88%
+  16p1 81.25%
+  min 81.25%
+```
+
+Decision:
+
+```text
+Promote rollouts_per_action=2 to the current high-budget online-search teacher
+candidate.  It is too expensive for every quick gate, but it gives the largest
+fixed-v5 max500 jump so far and does not show an immediate Expander regression
+in smoke.
+
+Current best cheap teacher/deployment wrapper:
+  v4 base + static conversion adapter v1 + online search top_k=4
+  rollout_steps=16, rollouts_per_action=1
+
+Current best high-budget teacher:
+  same wrapper with rollouts_per_action=2
+
+Next useful move:
+  collect trace/continuation data from the rpa2 teacher and train a conditional
+  planner-aware head or controller.  Static full-replace CE remains disfavored;
+  the teacher gap is now large enough that the compression target should include
+  confidence, phase, and enter/exit behavior instead of just primitive action CE.
+```
+
 ### 2026-06-20 22:29 - Max500 Horizon Default
 
 User-facing horizon policy is now explicit:
