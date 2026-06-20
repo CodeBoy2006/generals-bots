@@ -1467,7 +1467,7 @@
 - **Next Steps:** Do not wire this scorer directly into gameplay. Use frozen trunk features as ingredients for a planner-aware conditional action head or collect more independent strict-conversion rows before integration.
 - **Context:** CUDA smoke loaded `adaptive-unet-ppo-v4` as shared HL-Gauss U-Net and extracted 64 trunk channels. On v0+v1+v2+v3 train / p1-heavy v4 validation, trunk+heatmap best top1/top2/pair was `47.37%/68.42%/53.51%`; trunk-only was `47.37%/73.68%/61.40%`. This did not beat the previous no-trunk v4-only reference `63.16%/89.47%/64.91%`, so the signal is useful but not a promotion path.
 
-## [2026-06-20 23:59] Frozen U-Net Candidate Scorer
+## [2026-06-21 00:06] Frozen U-Net Candidate Scorer
 - **Changes:** Extended `adaptive_online_search_candidate_scorer.py` with `--feature-model-path` to append frozen adaptive trunk source/destination/delta features; ran CPU smoke checks and GPU independent-holdout diagnostics on rpa2 max500 strict-conversion rows.
 - **Status:** Completed
 - **Next Steps:** Stop adding standalone scorer features. Train a U-Net-internal conditional action or policy-adapter head from strict max500 conversion rows so the planner signal can enter the policy head directly.
