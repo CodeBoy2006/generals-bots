@@ -15184,6 +15184,42 @@ Keep --online-search-min-score-gap as a diagnostic/risk-control switch, but
 default 0.0 remains the current best deployment/teacher setting.
 ```
 
+### 2026-06-20 22:29 - Max500 Horizon Default
+
+User-facing horizon policy is now explicit:
+
+```text
+fixed-v5 primary gate:
+  max500
+
+long confirmation / ablation:
+  max750 or longer
+
+legacy compressed diagnostics:
+  max250 only when explicitly requested
+```
+
+Implementation:
+
+```text
+adaptive_strategy_supervised.py:
+  --finish-target-horizon default changed from 250 to 500
+
+README / zh-manual:
+  current fixed-v5 examples now state that finish supervision defaults to
+  finish_within_500 and old finish_within_250 labels are for historical shards
+  or deliberately compressed ablations.
+```
+
+Rationale:
+
+```text
+max250 over-compresses otherwise realistic fixed-v5 games and can reward
+premature draw/loss conversion.  max500 matches the current fixed-v5 wrapper,
+conversion-label, and adapter-distillation evidence better.  Longer gates are
+still useful as confirmation, but max500 is the fast triage/promotion horizon.
+```
+
 ### 2026-06-20 22:31 - Higher-Budget Online Search Teacher
 
 Question:
@@ -15283,40 +15319,4 @@ Next useful move:
   planner-aware head or controller.  Static full-replace CE remains disfavored;
   the teacher gap is now large enough that the compression target should include
   confidence, phase, and enter/exit behavior instead of just primitive action CE.
-```
-
-### 2026-06-20 22:29 - Max500 Horizon Default
-
-User-facing horizon policy is now explicit:
-
-```text
-fixed-v5 primary gate:
-  max500
-
-long confirmation / ablation:
-  max750 or longer
-
-legacy compressed diagnostics:
-  max250 only when explicitly requested
-```
-
-Implementation:
-
-```text
-adaptive_strategy_supervised.py:
-  --finish-target-horizon default changed from 250 to 500
-
-README / zh-manual:
-  current fixed-v5 examples now state that finish supervision defaults to
-  finish_within_500 and old finish_within_250 labels are for historical shards
-  or deliberately compressed ablations.
-```
-
-Rationale:
-
-```text
-max250 over-compresses otherwise realistic fixed-v5 games and can reward
-premature draw/loss conversion.  max500 matches the current fixed-v5 wrapper,
-conversion-label, and adapter-distillation evidence better.  Longer gates are
-still useful as confirmation, but max500 is the fast triage/promotion horizon.
 ```
