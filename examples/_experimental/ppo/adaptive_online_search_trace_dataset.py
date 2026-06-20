@@ -27,6 +27,7 @@ import jax.random as jrandom
 import numpy as np
 
 from adaptive_common import (
+    ADAPTIVE_MOVE_PLANES,
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
     adaptive_index_to_action,
@@ -1323,7 +1324,51 @@ def concatenate_rollouts(*rollouts):
     return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=1), *rollouts)
 
 
-def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
+def _action_source_target_indices(action_indices: np.ndarray, pad_size: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return source and one-step destination cells for flattened adaptive actions."""
+    pass_index = ADAPTIVE_MOVE_PLANES * pad_size * pad_size
+    safe_indices = np.clip(action_indices.astype(np.int32), 0, pass_index - 1)
+    plane = safe_indices // (pad_size * pad_size)
+    position = safe_indices % (pad_size * pad_size)
+    row = position // pad_size
+    col = position % pad_size
+    direction = plane % 4
+    delta_row = np.array([-1, 1, 0, 0], dtype=np.int32)[direction]
+    delta_col = np.array([0, 0, -1, 1], dtype=np.int32)[direction]
+    target_row = np.clip(row + delta_row, 0, pad_size - 1)
+    target_col = np.clip(col + delta_col, 0, pad_size - 1)
+    source = row * pad_size + col
+    target = target_row * pad_size + target_col
+    is_pass = action_indices.astype(np.int32) == pass_index
+    return np.where(is_pass, 0, source).astype(np.int32), np.where(is_pass, 0, target).astype(np.int32)
+
+
+def _prefix_valid_mask(dones: np.ndarray, prefix_steps: int) -> np.ndarray:
+    """Mark same-episode rollout steps available after each origin row."""
+    time_steps, num_envs = dones.shape
+    valid = np.zeros((time_steps, num_envs, prefix_steps), dtype=np.bool_)
+    for step in range(prefix_steps):
+        if step >= time_steps:
+            break
+        available = np.ones((time_steps - step, num_envs), dtype=np.bool_)
+        for previous in range(step):
+            available &= ~dones[previous : previous + time_steps - step]
+        valid[: time_steps - step, :, step] = available
+    return valid
+
+
+def _gather_prefix(array: np.ndarray, prefix_steps: int) -> np.ndarray:
+    """Gather [time, env, ...] arrays into [time, env, prefix, ...] windows."""
+    time_steps, num_envs = array.shape[:2]
+    output_shape = (time_steps, num_envs, prefix_steps, *array.shape[2:])
+    gathered = np.zeros(output_shape, dtype=array.dtype)
+    for step in range(prefix_steps):
+        if step < time_steps:
+            gathered[: time_steps - step, :, step] = array[step:]
+    return gathered
+
+
+def prepare_arrays(rollout, logit_dtype: str, executed_prefix_steps: int = 0) -> dict[str, np.ndarray]:
     """Flatten time/env axes and cast arrays for shard storage."""
     (
         obs,
@@ -1457,6 +1502,81 @@ def prepare_arrays(rollout, logit_dtype: str) -> dict[str, np.ndarray]:
     arrays["adapter_converts_draw_to_win"] = (
         valid_adapter_conversion & (adapter_outcomes == OUTCOME_WIN) & (base_outcomes == OUTCOME_DRAW)
     ).astype(np.bool_)
+    if executed_prefix_steps > 0:
+        obs_np = np.asarray(obs)
+        masks_np = np.asarray(masks)
+        active_np = np.asarray(active)
+        logits_np = np.asarray(logits)
+        actions_np = np.asarray(executed_action_indices).astype(np.int32)
+        times_np = np.asarray(times).astype(np.int32)
+        dones_np = np.asarray(dones).astype(np.bool_)
+        origin_actions = flat(executed_action_indices).astype(np.int32)
+        source_indices, target_indices = _action_source_target_indices(origin_actions, obs_np.shape[-1])
+        num_rows = origin_actions.shape[0]
+        prefix_valid = _prefix_valid_mask(dones_np, executed_prefix_steps).reshape(num_rows, executed_prefix_steps)
+        prefix_logits = _gather_prefix(logits_np, executed_prefix_steps).reshape(
+            num_rows,
+            executed_prefix_steps,
+            logits_np.shape[-1],
+        )
+        if logit_dtype == "float16":
+            prefix_logits = np.clip(prefix_logits, -1.0e4, 1.0e4).astype(np.float16)
+        else:
+            prefix_logits = prefix_logits.astype(np.float32)
+        plan_q = arrays["search_continuation_score"].astype(np.float32)
+        plan_outcome = arrays["search_continuation_outcome"].astype(np.int32)
+        missing_conversion = plan_outcome < OUTCOME_LOSS
+        plan_q = np.where(missing_conversion, arrays["search_best_score"].astype(np.float32), plan_q)
+        plan_outcome = np.where(missing_conversion, arrays["search_best_outcome"].astype(np.int32), plan_outcome)
+        plan_advantage = arrays["search_continuation_score_delta"].astype(np.float32)
+        plan_advantage = np.where(missing_conversion, arrays["search_score_gap"].astype(np.float32), plan_advantage)
+        arrays.update(
+            {
+                "worker_prefix_obs": _gather_prefix(obs_np, executed_prefix_steps).reshape(
+                    num_rows,
+                    executed_prefix_steps,
+                    *obs_np.shape[2:],
+                ).astype(np.float16),
+                "worker_prefix_legal_mask": _gather_prefix(masks_np, executed_prefix_steps).reshape(
+                    num_rows,
+                    executed_prefix_steps,
+                    *masks_np.shape[2:],
+                ).astype(np.bool_),
+                "worker_prefix_active": _gather_prefix(active_np, executed_prefix_steps).reshape(
+                    num_rows,
+                    executed_prefix_steps,
+                    *active_np.shape[2:],
+                ).astype(np.bool_),
+                "worker_prefix_teacher_logits": prefix_logits,
+                "worker_prefix_action_index": _gather_prefix(actions_np, executed_prefix_steps).reshape(
+                    num_rows,
+                    executed_prefix_steps,
+                ).astype(np.int32),
+                "worker_prefix_valid": prefix_valid,
+                "worker_prefix_time": _gather_prefix(times_np, executed_prefix_steps).reshape(
+                    num_rows,
+                    executed_prefix_steps,
+                ).astype(np.int16),
+                "worker_prefix_source_index": np.repeat(source_indices[:, None], executed_prefix_steps, axis=1),
+                "worker_prefix_target_index": np.repeat(target_indices[:, None], executed_prefix_steps, axis=1),
+                "worker_prefix_plan_outcome": np.repeat(plan_outcome[:, None], executed_prefix_steps, axis=1).astype(
+                    np.int32
+                ),
+                "worker_prefix_plan_q": np.repeat(plan_q[:, None], executed_prefix_steps, axis=1).astype(np.float32),
+                "worker_prefix_plan_advantage": np.repeat(
+                    plan_advantage[:, None],
+                    executed_prefix_steps,
+                    axis=1,
+                ).astype(np.float32),
+                "worker_prefix_step_index": np.repeat(
+                    np.arange(executed_prefix_steps, dtype=np.int16)[None, :],
+                    num_rows,
+                    axis=0,
+                ),
+                "plan_q_gap": arrays["search_score_gap"].astype(np.float32),
+                "plan_advantage": plan_advantage.astype(np.float32),
+            }
+        )
     return arrays
 
 
@@ -1579,6 +1699,15 @@ def parse_args():
     parser.add_argument("--require-search-improves-continuation", action="store_true")
     parser.add_argument("--require-search-converts-to-win", action="store_true")
     parser.add_argument("--min-continuation-score-delta", type=float, default=0.0)
+    parser.add_argument(
+        "--save-executed-prefix-steps",
+        type=int,
+        default=0,
+        help=(
+            "If positive, save same-env consecutive rollout rows as Plan-Q prefix-compatible "
+            "worker_prefix_* arrays. Use this to train executed-prefix policy/Worker adapters from online-search traces."
+        ),
+    )
     parser.add_argument("--output-dir", default="runs/adaptive-online-search-traces")
     parser.add_argument("--shard-prefix", default="online-search")
     parser.add_argument("--logit-dtype", choices=("float32", "float16"), default="float16")
@@ -1655,6 +1784,8 @@ def parse_args():
         parser.error("--conversion-rollout-steps must be non-negative")
     if args.min_continuation_score_delta < 0.0:
         parser.error("--min-continuation-score-delta must be non-negative")
+    if args.save_executed_prefix_steps < 0:
+        parser.error("--save-executed-prefix-steps must be non-negative")
     if (
         args.conversion_rollout_steps == 0
         and (
@@ -2071,7 +2202,7 @@ def main():
                 args.search_terminal_score,
                 args.conversion_rollout_steps,
             )
-        arrays = prepare_arrays(rollout, args.logit_dtype)
+        arrays = prepare_arrays(rollout, args.logit_dtype, args.save_executed_prefix_steps)
         arrays, original_count, saved_count = filter_arrays(
             arrays,
             args.min_save_turn,
@@ -2111,6 +2242,7 @@ def main():
             "require_search_improves_continuation": args.require_search_improves_continuation,
             "require_search_converts_to_win": args.require_search_converts_to_win,
             "min_continuation_score_delta": args.min_continuation_score_delta,
+            "save_executed_prefix_steps": args.save_executed_prefix_steps,
             "original_count": original_count,
             "saved_count": saved_count,
         }

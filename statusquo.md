@@ -1484,3 +1484,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote this fine-tune. Keep static conversion adapter v1 as the cheap max500 adapter baseline; next work should use executed-prefix option data or a separate conditional action/adapter head instead of overwriting the base policy head with one-step search actions.
 - **Context:** The fine-tune showed a 128 games/seat fixed-v5 max500 min of `39.06%`, but at 256 games/seat seed `120320` it scored `33.59%` min versus same-seed static v1 `36.72%`. Expander max750 128-row min was `78.12%`, so the failure is fixed-v5 conversion quality rather than catastrophic Expander forgetting.
+
+## [2026-06-21 00:32] Conversion Policy Head Probe
+- **Changes:** Added optional conversion policy heads to adaptive CNN/U-Net networks, wired `adaptive_strategy_supervised.py --update-scope conversion-policy-head`, wired evaluator `--conversion-policy-scale/--conversion-policy-mode`, and added online-search `--save-executed-prefix-steps` trace fields.
+- **Status:** Completed
+- **Next Steps:** Do not promote the one-step strict-conversion head. Use the new head and prefix trace fields for executed-prefix or multi-step conditional action training; keep fixed-v5 primary triage at `max500`, with `max750` or longer only as confirmation.
+- **Context:** GPU training on rpa2 v0+v1+v2-small strict conversions selected epoch 34 with only `10.42%` holdout pairwise accuracy on v3-small. Replace-mode fixed-v5 max500 128 games/seat scored p0 `30.47%`, p1 `20.31%`, min `20.31%`, so the separate head reduced risk but did not solve one-step label noise.

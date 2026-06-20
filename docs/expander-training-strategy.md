@@ -16515,3 +16515,81 @@ implementation should add a separate conditional adapter/action head or move
 back to executed-prefix option data, keeping static v1 as the cheap adapter
 baseline and rpa2 online search as the teacher.
 ```
+
+### 2026-06-21 00:32 - Conversion Policy Head Probe
+
+Added an optional conversion policy head directly to adaptive CNN/U-Net
+checkpoints.  This keeps the base policy head intact and lets supervised training
+route policy KL/action CE/pairwise/search-rank losses through a separate
+`conversion_policy_logits(...)` path:
+
+```text
+flags:
+  --conversion-policy-head
+  --update-scope conversion-policy-head
+  --conversion-policy-scale
+  --conversion-policy-mode delta|blend|replace
+
+evaluation gates:
+  reuse policy-adapter size/turn/contact gates
+  current fixed-v5 domain: grid_size=8, turn>=80, contact
+```
+
+Also extended `adaptive_online_search_trace_dataset.py` with
+`--save-executed-prefix-steps`, which stores same-env `worker_prefix_*` windows
+from online-search traces for later option/Worker training.
+
+GPU probe:
+
+```text
+checkpoint:
+  runs/adaptive-online-search-conversion-head-v4-rpa2-v0/
+    generals-adaptive-online-search-conversion-head-v4-rpa2-v0.best.eqx
+
+train:
+  rpa2 v0 + v1 + v2-small strict conversion rows
+  kept: 217 rows, oversampled to 258
+
+validation:
+  rpa2 v3-small
+  kept: 193 rows
+
+loss:
+  policy_kl=1.0
+  action_ce=0.4
+  prefix_pairwise_margin=0.4
+  update_scope=conversion-policy-head
+
+best epoch:
+  34
+  holdout pairwise: 10.42%
+```
+
+Gameplay check:
+
+```text
+fixed-v5 max500, 128 games/seat, seed121200
+base:
+  adaptive-unet-ppo-v4
+
+conversion head:
+  mode=replace
+  scale=1.0
+  grid_size<=8
+  min_turn=80
+  require_contact=true
+
+p0: 39/82/7, win_rate 30.47%, draw 5.47%
+p1: 26/89/13, win_rate 20.31%, draw 10.16%
+min: 20.31%
+```
+
+Decision:
+
+```text
+Do not promote this conversion head.  A separate output head reduces blast
+radius, but one-step strict-conversion rows still do not teach a reliable
+policy.  The code path is useful infrastructure for the next executed-prefix or
+multi-step conditional-head run.  Keep fixed-v5 triage on max500, with max750 or
+longer only as confirmation.
+```

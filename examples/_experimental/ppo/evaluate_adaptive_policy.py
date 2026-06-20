@@ -120,6 +120,8 @@ def _policy_action(
     strategy_command_gate_target_count: int,
     command_gate_feature_dim: int,
     policy_adapter_scale: float,
+    conversion_policy_scale: float,
+    conversion_policy_mode: int,
     policy_adapter_finish_threshold: float,
     policy_adapter_gate_threshold: float,
     policy_adapter_mode: int,
@@ -147,6 +149,31 @@ def _policy_action(
     )
     if needs_aux:
         aux = network.strategy_auxiliary(obs_arr, mask, active)
+    if conversion_policy_scale > 0.0:
+        base_logits_for_conversion = logits
+        conversion_logits = network.conversion_policy_logits(obs_arr, mask, active)
+        conversion_gate = jnp.where(policy_adapter_context_allowed, 1.0, 0.0)
+        conversion_weight = conversion_policy_scale * conversion_gate
+        converted_logits = jax.lax.switch(
+            conversion_policy_mode,
+            (
+                lambda _: policy_adapter_delta_logits(logits, conversion_logits, conversion_weight),
+                lambda _: policy_adapter_blend_logits(logits, conversion_logits, conversion_weight),
+                lambda _: jnp.where(conversion_gate > 0.0, conversion_logits, logits),
+            ),
+            None,
+        )
+        legal = base_logits_for_conversion > -1.0e8
+        base_top = jnp.argmax(jnp.where(legal, base_logits_for_conversion, -1.0e9))
+        converted_top = jnp.argmax(jnp.where(legal, converted_logits, -1.0e9))
+        conversion_used = (conversion_gate > 0.0).astype(logits.dtype)
+        adapter_trigger = jnp.maximum(adapter_trigger, conversion_used)
+        adapter_used = jnp.maximum(adapter_used, conversion_used)
+        adapter_action_diff = jnp.maximum(
+            adapter_action_diff,
+            conversion_used * (converted_top != base_top).astype(logits.dtype),
+        )
+        logits = converted_logits
     if policy_adapter_scale > 0.0:
         base_logits_for_adapter = logits
         adapter_logits, _ = policy_adapter_network.logits_value(obs_arr, mask, active)
@@ -1417,6 +1444,8 @@ def evaluate_batch(
     strategy_command_gate_target_count=1,
     command_gate_feature_dim=COMMAND_GATE_FEATURE_DIM,
     policy_adapter_scale=0.0,
+    conversion_policy_scale=0.0,
+    conversion_policy_mode=0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
     policy_adapter_mode=0,
@@ -1592,6 +1621,8 @@ def evaluate_batch(
                 strategy_command_gate_target_count,
                 command_gate_feature_dim,
                 size_policy_adapter_scale,
+                conversion_policy_scale if policy_adapter_size_allowed else 0.0,
+                conversion_policy_mode,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
@@ -1727,6 +1758,8 @@ def evaluate_policy_opponent_batch(
     strategy_command_gate_target_count=1,
     command_gate_feature_dim=COMMAND_GATE_FEATURE_DIM,
     policy_adapter_scale=0.0,
+    conversion_policy_scale=0.0,
+    conversion_policy_mode=0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
     policy_adapter_mode=0,
@@ -1906,6 +1939,8 @@ def evaluate_policy_opponent_batch(
                 strategy_command_gate_target_count,
                 command_gate_feature_dim,
                 size_policy_adapter_scale,
+                conversion_policy_scale if policy_adapter_size_allowed else 0.0,
+                conversion_policy_mode,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
                 policy_adapter_mode,
@@ -2049,6 +2084,13 @@ def parse_args():
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--init-outcome-head", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--conversion-policy-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Load a checkpoint with an auxiliary conversion/planner policy head.",
+    )
+    parser.add_argument("--init-conversion-policy-head", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-aux", action="store_true")
     parser.add_argument("--init-strategy-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-spatial-aux", action="store_true")
@@ -2133,6 +2175,13 @@ def parse_args():
     )
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
     parser.add_argument("--policy-adapter-mode", choices=POLICY_ADAPTER_MODE_NAMES, default="delta")
+    parser.add_argument(
+        "--conversion-policy-scale",
+        type=float,
+        default=0.0,
+        help="Compose the main checkpoint's conversion policy head before any separate policy adapter.",
+    )
+    parser.add_argument("--conversion-policy-mode", choices=POLICY_ADAPTER_MODE_NAMES, default="delta")
     parser.add_argument("--policy-adapter-finish-threshold", type=float, default=-1.0)
     parser.add_argument(
         "--policy-adapter-min-grid-size",
@@ -2358,6 +2407,10 @@ def parse_args():
         parser.error("Use either --strategy-command-gate-threshold or --strategy-plan-worker-gate-threshold, not both")
     if args.policy_adapter_scale < 0.0:
         parser.error("--policy-adapter-scale must be non-negative")
+    if args.conversion_policy_scale < 0.0:
+        parser.error("--conversion-policy-scale must be non-negative")
+    if args.conversion_policy_scale > 0.0 and not args.conversion_policy_head:
+        parser.error("--conversion-policy-scale requires --conversion-policy-head")
     if args.policy_adapter_scale > 0.0 and args.policy_adapter_path is None:
         parser.error("--policy-adapter-scale requires --policy-adapter-path")
     if args.policy_adapter_path is not None and args.policy_adapter_scale <= 0.0:
@@ -2518,6 +2571,8 @@ def main():
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_head,
         init_outcome_head=args.init_outcome_head,
+        conversion_policy_head=args.conversion_policy_head,
+        init_conversion_policy_head=args.init_conversion_policy_head,
         strategy_aux=args.strategy_aux,
         init_strategy_aux=args.init_strategy_aux,
         strategy_spatial_aux=args.strategy_spatial_aux,
@@ -2662,6 +2717,7 @@ def main():
     opponent_id = OPPONENT_NAME_TO_ID[args.opponent]
     policy_mode = 0 if args.policy_mode == "greedy" else 1
     policy_adapter_mode = POLICY_ADAPTER_MODE_TO_ID[args.policy_adapter_mode]
+    conversion_policy_mode = POLICY_ADAPTER_MODE_TO_ID[args.conversion_policy_mode]
     opponent_policy_mode = 0 if args.opponent_policy_mode == "greedy" else 1
     rows = []
 
@@ -2693,6 +2749,14 @@ def main():
         print("Strategy:   auxiliary heads loaded")
     if args.strategy_spatial_aux:
         print("Spatial:    source/target strategy heads loaded")
+    if args.conversion_policy_head:
+        print("Conversion: policy head loaded")
+    if args.conversion_policy_scale > 0.0:
+        print(
+            "Conversion: "
+            f"mode={args.conversion_policy_mode}, scale={args.conversion_policy_scale:g} "
+            "(uses policy-adapter size/turn/contact gates)"
+        )
     if args.strategy_q_rerank_scale > 0.0:
         print(f"StratQ bias: scale={args.strategy_q_rerank_scale:g}")
     if args.strategy_q_replace_threshold >= 0.0:
@@ -2885,6 +2949,8 @@ def main():
                         args.strategy_command_gate_target_count,
                         command_gate_feature_dim,
                         args.policy_adapter_scale,
+                        args.conversion_policy_scale,
+                        conversion_policy_mode,
                         args.policy_adapter_finish_threshold,
                         args.policy_adapter_gate_threshold,
                         policy_adapter_mode,
@@ -2948,6 +3014,8 @@ def main():
                         args.strategy_command_gate_target_count,
                         command_gate_feature_dim,
                         args.policy_adapter_scale,
+                        args.conversion_policy_scale,
+                        conversion_policy_mode,
                         args.policy_adapter_finish_threshold,
                         args.policy_adapter_gate_threshold,
                         policy_adapter_mode,
@@ -3065,6 +3133,9 @@ def main():
         "policy_adapter_feature_strategy_finish_outputs": policy_adapter_feature_strategy_finish_outputs,
         "policy_adapter_scale": args.policy_adapter_scale,
         "policy_adapter_mode": args.policy_adapter_mode,
+        "conversion_policy_head": args.conversion_policy_head,
+        "conversion_policy_scale": args.conversion_policy_scale,
+        "conversion_policy_mode": args.conversion_policy_mode,
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,
         "policy_adapter_min_grid_size": args.policy_adapter_min_grid_size,
         "policy_adapter_max_grid_size": args.policy_adapter_max_grid_size,

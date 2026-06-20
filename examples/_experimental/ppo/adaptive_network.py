@@ -99,6 +99,8 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     conv4: eqx.nn.Conv2d
     policy_conv: eqx.nn.Conv2d
     pass_linear: eqx.nn.Linear
+    conversion_policy_conv: eqx.nn.Conv2d | None
+    conversion_pass_linear: eqx.nn.Linear | None
     value_linear1: eqx.nn.Linear
     value_linear2: eqx.nn.Linear
     categorical_value_linear2: eqx.nn.Linear | None
@@ -128,6 +130,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
     value_max: float = eqx.field(static=True)
     value_sigma: float = eqx.field(static=True)
     outcome_head: bool = eqx.field(static=True)
+    conversion_policy_head: bool = eqx.field(static=True)
     strategy_aux: bool = eqx.field(static=True)
     strategy_spatial_aux: bool = eqx.field(static=True)
     strategy_finish_outputs: int = eqx.field(static=True)
@@ -147,6 +150,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         value_max: float = 1.0,
         value_sigma: float = 0.04,
         outcome_head: bool = False,
+        conversion_policy_head: bool = False,
         strategy_aux: bool = False,
         strategy_spatial_aux: bool = False,
         strategy_finish_outputs: int = 2,
@@ -162,6 +166,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
             input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
         parsed_value_head_sizes = tuple(value_head_sizes or ())
         parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
+        conversion_policy_keys = 2 if conversion_policy_head else 0
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
         outcome_keys = 1 if outcome_head else 0
         strategy_keys = 5 if strategy_aux else 0
@@ -172,6 +177,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         keys = jrandom.split(
             key,
             8
+            + conversion_policy_keys
             + 2 * len(parsed_value_head_sizes)
             + categorical_keys
             + outcome_keys
@@ -188,6 +194,7 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.value_max = value_max
         self.value_sigma = value_sigma
         self.outcome_head = bool(outcome_head)
+        self.conversion_policy_head = bool(conversion_policy_head)
         self.strategy_aux = bool(strategy_aux)
         self.strategy_spatial_aux = bool(strategy_spatial_aux)
         self.strategy_finish_outputs = int(strategy_finish_outputs)
@@ -200,16 +207,24 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         self.conv4 = eqx.nn.Conv2d(channels[2], channels[3], kernel_size=3, padding=1, key=keys[3])
         self.policy_conv = eqx.nn.Conv2d(channels[3], 8, kernel_size=1, key=keys[4])
         self.pass_linear = eqx.nn.Linear(channels[3] * 2, 1, key=keys[5])
-        self.value_linear1 = eqx.nn.Linear(channels[3] * 2, 64, key=keys[6])
-        self.value_linear2 = eqx.nn.Linear(64, 1, key=keys[7])
+        if conversion_policy_head:
+            self.conversion_policy_conv = eqx.nn.Conv2d(channels[3], 8, kernel_size=1, key=keys[6])
+            self.conversion_pass_linear = eqx.nn.Linear(channels[3] * 2, 1, key=keys[7])
+        else:
+            self.conversion_policy_conv = None
+            self.conversion_pass_linear = None
+        value_offset = 6 + conversion_policy_keys
+        self.value_linear1 = eqx.nn.Linear(channels[3] * 2, 64, key=keys[value_offset])
+        self.value_linear2 = eqx.nn.Linear(64, 1, key=keys[value_offset + 1])
         self.size_value_linear1 = tuple(
-            eqx.nn.Linear(channels[3] * 2, 64, key=keys[8 + 2 * index])
+            eqx.nn.Linear(channels[3] * 2, 64, key=keys[value_offset + 2 + 2 * index])
             for index, _ in enumerate(parsed_value_head_sizes)
         )
         self.size_value_linear2 = tuple(
-            eqx.nn.Linear(64, 1, key=keys[9 + 2 * index]) for index, _ in enumerate(parsed_value_head_sizes)
+            eqx.nn.Linear(64, 1, key=keys[value_offset + 3 + 2 * index])
+            for index, _ in enumerate(parsed_value_head_sizes)
         )
-        categorical_offset = 8 + 2 * len(parsed_value_head_sizes)
+        categorical_offset = value_offset + 2 + 2 * len(parsed_value_head_sizes)
         self.categorical_value_linear2 = (
             eqx.nn.Linear(64, parsed_value_bins, key=keys[categorical_offset]) if parsed_value_bins > 0 else None
         )
@@ -385,6 +400,30 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         max_pool = jnp.where(jnp.isfinite(max_pool), max_pool, 0.0)
         return jnp.concatenate([mean, max_pool], axis=0)
 
+    def _policy_logits_from_heads(
+        self,
+        x: jnp.ndarray,
+        pooled: jnp.ndarray,
+        mask: jnp.ndarray,
+        policy_conv: eqx.nn.Conv2d,
+        pass_linear: eqx.nn.Linear,
+    ) -> jnp.ndarray:
+        """Compute legal action logits from one policy head on shared features."""
+        move_logits = policy_conv(x)
+        mask_t = jnp.transpose(mask, (2, 0, 1))
+        move_mask = jnp.concatenate([mask_t, mask_t], axis=0)
+        move_logits = move_logits + (1 - move_mask.astype(jnp.float32)) * -1e9
+        pass_logit = pass_linear(pooled)
+        return jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
+
+    def conversion_policy_logits(self, obs: jnp.ndarray, mask: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
+        """Compute logits from the optional planner/conversion policy head."""
+        if self.conversion_policy_conv is None or self.conversion_pass_linear is None:
+            raise ValueError("conversion policy head is not configured")
+        x = self._features(obs)
+        pooled = self._masked_pool(x, active)
+        return self._policy_logits_from_heads(x, pooled, mask, self.conversion_policy_conv, self.conversion_pass_linear)
+
     def _shared_value(self, pooled: jnp.ndarray) -> jnp.ndarray:
         value_hidden = jax.nn.relu(self.value_linear1(pooled))
         return self.value_linear2(value_hidden)[0]
@@ -498,16 +537,9 @@ class AdaptivePolicyValueNetwork(eqx.Module):
         """Compute policy/value outputs plus optional auxiliary outcome logits."""
         x = self._features(obs)
         pooled = self._masked_pool(x, active)
-
-        move_logits = self.policy_conv(x)
-        mask_t = jnp.transpose(mask, (2, 0, 1))
-        move_mask = jnp.concatenate([mask_t, mask_t], axis=0)
-        move_logits = move_logits + (1 - move_mask.astype(jnp.float32)) * -1e9
-
-        pass_logit = self.pass_linear(pooled)
+        logits = self._policy_logits_from_heads(x, pooled, mask, self.policy_conv, self.pass_linear)
         value, value_logits = self._value_distribution(pooled, active)
         outcome_logits = self._outcome_logits(pooled)
-        logits = jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
         return logits, value, value_logits, outcome_logits
 
     def __call__(
@@ -545,6 +577,8 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
     dec2: eqx.nn.Conv2d
     policy_conv: eqx.nn.Conv2d
     pass_linear: eqx.nn.Linear
+    conversion_policy_conv: eqx.nn.Conv2d | None
+    conversion_pass_linear: eqx.nn.Linear | None
     value_linear1: eqx.nn.Linear
     value_linear2: eqx.nn.Linear
     categorical_value_linear2: eqx.nn.Linear | None
@@ -566,6 +600,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
     value_max: float = eqx.field(static=True)
     value_sigma: float = eqx.field(static=True)
     outcome_head: bool = eqx.field(static=True)
+    conversion_policy_head: bool = eqx.field(static=True, default=False)
     strategy_aux: bool = eqx.field(static=True)
     strategy_spatial_aux: bool = eqx.field(static=True)
     strategy_finish_outputs: int = eqx.field(static=True, default=2)
@@ -585,6 +620,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         value_max: float = 1.0,
         value_sigma: float = 0.04,
         outcome_head: bool = False,
+        conversion_policy_head: bool = False,
         strategy_aux: bool = False,
         strategy_spatial_aux: bool = False,
         strategy_finish_outputs: int = 2,
@@ -602,6 +638,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
             input_channels = ADAPTIVE_GLOBAL_INPUT_CHANNELS
         parsed_value_head_sizes = tuple(value_head_sizes or ())
         parsed_value_bins = _normalize_value_bins(value_bins, value_min, value_max, value_sigma)
+        conversion_policy_keys = 2 if conversion_policy_head else 0
         categorical_keys = 1 + len(parsed_value_head_sizes) if parsed_value_bins > 0 else 0
         outcome_keys = 1 if outcome_head else 0
         strategy_keys = 5 if strategy_aux else 0
@@ -609,6 +646,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         keys = jrandom.split(
             key,
             9
+            + conversion_policy_keys
             + 2 * len(parsed_value_head_sizes)
             + categorical_keys
             + outcome_keys
@@ -622,6 +660,7 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         self.value_max = value_max
         self.value_sigma = value_sigma
         self.outcome_head = bool(outcome_head)
+        self.conversion_policy_head = bool(conversion_policy_head)
         self.strategy_aux = bool(strategy_aux)
         self.strategy_spatial_aux = bool(strategy_spatial_aux)
         self.strategy_finish_outputs = int(strategy_finish_outputs)
@@ -636,8 +675,14 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         self.dec2 = eqx.nn.Conv2d(c2 + c1, c4, kernel_size=3, padding=1, key=keys[4])
         self.policy_conv = eqx.nn.Conv2d(c4, 8, kernel_size=1, key=keys[5])
         self.pass_linear = eqx.nn.Linear(c4 * 2, 1, key=keys[6])
-        self.value_linear1 = eqx.nn.Linear(c4 * 2, 64, key=keys[7])
-        value_key_offset = 8
+        if conversion_policy_head:
+            self.conversion_policy_conv = eqx.nn.Conv2d(c4, 8, kernel_size=1, key=keys[7])
+            self.conversion_pass_linear = eqx.nn.Linear(c4 * 2, 1, key=keys[8])
+        else:
+            self.conversion_policy_conv = None
+            self.conversion_pass_linear = None
+        self.value_linear1 = eqx.nn.Linear(c4 * 2, 64, key=keys[7 + conversion_policy_keys])
+        value_key_offset = 8 + conversion_policy_keys
         self.value_linear2 = eqx.nn.Linear(64, 1, key=keys[value_key_offset])
         self.size_value_linear1 = tuple(
             eqx.nn.Linear(c4 * 2, 64, key=keys[value_key_offset + 1 + 2 * index])
@@ -715,6 +760,30 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         max_pool = jnp.where(jnp.isfinite(max_pool), max_pool, 0.0)
         return jnp.concatenate([mean, max_pool], axis=0)
 
+    def _policy_logits_from_heads(
+        self,
+        x: jnp.ndarray,
+        pooled: jnp.ndarray,
+        mask: jnp.ndarray,
+        policy_conv: eqx.nn.Conv2d,
+        pass_linear: eqx.nn.Linear,
+    ) -> jnp.ndarray:
+        """Compute legal action logits from one policy head on shared features."""
+        move_logits = policy_conv(x)
+        mask_t = jnp.transpose(mask, (2, 0, 1))
+        move_mask = jnp.concatenate([mask_t, mask_t], axis=0)
+        move_logits = move_logits + (1 - move_mask.astype(jnp.float32)) * -1e9
+        pass_logit = pass_linear(pooled)
+        return jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
+
+    def conversion_policy_logits(self, obs: jnp.ndarray, mask: jnp.ndarray, active: jnp.ndarray) -> jnp.ndarray:
+        """Compute logits from the optional planner/conversion policy head."""
+        if self.conversion_policy_conv is None or self.conversion_pass_linear is None:
+            raise ValueError("conversion policy head is not configured")
+        x = self._features(obs)
+        pooled = self._masked_pool(x, active)
+        return self._policy_logits_from_heads(x, pooled, mask, self.conversion_policy_conv, self.conversion_pass_linear)
+
     def _shared_value(self, pooled: jnp.ndarray) -> jnp.ndarray:
         value_hidden = jax.nn.relu(self.value_linear1(pooled))
         return self.value_linear2(value_hidden)[0]
@@ -826,14 +895,9 @@ class AdaptiveUNetPolicyValueNetwork(eqx.Module):
         """Compute policy/value outputs plus optional auxiliary outcome logits."""
         x = self._features(obs)
         pooled = self._masked_pool(x, active)
-        move_logits = self.policy_conv(x)
-        mask_t = jnp.transpose(mask, (2, 0, 1))
-        move_mask = jnp.concatenate([mask_t, mask_t], axis=0)
-        move_logits = move_logits + (1 - move_mask.astype(jnp.float32)) * -1e9
-        pass_logit = self.pass_linear(pooled)
+        logits = self._policy_logits_from_heads(x, pooled, mask, self.policy_conv, self.pass_linear)
         value, value_logits = self._value_distribution(pooled, active)
         outcome_logits = self._outcome_logits(pooled)
-        logits = jnp.concatenate([move_logits.reshape(-1), pass_logit], axis=0)
         return logits, value, value_logits, outcome_logits
 
     def __call__(
@@ -872,6 +936,7 @@ def _create_adaptive_network(
     value_max: float,
     value_sigma: float,
     outcome_head: bool,
+    conversion_policy_head: bool,
     strategy_aux: bool,
     strategy_spatial_aux: bool,
     strategy_finish_outputs: int,
@@ -891,6 +956,7 @@ def _create_adaptive_network(
             value_max=value_max,
             value_sigma=value_sigma,
             outcome_head=outcome_head,
+            conversion_policy_head=conversion_policy_head,
             strategy_aux=strategy_aux,
             strategy_spatial_aux=strategy_spatial_aux,
             strategy_finish_outputs=strategy_finish_outputs,
@@ -910,6 +976,7 @@ def _create_adaptive_network(
             value_max=value_max,
             value_sigma=value_sigma,
             outcome_head=outcome_head,
+            conversion_policy_head=conversion_policy_head,
             strategy_aux=strategy_aux,
             strategy_spatial_aux=strategy_spatial_aux,
             strategy_finish_outputs=strategy_finish_outputs,
@@ -949,6 +1016,8 @@ def load_or_create_adaptive_network(
     init_value_sigma: float | None = None,
     outcome_head: bool = False,
     init_outcome_head: bool | None = None,
+    conversion_policy_head: bool = False,
+    init_conversion_policy_head: bool | None = None,
     strategy_aux: bool = False,
     init_strategy_aux: bool | None = None,
     strategy_spatial_aux: bool = False,
@@ -988,6 +1057,7 @@ def load_or_create_adaptive_network(
         value_max=value_max,
         value_sigma=value_sigma,
         outcome_head=outcome_head,
+        conversion_policy_head=conversion_policy_head,
         strategy_aux=strategy_aux,
         strategy_spatial_aux=strategy_spatial_aux,
         strategy_finish_outputs=strategy_finish_outputs,
@@ -1018,6 +1088,9 @@ def load_or_create_adaptive_network(
         parsed_init_value_sigma,
     )
     parsed_init_outcome_head = outcome_head if init_outcome_head is None else bool(init_outcome_head)
+    parsed_init_conversion_policy_head = (
+        conversion_policy_head if init_conversion_policy_head is None else bool(init_conversion_policy_head)
+    )
     parsed_init_strategy_aux = strategy_aux if init_strategy_aux is None else bool(init_strategy_aux)
     parsed_init_strategy_spatial_aux = (
         strategy_spatial_aux if init_strategy_spatial_aux is None else bool(init_strategy_spatial_aux)
@@ -1046,6 +1119,7 @@ def load_or_create_adaptive_network(
         or parsed_init_value_max != value_max
         or parsed_init_value_sigma != value_sigma
         or parsed_init_outcome_head != outcome_head
+        or parsed_init_conversion_policy_head != conversion_policy_head
         or parsed_init_strategy_aux != strategy_aux
         or parsed_init_strategy_spatial_aux != strategy_spatial_aux
         or parsed_init_strategy_finish_outputs != strategy_finish_outputs
@@ -1066,6 +1140,7 @@ def load_or_create_adaptive_network(
             value_max=parsed_init_value_max,
             value_sigma=parsed_init_value_sigma,
             outcome_head=parsed_init_outcome_head,
+            conversion_policy_head=parsed_init_conversion_policy_head,
             strategy_aux=parsed_init_strategy_aux,
             strategy_spatial_aux=parsed_init_strategy_spatial_aux,
             strategy_finish_outputs=parsed_init_strategy_finish_outputs,
@@ -1206,6 +1281,28 @@ def expand_adaptive_network_channels(
             source_channels,
         ),
     )
+    if target.conversion_policy_conv is not None and target.conversion_pass_linear is not None:
+        source_conversion_conv = (
+            source.conversion_policy_conv if source.conversion_policy_conv is not None else source.policy_conv
+        )
+        source_conversion_pass = (
+            source.conversion_pass_linear if source.conversion_pass_linear is not None else source.pass_linear
+        )
+        target = eqx.tree_at(
+            lambda net: net.conversion_policy_conv,
+            target,
+            _copy_conv_prefix(target.conversion_policy_conv, source_conversion_conv),
+        )
+        target = eqx.tree_at(
+            lambda net: net.conversion_pass_linear,
+            target,
+            _copy_pooled_linear_prefix(
+                target.conversion_pass_linear,
+                source_conversion_pass,
+                target_channels,
+                source_channels,
+            ),
+        )
     target = eqx.tree_at(
         lambda net: net.value_linear1,
         target,
@@ -1405,6 +1502,28 @@ def expand_adaptive_unet_network(
         target,
         _copy_pooled_linear_prefix(target.pass_linear, source.pass_linear, target_channels, source_channels),
     )
+    if target.conversion_policy_conv is not None and target.conversion_pass_linear is not None:
+        source_conversion_conv = (
+            source.conversion_policy_conv if source.conversion_policy_conv is not None else source.policy_conv
+        )
+        source_conversion_pass = (
+            source.conversion_pass_linear if source.conversion_pass_linear is not None else source.pass_linear
+        )
+        target = eqx.tree_at(
+            lambda net: net.conversion_policy_conv,
+            target,
+            _copy_conv_prefix(target.conversion_policy_conv, source_conversion_conv),
+        )
+        target = eqx.tree_at(
+            lambda net: net.conversion_pass_linear,
+            target,
+            _copy_pooled_linear_prefix(
+                target.conversion_pass_linear,
+                source_conversion_pass,
+                target_channels,
+                source_channels,
+            ),
+        )
     target = eqx.tree_at(
         lambda net: net.value_linear1,
         target,
