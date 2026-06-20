@@ -1316,3 +1316,9 @@
 - **Status:** Completed
 - **Next Steps:** Promote v1 as the current static fixed-v5 max500 adapter candidate, then collect more max500 conversion rows and train a stronger v2 with more legal conversion positives or a learned gate/mixture. Keep Expander protection at 512-row minimum before any deployment claim.
 - **Context:** Combined max500 conversion data had `1156` rows, `117` improves, and `90` search-converts-to-win rows (`89` legal after masking). Fixed-v5 max500 512-row same-seed baseline was `23.05%` min; v1 adapter reached `38.09%` min. Expander 8/12/16 max750 512-row with the adapter reached `78.32%` min. Artifacts remain under ignored `runs/`, not cache directories.
+
+## [2026-06-20 20:51] V1-Policy Conversion DAgger v2
+- **Changes:** Collected v1-policy fixed-v5 max500 conversion traces under `runs/adaptive-online-search-fixed-v5-max500-conversion-v1policy-v0/`, trained `runs/adaptive-online-search-conversion-adapter-v2/generals-adaptive-online-search-conversion-adapter-v2.eqx`, and logged the negative result in `docs/expander-training-strategy.md`.
+- **Status:** Completed
+- **Next Steps:** Do not promote v2. Keep v1 as the current static adapter candidate. Next route should be a learned gate/mixture or preservation-heavy objective that only uses v1-policy conversion labels in high-confidence states.
+- **Context:** v1-policy data still had `805` rows with `59` legal search-converts-to-win rows, so online search continues to find improvements on top of v1. Naive continuation from v1 did not help: fixed-v5 max500 256-row same seed dropped from v1 `38.67%` min to v2 `36.33%` min. This points to over-broad static replacement, not lack of conversion labels.

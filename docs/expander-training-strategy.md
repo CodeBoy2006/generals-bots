@@ -14486,3 +14486,202 @@ conversion rows and train a stronger adapter/head with either:
   2. a learned gate/mixture that preserves v4 base action unless the adapter
      has a conversion-like state.
 ```
+
+### 2026-06-20 20:51 - V1-Policy Conversion DAgger v2 Negative
+
+Data:
+
+```text
+runs/adaptive-online-search-fixed-v5-max500-conversion-v1policy-v0/
+  deployment:
+    v4 base + conversion adapter v1
+  rows:
+    805
+  action_changed:
+    61.9%
+  improves:
+    82 / 805 = 10.2%
+  converts_to_win:
+    59 / 805 = 7.3%
+  legal converts:
+    59 / 805
+  p0 converts:
+    33 / 467 = 7.1%
+  p1 converts:
+    26 / 338 = 7.7%
+```
+
+This confirms that online search still finds real max500 draw/loss -> win
+first-action replacements even after v1. However, those labels do not make
+naive policy-head continuation stronger.
+
+Training:
+
+```text
+model:
+  runs/adaptive-online-search-conversion-adapter-v2/
+    generals-adaptive-online-search-conversion-adapter-v2.eqx
+
+init:
+  v1 conversion adapter
+
+data:
+  old conversion v0/v1 + v1-policy conversion v0
+  1961 rows
+  149 converts_to_win
+  148 legal conversion rows
+
+loss:
+  policy_kl=0.8
+  action_ce=0.5 on search_converts_to_win
+  pairwise margin=0.8
+  lr=2e-5
+  epochs=50
+
+final epoch:
+  KL 0.0698
+  ActCE 2.9250
+  action accuracy 35.4%
+  Pair 4.7223
+  pair accuracy 8.2%
+```
+
+Fixed-v5 max500, 256 games/seat, seed100020:
+
+```text
+v1 adapter:
+  p0 42.58%
+  p1 38.67%
+  min 38.67%
+
+v2 adapter:
+  p0 38.67%
+  p1 36.33%
+  min 36.33%
+```
+
+Conclusion:
+
+```text
+Do not promote v2.
+
+The next step should not be another CE/KL weight sweep. The data says v1-policy
+states still contain valid online-search improvements, but a single static
+replace adapter broadens those changes too much. Move to a learned gate/mixture
+or an adapter objective that explicitly preserves v1 except on high-confidence
+conversion-like states.
+```
+
+### 2026-06-20 20:17 - V1 DAgger Conversion Iteration
+
+Data:
+
+```text
+runs/adaptive-online-search-fixed-v5-max500-conversion-v2dagger/
+  deployment distribution:
+    v4 base + conversion adapter v1
+  rows: 914
+  action_changed: 63.6%
+  improves: 128 = 14.0%
+  converts_to_win: 103 = 11.3%
+  draw_to_win: 47
+
+seat balance:
+  p0 rows: 424
+  p0 converts: 50 = 11.8%
+  p1 rows: 490
+  p1 converts: 53 = 10.8%
+
+outcome transitions:
+  loss -> win: 56
+  draw -> win: 47
+  win -> loss: 53
+  win -> draw: 60
+```
+
+Interpretation:
+
+```text
+The v1 policy still leaves many conversion opportunities for online search.
+The conversion-positive rate is higher on the v1 distribution than on the
+legacy distribution, so the wrapper gap is not exhausted.
+```
+
+Adapter v2:
+
+```text
+init:
+  conversion adapter v1
+
+data:
+  old v0/v1 conversion rows + v1 DAgger rows
+
+loss:
+  policy_kl=0.7
+  action_ce=0.6 on search_converts_to_win rows
+  pairwise=1.0
+  lr=2e-5
+  epochs=50
+
+final:
+  KL 0.1149
+  ActCE 2.3876
+  action accuracy 40.7%
+  Pair 4.2497
+  pair accuracy 9.8%
+
+fixed-v5 max500 256-row, seed100020:
+  v1 adapter:
+    min 38.67%
+  v2 adapter:
+    p0 35.94%
+    p1 35.94%
+    min 35.94%
+
+Conclusion:
+  v2 over-shifted relative to v1 and regressed.
+```
+
+Adapter v2b:
+
+```text
+init:
+  conversion adapter v1
+
+data:
+  v1 DAgger rows only
+
+loss:
+  policy_kl=2.0
+  action_ce=0.35 on search_converts_to_win rows
+  pairwise=0.4
+  lr=1e-5
+  epochs=25
+
+final:
+  KL 0.0006
+  ActCE 3.1638
+  action accuracy 33.6%
+  Pair 5.3479
+  pair accuracy 0.0%
+
+fixed-v5 max500 256-row, seed100020:
+  p0 42.58%
+  p1 38.67%
+  min 38.67%
+
+Conclusion:
+  v2b is effectively v1-equivalent at this gate. It did not improve.
+```
+
+Current decision:
+
+```text
+Keep v1 as current static adapter candidate:
+  runs/adaptive-online-search-conversion-adapter-v1/
+    generals-adaptive-online-search-conversion-adapter-v1.eqx
+
+Do not continue small CE/KL sweeps on full-replace policy-head adapters.
+The next step should be a gate/mixture or a higher-quality conversion-positive
+collector, because full replace has started trading away useful v1 behavior.
+```
