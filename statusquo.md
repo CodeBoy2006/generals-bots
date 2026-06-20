@@ -1424,3 +1424,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not wire the scorer into gameplay yet. Use strict conversion rows with soft-rank supervision as the next controller/head direction, and collect more rpa2 conversion rows before attempting evaluator integration.
 - **Context:** After removing an initial label-leak feature (`candidate_is_search_action`), the best all-changed scorer reached val top1 `38.78%`, top2 `70.0%`, pair `59.9%` versus prior top1 `0.38%`. Strict `search_converts_to_win` soft-rank rows were more promising despite only `101` rows: best val top1 `55.0%`, top2 `70.0%`, pair `60.0%`; hard-best CE overfit and fell to best top1 `30.0%`.
+
+## [2026-06-20 23:51] Candidate Scorer Normalization Fix
+- **Changes:** Stopped gradients through `feature_mean` and `feature_std` in `adaptive_online_search_candidate_scorer.py` so dataset normalization metadata stays fixed while the MLP trains.
+- **Status:** Completed
+- **Next Steps:** Use this fixed scorer for subsequent rpa2 strict-conversion diagnostics; older scorer checkpoints are still readable but were trained with mutable normalization leaves.
+- **Context:** This is a training-stability fix before scaling independent rpa2 conversion shards. It does not change trace data or evaluator behavior.

@@ -106,7 +106,12 @@ class OnlineSearchCandidateScorer(eqx.Module):
         )
 
     def __call__(self, features: jnp.ndarray) -> jnp.ndarray:
-        x = (features - self.feature_mean) / jnp.maximum(self.feature_std, 1.0e-6)
+        # These normalization statistics are dataset metadata, not trainable
+        # parameters.  Keep them as leaves so checkpoints are self-contained,
+        # but stop gradients so Optax cannot drift or invert the scale.
+        feature_mean = jax.lax.stop_gradient(self.feature_mean)
+        feature_std = jnp.maximum(jax.lax.stop_gradient(self.feature_std), 1.0e-6)
+        x = (features - feature_mean) / feature_std
         x = jax.nn.relu(self.linear1(x))
         x = jax.nn.relu(self.linear2(x))
         return self.linear3(x)[0]
