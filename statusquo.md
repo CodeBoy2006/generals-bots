@@ -1292,3 +1292,9 @@
 - **Status:** Completed
 - **Next Steps:** Add `dataset-format online-search` training support in `adaptive_strategy_supervised.py`: KL-to-base plus top-k soft CE/search-Q/margin losses, filtering on `search_used`, `search_action_changed`, `search_score_gap`, turn/contact, and balanced size/seat strata.
 - **Context:** GPU smoke wrote finite NPZ trace fields. First real Expander shard saved `57/96` midgame rows across 8/12/16 with action-change rate `64.9%`, mean gap `9.19`, and `7` short-horizon win labels. First fixed-v5 max500 shard saved `88/96` 8x rows with balanced seats, action-change rate `56.8%`, and mean gap `3.55`; short rollouts still labeled all best outcomes draw, so fixed-v5 distillation should not filter only on `search_best_outcome=win`.
+
+## [2026-06-20 19:23] Online Search Distillation Trainer
+- **Changes:** Added `adaptive_strategy_supervised.py --dataset-format online-search`, row filters for `search_used` / `search_action_changed`, action CE modes `search-used` / `search-changed`, and pairwise margin support against `base_action_index`. Updated README, Chinese manual, and strategy notes so current fixed-v5 diagnostics and data collection use `max500` instead of `max250`, with `max750` reserved for longer confirmation.
+- **Status:** Completed
+- **Next Steps:** Collect larger fixed-v5 max500 online-search trace shards with later-turn/contact states and final long-episode outcomes, then run pure checkpoint distillation and evaluate wrapper-free against fixed-v5 max500 plus Expander 8/12/16 max750.
+- **Context:** GPU trainer smoke consumed the first Expander/fixed-v5 trace shards, kept `51/145` rows after online-search filters, trained one policy-head epoch, and saved an ignored smoke checkpoint under `runs/adaptive-online-search-distill-smoke/`. Tiny fixed-v5 max500 eval was only `32` games/seat and min `15.62%`, so it validates the code path only, not promotion quality.

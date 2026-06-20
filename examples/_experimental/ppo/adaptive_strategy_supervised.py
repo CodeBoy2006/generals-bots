@@ -31,8 +31,8 @@ from generals.agents.ppo_policy_agent import parse_policy_channels
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
-DATASET_FORMAT_MODES = ("strategy", "plan-q-prefix")
-ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win")
+DATASET_FORMAT_MODES = ("strategy", "plan-q-prefix", "online-search")
+ACTION_CE_WEIGHT_MODES = ("all", "non-draw", "wins", "search-best-win", "search-used", "search-changed")
 BALANCE_STRATA_MODES = (
     "none",
     "size-seat",
@@ -99,6 +99,8 @@ def load_strategy_dataset(
     require_outcome_draw: bool = False,
     require_outcome_nonwin: bool = False,
     require_search_best_win: bool = False,
+    require_search_used: bool = False,
+    require_search_action_changed: bool = False,
     require_finish_within_250: bool = False,
     require_win_or_finish_within_250: bool = False,
     min_search_score_gap: float = 0.0,
@@ -192,6 +194,13 @@ def load_strategy_dataset(
             add_row_filter(
                 "search_best=win",
                 require_field(shard, path, "search_best_outcome").astype(np.int32) == OUTCOME_WIN,
+            )
+        if require_search_used:
+            add_row_filter("search_used", require_field(shard, path, "search_used").astype(np.bool_))
+        if require_search_action_changed:
+            add_row_filter(
+                "search_action_changed",
+                require_field(shard, path, "search_action_changed").astype(np.bool_),
             )
         if require_finish_within_250:
             add_row_filter(
@@ -327,13 +336,20 @@ def load_strategy_dataset(
             action_weight = outcome_known & (outcome == OUTCOME_WIN)
         elif action_ce_weight_mode == "search-best-win":
             action_weight = search_best_outcome == OUTCOME_WIN
+        elif action_ce_weight_mode == "search-used":
+            action_weight = require_field(shard, path, "search_used")[shard_indices].astype(np.bool_)
+        elif action_ce_weight_mode == "search-changed":
+            action_weight = require_field(shard, path, "search_action_changed")[shard_indices].astype(np.bool_)
         else:
             action_weight = np.ones_like(outcome, dtype=np.bool_)
         if action_ce_path_contains and not any(token in str(path) for token in action_ce_path_contains):
             action_weight = np.zeros_like(action_weight, dtype=np.bool_)
         chunks["action_weight"].append(action_weight.astype(np.float32))
         chunks["prefix_weight"].append(action_weight.astype(np.float32))
-        chunks["prefix_base_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
+        if "base_action_index" in shard:
+            chunks["prefix_base_action"].append(shard["base_action_index"][shard_indices].astype(np.int32))
+        else:
+            chunks["prefix_base_action"].append(shard["teacher_action_index"][shard_indices].astype(np.int32))
 
     if not chunks["obs"]:
         raise ValueError("row filters kept no strategy-supervision samples")
@@ -1266,7 +1282,7 @@ def parse_args():
         "--dataset-format",
         choices=DATASET_FORMAT_MODES,
         default="strategy",
-        help="Read ordinary strategy shards or Plan-Q best-command prefix rows.",
+        help="Read ordinary strategy shards, Plan-Q best-command prefix rows, or online-search trace rows.",
     )
     parser.add_argument(
         "--extra-plan-q-prefix-dataset",
@@ -1285,6 +1301,8 @@ def parse_args():
     parser.add_argument("--require-outcome-draw", action="store_true")
     parser.add_argument("--require-outcome-nonwin", action="store_true")
     parser.add_argument("--require-search-best-win", action="store_true")
+    parser.add_argument("--require-search-used", action="store_true")
+    parser.add_argument("--require-search-action-changed", action="store_true")
     parser.add_argument("--require-finish-within-250", action="store_true")
     parser.add_argument("--require-win-or-finish-within-250", action="store_true")
     parser.add_argument("--min-search-score-gap", type=float, default=0.0)
@@ -1466,6 +1484,8 @@ def parse_args():
     if args.dataset_format == "plan-q-prefix":
         if args.require_search_best_win:
             parser.error("--require-search-best-win is not available for --dataset-format plan-q-prefix")
+        if args.require_search_used or args.require_search_action_changed:
+            parser.error("search-used/action-changed filters are not available for --dataset-format plan-q-prefix")
         if args.require_finish_within_250 or args.require_win_or_finish_within_250:
             parser.error("finish-window filters are not available for --dataset-format plan-q-prefix")
         if args.require_contact or args.min_visible_enemy_cells > 0 or args.min_visible_enemy_density > 0.0:
@@ -1600,6 +1620,8 @@ def main():
             args.require_outcome_draw,
             args.require_outcome_nonwin,
             args.require_search_best_win,
+            args.require_search_used,
+            args.require_search_action_changed,
             args.require_finish_within_250,
             args.require_win_or_finish_within_250,
             args.min_search_score_gap,

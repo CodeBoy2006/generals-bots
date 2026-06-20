@@ -13999,3 +13999,104 @@ Next:
   2. train with KL-to-base + top-k search soft CE + action-Q/value margin
   3. evaluate pure checkpoint/wrapper-free against fixed-v5 max500 and Expander
 ```
+
+### 2026-06-20 19:23 - Online-Search Distillation Trainer Smoke
+
+User-facing gate update:
+
+```text
+fixed-v5 diagnostics now use max500 as the main short-game gate.
+max250 is too compressed for otherwise realistic 8x8 games.
+max750 remains useful as a longer confirmation / ablation horizon.
+```
+
+Implementation:
+
+```text
+adaptive_strategy_supervised.py:
+  added --dataset-format online-search
+  added row filters:
+    --require-search-used
+    --require-search-action-changed
+  added action CE weight modes:
+    search-used
+    search-changed
+  pairwise prefix margin now uses base_action_index when present,
+  so online-search traces can rank the executed search action above the
+  original deployment action.
+
+README / zh-manual:
+  current fixed-v5 examples and data guidance now point at max500, not max250.
+  online-search trace distillation parameters are documented.
+```
+
+GPU trainer smoke:
+
+```text
+data:
+  runs/adaptive-online-search-expander-midgame-v0/*.npz
+  runs/adaptive-online-search-fixed-v5-midgame-v0/*.npz
+
+filters:
+  dataset_format=online-search
+  min_row_turn=80
+  require_search_used=true
+  min_search_score_gap=0.1
+  action_ce_weight_mode=search-changed
+  balance=size-seat-domain-oversample
+
+training:
+  init: adaptive-unet-ppo-v4
+  update_scope: policy-heads
+  epochs: 1
+  samples: 78 after balancing
+  row filters kept: 51 / 145
+
+loss smoke:
+  total: 5.1773
+  policy KL: 0.2645
+  action CE: 5.6263
+  action accuracy: 2.5%
+  pairwise margin loss: 6.2354
+  pairwise accepted-vs-base accuracy: 10.6%
+  search-Q rank loss: 3.8947
+  search-Q rank accuracy: 23.4%
+
+artifact:
+  runs/adaptive-online-search-distill-smoke/
+    generals-adaptive-online-search-distill-smoke.eqx
+```
+
+Tiny fixed-v5 max500 smoke eval:
+
+```text
+model:
+  runs/adaptive-online-search-distill-smoke/
+    generals-adaptive-online-search-distill-smoke.eqx
+
+settings:
+  fixed v5 sample opponent
+  max_steps=500
+  num_games=32/seat
+  policy_mode=sample
+
+rows:
+  p0: 5-27-0, win 15.62%
+  p1: 11-19-2, win 34.38%
+  min: 15.62%
+```
+
+Interpretation:
+
+```text
+This only validates the new trainer/data path; it is not a promotion result.
+The first online-search fixed-v5 shard contains only short-horizon draw
+best_outcome labels, so the next useful data step is larger max500 trace
+collection with later-turn/contact states and, ideally, final long-episode
+outcome after following the wrapper action.
+
+Next distillation run should keep max500 as the fixed-v5 gate, use more trace
+rows, and report both:
+  fixed-v5 max500 256/512-row
+  Expander 8/12/16 max750 256/512-row
+```
