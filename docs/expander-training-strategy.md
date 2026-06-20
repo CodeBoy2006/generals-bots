@@ -15945,3 +15945,71 @@ gameplay yet.  Next useful step remains larger independent max500 rpa2 strict
 conversion collection, then train a planner-aware conditional action head or
 candidate scorer against fixed normalization.
 ```
+
+### 2026-06-20 23:37 - rpa2 Strict Conversion v2 Partial
+
+Ran a conversion-only rpa2 fixed-v5 max500 collection to increase strict
+positive rows:
+
+```text
+output:
+  runs/adaptive-online-search-fixed-v5-max500-rpa2-v2-convert/
+
+settings:
+  fixed-v5 max500
+  v4 base + static conversion adapter v1
+  online search top_k=4, rollout_steps=16, rollouts/action=2
+  min_turn=80, contact-only
+  conversion_rollout_steps=500
+  require_search_used
+  require_action_changed
+  require_search_converts_to_win
+  num_envs=8, num_steps=16, requested shards=8, seed=104920
+```
+
+The session was interrupted after shard 5 and left an external JAX process
+running; the process was terminated manually after confirming `nvidia-smi`.
+Partial output is still usable:
+
+```text
+written shards: 6
+strict conversion rows: 32
+seat balance: p0 16 / p1 16
+```
+
+Combined strict-conversion scorer rerun:
+
+```text
+datasets:
+  rpa2 v0
+  rpa2 v1
+  rpa2 v2-convert partial
+
+model:
+  runs/adaptive-online-search-candidate-scorer-rpa2-convert-frozen-v1/
+
+rows:
+  raw 2110
+  kept strict conversion rows 133
+  train 106 / val 27
+
+best epoch:
+  22
+
+validation:
+  prior top1 0.00%
+  prior top2 51.85%
+  top1 37.04%
+  top2 59.26%
+  pair 55.90%
+```
+
+Decision:
+
+```text
+The extra 32 strict conversion rows did not improve validation top1 versus the
+101-row frozen v0/v1 split.  This reinforces that the next gain needs more
+independent conversion data and likely a stronger conditional action head, not
+another scorer hyperparameter sweep.  Keep the partial v2 shard as usable data,
+but do not promote the scorer into evaluator gameplay.
+```

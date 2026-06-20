@@ -1436,3 +1436,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat the candidate scorer as an offline signal probe only. Scale independent max500 strict-conversion rows before wiring a scorer or conditional action head into gameplay.
 - **Context:** Frozen all-changed scorer best val top1/top2/pair was `34.22%/67.68%/57.54%` versus prior top1 `1.06%`. Frozen strict `search_converts_to_win` scorer best val top1/top2/pair was `40.0%/60.0%/59.66%` on `101` rows. The old mutable-normalization numbers were optimistic but the signal survives.
+
+## [2026-06-20 23:37] rpa2 Strict Conversion Partial v2
+- **Changes:** Collected partial fixed-v5 max500 rpa2 strict-conversion rows under `runs/adaptive-online-search-fixed-v5-max500-rpa2-v2-convert/`, trained a combined fixed-normalization strict-conversion candidate scorer, and documented the result.
+- **Status:** Completed
+- **Next Steps:** Do not integrate the scorer into gameplay. Collect substantially more independent strict-conversion rows or move to a planner-aware conditional action head.
+- **Context:** The collection was interrupted after 6/8 shards and left a GPU JAX process, which was terminated after `nvidia-smi` confirmed it was still consuming GPU. The usable partial shard has `32` strict conversion rows with exact p0/p1 balance `16/16`. Combined v0+v1+partial-v2 strict scorer kept `133` rows and reached best val top1/top2/pair `37.04%/59.26%/55.90%`, not better than the `101`-row frozen v0/v1 split.
