@@ -1280,3 +1280,9 @@
 - **Status:** Completed
 - **Next Steps:** Collect aligned online-search traces for distillation: chosen action, candidate prior, search score, margin, search-enter state, and final episode outcome. Then add equivalent heuristic/Expander online-search support for 12/16 planner upper-bound checks.
 - **Context:** Same-seed fixed-v5 max500 512-row no-search baseline was p0 `44.14%`, p1 `41.99%`, min `41.99%`. Before alignment, online search min was only `44.73%`. After alignment, online search reached p0 `53.52%`, p1 `51.56%`, min `51.56%`, with draw `6.25%` / `4.69%`.
+
+## [2026-06-20 18:47] Expander Online Search Upper Bound
+- **Changes:** Extended `evaluate_adaptive_policy.py --online-search-*` to built-in heuristic opponents, including Expander, using the same first-step opponent-action alignment as the fixed checkpoint path. Updated README, Chinese manual, and strategy notes with 8/12/16 Expander results and the legacy adapter `--value-head-sizes 8` loading note.
+- **Status:** Completed
+- **Next Steps:** Build an aligned online-search trace dataset for distillation rather than sweeping search parameters. Save base action, search action, candidate scores, score margin, search-enter flag, and final outcome; train policy/action-Q/finish heads on high-margin states.
+- **Context:** Expander 8/12/16 max750 same-seed 256-row baseline min was `76.95%` with 16x draw `14.45%` on both seats. Online search `top_k=4, rollout_steps=16, turn>=80, contact-only, max_grid=16` reached min `85.16%`, with all six rows above `85%` and 16x draw down to `5.47%` / `6.25%`. This is a planner/wrapper upper bound, not a pure checkpoint.

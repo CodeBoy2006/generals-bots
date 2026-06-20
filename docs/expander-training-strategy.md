@@ -13705,3 +13705,131 @@ research move should be trace collection from the aligned online search path:
 chosen action, candidate priors, candidate scores, score margin, search-enter
 state, and whether the final episode converts draw/loss into win.
 ```
+
+### 2026-06-20 18:47 - Online Search for Expander/Heuristic Opponents
+
+Implementation:
+
+```text
+Extended evaluate_adaptive_policy.py online search beyond fixed checkpoint
+opponents:
+
+  online_search_action_policy_opponent:
+    fixed checkpoint opponent path
+
+  online_search_action_heuristic_opponent:
+    built-in heuristic opponent path, including Expander
+
+Both paths now use the same real first-step opponent action that the environment
+will execute. The heuristic path calls opponent_action(...) inside each rollout
+step, so it can be used for 8/12/16 Expander planner upper-bound diagnostics.
+```
+
+Note on legacy adapter template:
+
+```text
+The legacy Plan-Q prefix adapter was trained as an 8x gate. When evaluating
+8/12/16 with that adapter loaded but size-gated to 8, use:
+
+  --value-heads per-size
+  --value-head-sizes 8
+
+Policy logits are still valid for 12/16; value heads are not used by evaluation
+actions. Without this, the loader builds a 3-head value template and the 8x
+legacy adapter stream ends early.
+```
+
+128-row Expander triage:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+settings:
+  grid_sizes: 8,12,16
+  opponent: expander
+  max_steps: 750
+  policy_mode: sample
+  online_search:
+    top_k=4
+    rollout_steps=16
+    rollouts/action=1
+    min_turn=80
+    require_contact=true
+    max_grid_size=16
+
+seed99220 baseline:
+  8p0 84.38%
+  8p1 88.28%
+  12p0 83.59%
+  12p1 86.72%
+  16p0 78.91% draw 16.41%
+  16p1 78.12% draw 15.62%
+  min 78.12%
+
+seed99220 online search:
+  8p0 85.94%
+  8p1 91.41%
+  12p0 95.31%
+  12p1 87.50%
+  16p0 92.19% draw 3.91%
+  16p1 89.06% draw 5.47%
+  min 85.94%
+```
+
+256-row Expander confirmation:
+
+```text
+seed99240 baseline:
+  8p0 85.94%
+  8p1 83.98%
+  12p0 80.08%
+  12p1 80.86%
+  16p0 76.95% draw 14.45%
+  16p1 77.34% draw 14.45%
+  min 76.95%
+
+seed99240 online search:
+  8p0 89.45%
+  8p1 89.45%
+  12p0 88.67%
+  12p1 89.84%
+  16p0 88.28% draw 5.47%
+  16p1 85.16% draw 6.25%
+  min 85.16%
+```
+
+Conclusion:
+
+```text
+This is the first clear large-map planner upper-bound result:
+
+  same-seed 256-row min gain: +8.21pp
+  16x draw roughly cut from 14.45% to 5-6%
+  all six rows above 85%
+
+This does not mean the pure checkpoint has solved Expander. It means the
+missing large-map behavior is accessible through short counterfactual primitive
+search using the current U-Net policy as rollout policy. The next training
+target should be aligned online-search distillation rather than another PPO
+reward sweep:
+
+  inputs:
+    policy obs + memory + scoreboard history
+
+  labels:
+    base action
+    search action
+    candidate scores
+    search margin
+    search-enter flag
+    final outcome
+
+  objective:
+    train policy/action-Q/finish heads to reproduce high-margin search choices
+    only where the online search changes outcome timing or draw risk.
+```

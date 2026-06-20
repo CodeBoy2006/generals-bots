@@ -674,6 +674,142 @@ def online_search_action_policy_opponent(
     return candidate_actions[jnp.argmax(scores)]
 
 
+def online_search_action_heuristic_opponent(
+    network,
+    policy_adapter_network,
+    opponent,
+    state,
+    effective_size: int,
+    key,
+    opponent_first_action: jnp.ndarray,
+    policy_player: int,
+    policy_mode: int,
+    pad_size: int,
+    max_steps: int,
+    global_context: bool,
+    scoreboard_history_enabled: bool,
+    previous_scoreboard: jnp.ndarray,
+    fog_memory_enabled: bool,
+    fog_memory,
+    policy_adapter_scale: float,
+    policy_adapter_mode: int,
+    policy_adapter_min_grid_size: int,
+    policy_adapter_max_grid_size: int,
+    top_k: int,
+    rollout_steps: int,
+    rollouts_per_action: int,
+    army_weight: float,
+    land_weight: float,
+    prior_weight: float,
+    terminal_score: float,
+) -> jnp.ndarray:
+    """Choose a primitive action by online counterfactual rollout search against a heuristic opponent."""
+    obs = game.get_observation(state, policy_player)
+    current_scoreboard = adaptive_scoreboard_features(obs, effective_size)
+    history_context = (
+        adaptive_scoreboard_history_context(previous_scoreboard, current_scoreboard)
+        if scoreboard_history_enabled
+        else None
+    )
+    obs_arr, active = adaptive_obs_to_array(
+        obs,
+        effective_size,
+        pad_size,
+        include_global_context=global_context,
+        scoreboard_history=history_context,
+        fog_memory=fog_memory if fog_memory_enabled else None,
+    )
+    mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, effective_size, pad_size)
+    logits = adapter_composed_policy_logits(
+        network,
+        policy_adapter_network,
+        obs_arr,
+        mask,
+        active,
+        effective_size,
+        policy_adapter_scale,
+        policy_adapter_mode,
+        policy_adapter_min_grid_size,
+        policy_adapter_max_grid_size,
+    )
+    prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
+    candidate_actions = jax.vmap(lambda index: adaptive_index_to_action(index, pad_size))(candidate_indices)
+    opponent_player = 1 - policy_player
+
+    def rollout_result(initial_state, rollout_key):
+        def body(carry, _):
+            rollout_state, prev_scoreboard, memory, step_key = carry
+            step_key, learner_key, opponent_key = jrandom.split(step_key, 3)
+            learner_obs = game.get_observation(rollout_state, policy_player)
+            learner_action, next_scoreboard, next_memory = adapter_policy_action_with_memory(
+                network,
+                policy_adapter_network,
+                learner_obs,
+                effective_size,
+                learner_key,
+                policy_mode,
+                pad_size,
+                global_context,
+                scoreboard_history_enabled,
+                prev_scoreboard,
+                fog_memory_enabled,
+                memory,
+                policy_adapter_scale,
+                policy_adapter_mode,
+                policy_adapter_min_grid_size,
+                policy_adapter_max_grid_size,
+            )
+            opponent_obs = game.get_observation(rollout_state, opponent_player)
+            opponent_action_value = opponent_action(opponent, opponent_key, opponent_obs, random_action)
+            actions = jax.lax.cond(
+                policy_player == 0,
+                lambda _: jnp.stack([learner_action, opponent_action_value]),
+                lambda _: jnp.stack([opponent_action_value, learner_action]),
+                None,
+            )
+            next_state, _ = game.step(rollout_state, actions)
+            current_info = game.get_info(rollout_state)
+            already_done = current_info.is_done | (rollout_state.time >= max_steps)
+            final_state = jax.tree.map(lambda old, new: jnp.where(already_done, old, new), rollout_state, next_state)
+            final_info = game.get_info(final_state)
+            final_scoreboard = reset_adaptive_scoreboard_history(next_scoreboard, final_info.is_done)
+            final_memory = scalar_reset_fog_memory(next_memory, final_info.is_done)
+            return (final_state, final_scoreboard, final_memory, step_key), None
+
+        (final_state, _, _, _), _ = jax.lax.scan(
+            body,
+            (initial_state, current_scoreboard, fog_memory, rollout_key),
+            None,
+            length=rollout_steps,
+        )
+        final_info = game.get_info(final_state)
+        truncated = (final_state.time >= max_steps) & ~final_info.is_done
+        scored_info = final_info._replace(winner=jnp.where(truncated, -1, final_info.winner))
+        final_obs = game.get_observation(final_state, policy_player)
+        return search_score_observation(scored_info, final_obs, policy_player, army_weight, land_weight, terminal_score)
+
+    def score_candidate(action, prior_score, candidate_key):
+        first_actions = jax.lax.cond(
+            policy_player == 0,
+            lambda _: jnp.stack([action, opponent_first_action]),
+            lambda _: jnp.stack([opponent_first_action, action]),
+            None,
+        )
+        next_state, first_info = game.step(state, first_actions)
+        rollout_keys = jrandom.split(candidate_key, rollouts_per_action)
+        rollout_scores = jax.vmap(lambda rollout_key: rollout_result(next_state, rollout_key))(rollout_keys)
+        first_terminal = jnp.where(
+            first_info.winner == policy_player,
+            terminal_score,
+            jnp.where(first_info.winner == opponent_player, -terminal_score, 0.0),
+        )
+        return first_terminal + jnp.mean(rollout_scores) + prior_weight * prior_score
+
+    candidate_keys = jrandom.split(key, top_k)
+    scores = jax.vmap(score_candidate)(candidate_actions, prior_scores, candidate_keys)
+    return candidate_actions[jnp.argmax(scores)]
+
+
 def policy_adapter_gate_features(
     obs_arr: jnp.ndarray,
     policy_logits: jnp.ndarray,
@@ -1160,6 +1296,17 @@ def evaluate_batch(
     policy_adapter_min_grid_size=0,
     policy_adapter_max_grid_size=0,
     policy_adapter_commit_steps=0,
+    online_search_top_k=0,
+    online_search_rollout_steps=16,
+    online_search_rollouts_per_action=1,
+    online_search_min_turn=0,
+    online_search_require_contact=False,
+    online_search_min_grid_size=0,
+    online_search_max_grid_size=0,
+    online_search_army_weight=1.0,
+    online_search_land_weight=10.0,
+    online_search_prior_weight=0.001,
+    online_search_terminal_score=100.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -1181,6 +1328,11 @@ def evaluate_batch(
         and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
     )
     effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
+    online_search_size_allowed = (
+        (online_search_min_grid_size <= 0 or effective_size >= online_search_min_grid_size)
+        and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
+    )
+    online_search_enabled = online_search_top_k > 0 and online_search_size_allowed
     initial_adapter_commit = jnp.zeros((num_envs,), dtype=jnp.int32)
 
     def body(carry, _):
@@ -1265,8 +1417,13 @@ def evaluate_batch(
 
         key, policy_key, opponent_key = jrandom.split(key, 3)
         policy_keys = jrandom.split(policy_key, num_envs)
+        opponent_keys = jrandom.split(opponent_key, num_envs)
         pre_infos = jax.vmap(game.get_info)(states)
         active_decisions = (~pre_infos.is_done).astype(jnp.float32)
+        opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent, k, obs, random_action))(
+            opponent_keys,
+            opponent_obs,
+        )
         policy_actions, adapter_triggers, adapter_used, adapter_action_diff = jax.vmap(
             lambda o, m, a, k, c: _policy_action(
                 network,
@@ -1311,11 +1468,49 @@ def evaluate_batch(
             policy_keys,
             adapter_commit,
         )
-        opponent_keys = jrandom.split(opponent_key, num_envs)
-        opponent_actions = jax.vmap(lambda k, obs: opponent_action(opponent, k, obs, random_action))(
-            opponent_keys,
-            opponent_obs,
-        )
+        if online_search_enabled:
+            key, search_key = jrandom.split(key)
+            search_keys = jrandom.split(search_key, num_envs)
+            visible_contact = jnp.sum(policy_obs.opponent_cells.reshape(num_envs, -1), axis=-1) > 0
+            search_turn_allowed = states.time >= online_search_min_turn
+            search_contact_allowed = visible_contact | (not online_search_require_contact)
+            use_online_search = (~pre_infos.is_done) & search_turn_allowed & search_contact_allowed
+            policy_actions = jax.vmap(
+                lambda state, sample_key, base_action, opponent_action_value, row_history, row_memory, use_search: jax.lax.cond(
+                    use_search,
+                    lambda _: online_search_action_heuristic_opponent(
+                        network,
+                        policy_adapter_network,
+                        opponent,
+                        state,
+                        effective_size,
+                        sample_key,
+                        opponent_action_value,
+                        policy_player,
+                        policy_mode,
+                        pad_size,
+                        max_steps,
+                        global_context,
+                        scoreboard_history,
+                        row_history,
+                        fog_memory,
+                        row_memory,
+                        effective_policy_adapter_scale,
+                        policy_adapter_mode,
+                        policy_adapter_min_grid_size,
+                        policy_adapter_max_grid_size,
+                        online_search_top_k,
+                        online_search_rollout_steps,
+                        online_search_rollouts_per_action,
+                        online_search_army_weight,
+                        online_search_land_weight,
+                        online_search_prior_weight,
+                        online_search_terminal_score,
+                    ),
+                    lambda _: base_action,
+                    None,
+                )
+            )(states, search_keys, policy_actions, opponent_actions, history, current_memory, use_online_search)
         actions = stack_learner_actions(policy_actions, opponent_actions, policy_player)
         new_states, infos = jax.vmap(game.step)(states, actions)
         keep_old = pre_infos.is_done
@@ -2000,8 +2195,6 @@ def parse_args():
         parser.error("--policy-adapter-min-grid-size must be <= --policy-adapter-max-grid-size")
     if args.online_search_top_k < 0:
         parser.error("--online-search-top-k must be non-negative")
-    if args.online_search_top_k > 0 and args.opponent_policy_path is None:
-        parser.error("--online-search-top-k currently requires --opponent-policy-path")
     if args.online_search_top_k > 0 and args.policy_adapter_gate_threshold >= 0.0:
         parser.error("--online-search-top-k currently supports ungated policy adapters only")
     if args.online_search_top_k > 0 and args.policy_adapter_finish_threshold >= 0.0:
@@ -2381,6 +2574,17 @@ def main():
                     args.policy_adapter_min_grid_size,
                     args.policy_adapter_max_grid_size,
                     args.policy_adapter_commit_steps,
+                    args.online_search_top_k,
+                    args.online_search_rollout_steps,
+                    args.online_search_rollouts_per_action,
+                    args.online_search_min_turn,
+                    args.online_search_require_contact,
+                    args.online_search_min_grid_size,
+                    args.online_search_max_grid_size,
+                    args.online_search_army_weight,
+                    args.online_search_land_weight,
+                    args.online_search_prior_weight,
+                    args.online_search_terminal_score,
                 )
             else:
                 info, adapter_stats = evaluate_policy_opponent_batch(
