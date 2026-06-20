@@ -1232,3 +1232,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not sweep commit length or run a 512-row confirmation for this path. Continue with stronger decisive trajectory labels or a true plan-conditioned executor instead of forcing a weak adapter decision for multiple turns.
 - **Context:** GPU smoke used `cuda:0`. `v4 base + a1mix adapter + a1mix learned gate threshold 0.5 + commit4` scored fixed-v5 max250 256-row seed `97120` at p0 `8.20%`, p1 `9.77%`, min `8.20%`, below the non-commit gate (`12.11%`) and current legacy Plan-Q wrapper (`14.06%`).
+
+## [2026-06-20 16:00] Legacy Plan-Q Adapter Gate Probe
+- **Changes:** Logged the GPU offline probe for a deployment-shaped gate over the current best `adaptive-legacy-planq-prefix-policy-v0` adapter, using `adaptive-midgame-contact-searchwin-imitation-v3` only as the feature model. No code changes were needed.
+- **Status:** Completed
+- **Next Steps:** Do not run gameplay eval or threshold sweeps for this legacy gate. Keep the ungated v4 + legacy Plan-Q prefix adapter as current best, and move fixed-v5 work toward better enter/exit labels or a real plan-conditioned executor.
+- **Context:** The gate data had `3890` rows, `943` changed adapter actions, and `275` positives (`29.16%`). The old value-head schema required loading with a shared value-head template. Training failed to separate labels: `lr=1e-3` ended with P+ `0.872` / P- `0.871`, and `lr=1e-4` ended with loss `0.7035`, acc `46.4%`, P+ `0.458` / P- `0.465`.

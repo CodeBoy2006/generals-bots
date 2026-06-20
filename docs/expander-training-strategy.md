@@ -12901,3 +12901,77 @@ The next useful route is still better decisive trajectory labels or a true
 plan-conditioned executor, not extending a weak adapter decision for several
 turns.
 ```
+
+## 2026-06-20 16:00 - Legacy Plan-Q Adapter Gate Offline Probe
+
+Tested whether the current best legacy Plan-Q prefix adapter can be gated
+instead of always replacing 8x8 logits.
+
+Setup:
+
+```text
+base:
+  runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+adapter:
+  runs/adaptive-legacy-planq-prefix-policy-v0/
+    generals-adaptive-legacy-planq-prefix-policy-v0.eqx
+
+feature model:
+  runs/adaptive-midgame-contact-searchwin-imitation-v3/
+    generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+
+gate data:
+  adaptive-fixed-v5-searchwin-a1-v1
+  adaptive-midgame-terminal-searchwin-fixed-v5-safev3-v0
+```
+
+The legacy adapter is policy-only, so the gate used a separate feature model for
+strategy finish features and treated outcome features as zero. The first attempt
+with the regular per-size value-head template failed on the legacy checkpoint's
+old value-head serialization; retrying with a shared value-head template loaded
+the policy logits and reinitialized irrelevant value leaves.
+
+Dataset:
+
+```text
+rows:
+  3890
+
+changed adapter actions:
+  943
+
+positives:
+  275
+
+positive fraction among changed examples:
+  29.16%
+```
+
+Training:
+
+```text
+lr 1e-3, 80 epochs:
+  unstable
+  final P+ 0.872
+  final P- 0.871
+
+lr 1e-4, 100 epochs:
+  final loss 0.7035
+  final acc 46.4%
+  final P+ 0.458
+  final P- 0.465
+```
+
+Interpretation:
+
+```text
+The gate does not separate positive and negative legacy-adapter changed actions,
+even though the positive fraction is healthy. This is a data/feature boundary
+failure, not a threshold problem. Do not run gameplay eval or sweep thresholds
+for this legacy adapter gate.
+
+The current best remains the ungated v4 + legacy Plan-Q prefix adapter. Further
+fixed-v5 work needs better enter/exit labels or a true plan-conditioned executor,
+not a binary gate over the existing legacy delta.
+```
