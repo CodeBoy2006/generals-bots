@@ -15005,3 +15005,116 @@ Next useful research move:
   head that can represent conditional search actions without shifting the whole
   8x8 policy surface.
 ```
+
+### 2026-06-20 22:11 - Max500 Adapter-Continuation Policy Sharpening
+
+The fixed-v5 diagnostic gate is now `max500`; `max250` is treated as too
+compressed for the current deployment objective.  I used direct
+adapter-vs-base continuation labels rather than search-action labels:
+
+```text
+datasets:
+  runs/adaptive-online-search-fixed-v5-max500-adaptercf-v0/
+    rows 3707
+    adapter_action_changed 1602
+    adapter_improves_continuation 932
+    adapter_converts_to_win 715
+    changed&convert 286
+
+  runs/adaptive-online-search-fixed-v5-max500-adaptercf-v1-extra/
+    rows 1576
+    adapter_action_changed 651
+    adapter_improves_continuation 319
+    adapter_converts_to_win 246
+    changed&convert 99
+
+combined:
+  rows 5283
+  changed 2253
+  improves 1251
+  converts 961
+  changed&improve 521
+  changed&convert 385
+```
+
+Compression attempts:
+
+```text
+v3 combined changed&convert:
+  init legacy prefix adapter
+  kept 385 rows, oversampled to 496
+  policy_kl=1.5, action_ce=0.6, pairwise=0.6
+  fixed-v5 max500:
+    128-row min 36.72%
+    256-row min 32.81%
+  decision: stop, below static v1 on 256-row
+
+v4 combined changed&improve:
+  init legacy prefix adapter
+  kept 521 rows, oversampled to 588
+  policy_kl=1.8, action_ce=0.45, pairwise=0.45
+  fixed-v5 max500:
+    128-row seed102260 min 40.62%
+    256-row seed102280 min 36.72%
+    512-row seed102320 min 42.58%
+    512-row seed102360 min 37.89%
+    2048-row seed102400 p0/p1 39.36% / 36.57%, min 36.57%
+  same-seed static v1 2048-row:
+    p0/p1 35.99% / 37.16%, min 35.99%
+  net 2048-row total:
+    v4 1555 wins / 4096 games
+    static v1 1498 wins / 4096 games
+    +57 wins, +1.39pp overall, but p1 is -0.59pp
+
+v5 p1-weighted changed&improve:
+  added adaptive_strategy_supervised.py --seat-loss-multipliers
+  seat weights p0=1, p1=1.4
+  fixed-v5 max500 256-row min 35.55%
+  decision: no promotion, p1 weighting did not repair tradeoff
+
+v6 static-init changed&improve:
+  init static conversion adapter v1
+  policy_kl=2.0, action_ce=0.35, pairwise=0.35
+  fixed-v5 max500 256-row min 33.98%
+  decision: no promotion, static init plus CE sharpening regressed
+```
+
+Expander protection for the best sharpening candidate:
+
+```text
+v4 combined changed&improve, Expander 8/12/16 max750 512-row:
+  8p0 89.45%
+  8p1 86.72%
+  12p0 82.62%
+  12p1 82.81%
+  16p0 78.12%
+  16p1 77.73%
+  min 77.73%
+```
+
+The lowest Expander rows are 16x rows where the 8x adapter is inactive, so this
+does not show an adapter-specific larger-map failure.  It does show the usual
+base 16x variance, so v4 is not a clean promotion candidate.
+
+Decision:
+
+```text
+Do not promote v3/v4/v5/v6.  The best static sharpening result is weakly
+positive at 2048 games (+1.39pp overall), but the min-row gain is only +0.58pp
+and the improvement is a p0/p1 tradeoff.  Treat this as evidence that direct
+adapter-continuation CE is better than search-action CE, but still not enough
+to replace the current static v1 or the online-search wrapper.
+
+Keep current best pure/static deployment:
+  v4 base + static conversion adapter v1
+
+Keep current best teacher/deployment wrapper:
+  v4 base + static conversion adapter v1 + online search top_k=4 rollout=16
+  contact-only after turn 80, fixed-v5 gate=max500
+
+Next useful move:
+  use the adapter-continuation rows for a planner-aware conditional head or a
+  richer enter/exit controller, not another global replace-policy CE run.  If
+  online search is used during deployment, evaluate --online-search-min-score-gap
+  to avoid low-margin search replacements before distilling more labels.
+```

@@ -1358,3 +1358,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not promote v3. Treat `v4 base + static conversion adapter v1 + online search top_k=4 rollout=16 contact-only turn>=80` as the current fixed-v5 max500 teacher/deployment wrapper; the next compression attempt needs richer gating or a planner-aware conditional head rather than direct policy-head CE.
 - **Context:** Static v1 plus online search reached fixed-v5 max500 256-row min `51.17%` with draw below `7%`. Expander 8/12/16 64-row smoke min was `79.69%`, with 12/16 rows at `81.25%`-`90.62%`. The new v1-search shard had `3491` rows and `260` balanced search-converts-to-win positives, but v3 static compression dropped to fixed-v5 max500 128-row min `34.38%`, below static v1 same-seed `40.62%`.
+
+## [2026-06-20 22:11] Max500 Adapter-Continuation Sharpening
+- **Changes:** Added `adaptive_strategy_supervised.py --seat-loss-multipliers` for per-seat supervised action/pairwise weighting, preserved the online-search min-score-gap evaluation option, and documented the max500 adapter-continuation v3-v6 results in README, Chinese manual, and the strategy log.
+- **Status:** Completed
+- **Next Steps:** Do not promote v3/v4/v5/v6. Keep static conversion adapter v1 as the current pure adapter and keep the online-search wrapper as the max500 teacher. Next compression should use a planner-aware conditional head or richer enter/exit controller, not another global replace-policy CE pass.
+- **Context:** Combined adapter-vs-base max500 data had `5283` rows with `521` changed&improve and `385` changed&convert rows. Best sharpened adapter v4 reached fixed-v5 max500 2048-row `1555/4096` wins versus static v1 `1498/4096`, but min only moved `35.99% -> 36.57%` and p1 regressed `37.16% -> 36.57%`. p1-weighted v5 and static-init v6 failed 256-row triage.

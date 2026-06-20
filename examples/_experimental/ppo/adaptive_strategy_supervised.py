@@ -102,6 +102,35 @@ def dataset_domain_name(path: Path) -> str:
     return f"path:{name}"
 
 
+def parse_seat_loss_multipliers(value: str) -> tuple[float, float]:
+    """Parse per-seat supervised action weights as p0,p1."""
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("--seat-loss-multipliers must be two comma-separated floats, e.g. 1,1.2")
+    try:
+        parsed = (float(parts[0]), float(parts[1]))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--seat-loss-multipliers must contain floats") from exc
+    if parsed[0] <= 0.0 or parsed[1] <= 0.0:
+        raise argparse.ArgumentTypeError("--seat-loss-multipliers values must be positive")
+    return parsed
+
+
+def apply_seat_loss_multipliers(
+    dataset: dict[str, jnp.ndarray],
+    multipliers: tuple[float, float],
+) -> dict[str, jnp.ndarray]:
+    """Scale supervised action losses by learner seat after optional row balancing."""
+    if multipliers == (1.0, 1.0):
+        return dataset
+    seat = dataset["seat"]
+    weight = jnp.where(seat == 0, multipliers[0], multipliers[1]).astype(jnp.float32)
+    updated = dict(dataset)
+    updated["action_weight"] = dataset["action_weight"] * weight
+    updated["prefix_weight"] = dataset["prefix_weight"] * weight
+    return updated
+
+
 def load_strategy_dataset(
     paths: list[Path],
     max_samples: int | None = None,
@@ -1591,6 +1620,12 @@ def parse_args():
         default=[],
         help="Only shards whose path contains this token contribute action CE. Repeatable.",
     )
+    parser.add_argument(
+        "--seat-loss-multipliers",
+        type=parse_seat_loss_multipliers,
+        default=(1.0, 1.0),
+        help="Scale action CE and prefix pairwise weights by learner seat as p0,p1 after balancing.",
+    )
     parser.add_argument("--q-kl-weight", type=float, default=0.0)
     parser.add_argument("--q-action-ce-weight", type=float, default=0.0)
     parser.add_argument("--search-q-rank-weight", type=float, default=0.0)
@@ -1855,6 +1890,7 @@ def main():
         dataset = concatenate_strategy_datasets([dataset, extra_dataset])
         extra_load_stats.append({"paths": len(extra_paths), **extra_stats})
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
+    dataset = apply_seat_loss_multipliers(dataset, args.seat_loss_multipliers)
     if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:
         raise ValueError("--label-source search-best requires shards with search_best_outcome labels")
     key = jrandom.PRNGKey(args.seed)
@@ -1885,6 +1921,11 @@ def main():
         print(f"Shard cap:     {args.max_samples_per_shard}")
     if args.balance_strata != "none":
         print(f"Balance:       {args.balance_strata}")
+    if args.seat_loss_multipliers != (1.0, 1.0):
+        print(
+            "Seat weights:  "
+            f"p0={args.seat_loss_multipliers[0]:g}, p1={args.seat_loss_multipliers[1]:g}"
+        )
     print(f"Network arch:  {args.network_arch}")
     print(f"Warm start:    {args.init_model_path}")
     print(f"Finish head:   {args.finish_head_mode} ({finish_outputs} logits)")

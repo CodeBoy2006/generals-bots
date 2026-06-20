@@ -541,6 +541,7 @@ def online_search_action_policy_opponent(
     state,
     effective_size: int,
     key,
+    fallback_action: jnp.ndarray,
     opponent_first_action: jnp.ndarray,
     policy_player: int,
     policy_mode: int,
@@ -563,6 +564,7 @@ def online_search_action_policy_opponent(
     land_weight: float,
     prior_weight: float,
     terminal_score: float,
+    min_score_gap: float,
 ) -> jnp.ndarray:
     """Choose a primitive action by online counterfactual rollout search against a fixed policy."""
     obs = game.get_observation(state, policy_player)
@@ -673,7 +675,12 @@ def online_search_action_policy_opponent(
 
     candidate_keys = jrandom.split(key, top_k)
     scores = jax.vmap(score_candidate)(candidate_actions, prior_scores, candidate_keys)
-    return candidate_actions[jnp.argmax(scores)]
+    best_action = candidate_actions[jnp.argmax(scores)]
+    score_gap = jnp.asarray(jnp.inf, dtype=scores.dtype)
+    if top_k >= 2:
+        top_scores, _ = jax.lax.top_k(scores, 2)
+        score_gap = top_scores[0] - top_scores[1]
+    return jnp.where(score_gap >= min_score_gap, best_action, fallback_action)
 
 
 def online_search_action_heuristic_opponent(
@@ -683,6 +690,7 @@ def online_search_action_heuristic_opponent(
     state,
     effective_size: int,
     key,
+    fallback_action: jnp.ndarray,
     opponent_first_action: jnp.ndarray,
     policy_player: int,
     policy_mode: int,
@@ -704,6 +712,7 @@ def online_search_action_heuristic_opponent(
     land_weight: float,
     prior_weight: float,
     terminal_score: float,
+    min_score_gap: float,
 ) -> jnp.ndarray:
     """Choose a primitive action by online counterfactual rollout search against a heuristic opponent."""
     obs = game.get_observation(state, policy_player)
@@ -809,7 +818,12 @@ def online_search_action_heuristic_opponent(
 
     candidate_keys = jrandom.split(key, top_k)
     scores = jax.vmap(score_candidate)(candidate_actions, prior_scores, candidate_keys)
-    return candidate_actions[jnp.argmax(scores)]
+    best_action = candidate_actions[jnp.argmax(scores)]
+    score_gap = jnp.asarray(jnp.inf, dtype=scores.dtype)
+    if top_k >= 2:
+        top_scores, _ = jax.lax.top_k(scores, 2)
+        score_gap = top_scores[0] - top_scores[1]
+    return jnp.where(score_gap >= min_score_gap, best_action, fallback_action)
 
 
 def policy_adapter_gate_features(
@@ -1311,6 +1325,7 @@ def evaluate_batch(
     online_search_land_weight=10.0,
     online_search_prior_weight=0.001,
     online_search_terminal_score=100.0,
+    online_search_min_score_gap=0.0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -1495,6 +1510,7 @@ def evaluate_batch(
                         state,
                         effective_size,
                         sample_key,
+                        base_action,
                         opponent_action_value,
                         policy_player,
                         policy_mode,
@@ -1516,6 +1532,7 @@ def evaluate_batch(
                         online_search_land_weight,
                         online_search_prior_weight,
                         online_search_terminal_score,
+                        online_search_min_score_gap,
                     ),
                     lambda _: base_action,
                     None,
@@ -1613,6 +1630,7 @@ def evaluate_policy_opponent_batch(
     online_search_land_weight=10.0,
     online_search_prior_weight=0.001,
     online_search_terminal_score=100.0,
+    online_search_min_score_gap=0.0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1801,6 +1819,7 @@ def evaluate_policy_opponent_batch(
                         state,
                         effective_size,
                         sample_key,
+                        base_action,
                         opponent_action_value,
                         policy_player,
                         policy_mode,
@@ -1823,6 +1842,7 @@ def evaluate_policy_opponent_batch(
                         online_search_land_weight,
                         online_search_prior_weight,
                         online_search_terminal_score,
+                        online_search_min_score_gap,
                     ),
                     lambda _: base_action,
                     None,
@@ -2035,6 +2055,12 @@ def parse_args():
     parser.add_argument("--online-search-land-weight", type=float, default=10.0)
     parser.add_argument("--online-search-prior-weight", type=float, default=0.001)
     parser.add_argument("--online-search-terminal-score", type=float, default=100.0)
+    parser.add_argument(
+        "--online-search-min-score-gap",
+        type=float,
+        default=0.0,
+        help="If positive, execute the online-search action only when best-minus-second rollout score gap clears it.",
+    )
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -2281,6 +2307,8 @@ def parse_args():
         parser.error("--online-search-rollouts-per-action must be positive")
     if args.online_search_min_turn < 0:
         parser.error("--online-search-min-turn must be non-negative")
+    if args.online_search_min_score_gap < 0.0:
+        parser.error("--online-search-min-score-gap must be non-negative")
     if args.online_search_min_grid_size < 0 or args.online_search_max_grid_size < 0:
         parser.error("--online-search-min-grid-size/max-grid-size must be non-negative")
     if (
@@ -2604,7 +2632,7 @@ def main():
             "Online search: "
             f"top_k={args.online_search_top_k}, rollout_steps={args.online_search_rollout_steps}, "
             f"rollouts/action={args.online_search_rollouts_per_action}, min_turn={args.online_search_min_turn}"
-            f"{contact_label}{size_label}"
+            f", min_score_gap={args.online_search_min_score_gap:g}{contact_label}{size_label}"
         )
     if args.context_residual:
         print("Context res: 5x5 residual branch")
@@ -2692,6 +2720,7 @@ def main():
                     args.online_search_land_weight,
                     args.online_search_prior_weight,
                     args.online_search_terminal_score,
+                    args.online_search_min_score_gap,
                 )
             else:
                 info, adapter_stats = evaluate_policy_opponent_batch(
@@ -2752,6 +2781,7 @@ def main():
                     args.online_search_land_weight,
                     args.online_search_prior_weight,
                     args.online_search_terminal_score,
+                    args.online_search_min_score_gap,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games, adapter_stats)
@@ -2853,6 +2883,7 @@ def main():
         "online_search_land_weight": args.online_search_land_weight,
         "online_search_prior_weight": args.online_search_prior_weight,
         "online_search_terminal_score": args.online_search_terminal_score,
+        "online_search_min_score_gap": args.online_search_min_score_gap,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }
