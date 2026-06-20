@@ -789,6 +789,8 @@ def evaluate_batch(
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
+    policy_adapter_min_grid_size=0,
+    policy_adapter_max_grid_size=0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -805,6 +807,11 @@ def evaluate_batch(
     effective_plan_worker_gate_threshold = (
         strategy_plan_worker_gate_threshold if plan_worker_size_allowed else -1.0
     )
+    policy_adapter_size_allowed = (
+        (policy_adapter_min_grid_size <= 0 or effective_size >= policy_adapter_min_grid_size)
+        and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
+    )
+    effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
 
     def body(carry, _):
         states, key, history, memory = carry
@@ -919,7 +926,7 @@ def evaluate_batch(
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
                 command_gate_feature_dim,
-                policy_adapter_scale,
+                effective_policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
             )
@@ -991,6 +998,8 @@ def evaluate_policy_opponent_batch(
     policy_adapter_scale=0.0,
     policy_adapter_finish_threshold=-1.0,
     policy_adapter_gate_threshold=-1.0,
+    policy_adapter_min_grid_size=0,
+    policy_adapter_max_grid_size=0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1007,6 +1016,11 @@ def evaluate_policy_opponent_batch(
     effective_plan_worker_gate_threshold = (
         strategy_plan_worker_gate_threshold if plan_worker_size_allowed else -1.0
     )
+    policy_adapter_size_allowed = (
+        (policy_adapter_min_grid_size <= 0 or effective_size >= policy_adapter_min_grid_size)
+        and (policy_adapter_max_grid_size <= 0 or effective_size <= policy_adapter_max_grid_size)
+    )
+    effective_policy_adapter_scale = policy_adapter_scale if policy_adapter_size_allowed else 0.0
 
     def body(carry, _):
         states, key, history, memory = carry
@@ -1122,7 +1136,7 @@ def evaluate_policy_opponent_batch(
                 strategy_command_gate_source_count,
                 strategy_command_gate_target_count,
                 command_gate_feature_dim,
-                policy_adapter_scale,
+                effective_policy_adapter_scale,
                 policy_adapter_finish_threshold,
                 policy_adapter_gate_threshold,
             )
@@ -1179,16 +1193,24 @@ def parse_args():
     parser.add_argument("--context-residual", action="store_true")
     parser.add_argument("--pyramid-context", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default=None)
     parser.add_argument("--value-head-sizes", default=None)
+    parser.add_argument("--init-value-head-sizes", default=None)
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--init-value-loss", choices=("mse", "hl-gauss"), default=None)
     parser.add_argument("--value-bins", type=int, default=128)
+    parser.add_argument("--init-value-bins", type=int, default=None)
     parser.add_argument("--value-min", type=float, default=-1.0)
     parser.add_argument("--value-max", type=float, default=1.0)
     parser.add_argument("--value-sigma", type=float, default=0.04)
     parser.add_argument("--outcome-head", action="store_true")
+    parser.add_argument("--init-outcome-head", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-aux", action="store_true")
+    parser.add_argument("--init-strategy-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--init-strategy-spatial-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-finish-outputs", type=int, default=2)
+    parser.add_argument("--init-strategy-finish-outputs", type=int, default=None)
     parser.add_argument("--strategy-q-rerank-scale", type=float, default=0.0)
     parser.add_argument("--strategy-q-replace-threshold", type=float, default=-1.0)
     parser.add_argument("--strategy-q-replace-policy-margin", type=float, default=-1.0)
@@ -1238,6 +1260,18 @@ def parse_args():
     )
     parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
     parser.add_argument("--policy-adapter-finish-threshold", type=float, default=-1.0)
+    parser.add_argument(
+        "--policy-adapter-min-grid-size",
+        type=int,
+        default=0,
+        help="If positive, only enable Policy Adapter inference on grid sizes at least this value.",
+    )
+    parser.add_argument(
+        "--policy-adapter-max-grid-size",
+        type=int,
+        default=0,
+        help="If positive, only enable Policy Adapter inference on grid sizes up to this value.",
+    )
     parser.add_argument("--policy-adapter-gate-path", default=None)
     parser.add_argument("--policy-adapter-gate-threshold", type=float, default=-1.0)
     parser.add_argument("--policy-adapter-gate-hidden-dim", type=int, default=32)
@@ -1254,8 +1288,23 @@ def parse_args():
         args.value_head_sizes = (
             parse_grid_sizes(args.value_head_sizes) if args.value_head_sizes is not None else args.grid_sizes
         )
+        args.init_value_head_sizes = (
+            parse_grid_sizes(args.init_value_head_sizes) if args.init_value_head_sizes is not None else args.value_head_sizes
+        )
     except ValueError as exc:
         parser.error(str(exc))
+    if args.init_value_heads is None:
+        args.init_value_heads = args.value_heads
+    if args.init_value_loss is None:
+        args.init_value_loss = args.value_loss
+    if args.init_outcome_head is None:
+        args.init_outcome_head = args.outcome_head
+    if args.init_strategy_aux is None:
+        args.init_strategy_aux = args.strategy_aux
+    if args.init_strategy_spatial_aux is None:
+        args.init_strategy_spatial_aux = args.strategy_spatial_aux
+    if args.init_strategy_finish_outputs is None:
+        args.init_strategy_finish_outputs = args.strategy_finish_outputs
     if args.pad_to < max(args.grid_sizes):
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_games <= 0:
@@ -1283,6 +1332,12 @@ def parse_args():
             parser.error("--value-min must be less than --value-max")
         if args.value_sigma <= 0.0:
             parser.error("--value-sigma must be positive")
+    if args.init_value_loss == "hl-gauss":
+        init_bins = args.value_bins if args.init_value_bins is None else args.init_value_bins
+        if init_bins <= 1:
+            parser.error("--init-value-bins must be greater than 1 for --init-value-loss hl-gauss")
+    elif args.init_value_bins is not None:
+        parser.error("--init-value-bins requires --init-value-loss hl-gauss")
     if args.require_win_rate is not None and not (0.0 <= args.require_win_rate <= 1.0):
         parser.error("--require-win-rate must be between 0 and 1")
     if args.strategy_q_rerank_scale < 0.0:
@@ -1317,6 +1372,8 @@ def parse_args():
         parser.error("--strategy-worker-finish-gate requires --strategy-worker-mix-prob")
     if args.strategy_finish_outputs <= 0:
         parser.error("--strategy-finish-outputs must be positive")
+    if args.init_strategy_finish_outputs <= 0:
+        parser.error("--init-strategy-finish-outputs must be positive")
     if args.strategy_finish_outputs != 2 and (args.strategy_target_finish_gate or args.strategy_worker_finish_gate):
         parser.error("finish-gated rerank currently expects a 2-logit binary finish head")
     if args.strategy_worker_policy_margin < 0.0 and args.strategy_worker_policy_margin != -1.0:
@@ -1410,6 +1467,14 @@ def parse_args():
         parser.error("--policy-adapter-gate-path requires --policy-adapter-gate-threshold")
     if args.policy_adapter_gate_hidden_dim <= 0:
         parser.error("--policy-adapter-gate-hidden-dim must be positive")
+    if args.policy_adapter_min_grid_size < 0 or args.policy_adapter_max_grid_size < 0:
+        parser.error("--policy-adapter-min-grid-size/max-grid-size must be non-negative")
+    if (
+        args.policy_adapter_min_grid_size > 0
+        and args.policy_adapter_max_grid_size > 0
+        and args.policy_adapter_min_grid_size > args.policy_adapter_max_grid_size
+    ):
+        parser.error("--policy-adapter-min-grid-size must be <= --policy-adapter-max-grid-size")
     try:
         args.strategy_plan_worker_channels = parse_policy_channels(args.strategy_plan_worker_channels)
     except ValueError as exc:
@@ -1434,6 +1499,12 @@ def main():
     key, net_key = jrandom.split(key)
     network_global_context = args.global_context or args.scoreboard_history
     input_channels = adaptive_input_channel_count(network_global_context, args.scoreboard_history, args.fog_memory)
+    value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
+    init_value_bins = (
+        (args.value_bins if args.init_value_bins is None else args.init_value_bins)
+        if args.init_value_loss == "hl-gauss"
+        else 0
+    )
     network = load_or_create_adaptive_network(
         net_key,
         pad_size=args.pad_to,
@@ -1442,15 +1513,20 @@ def main():
         input_channels=input_channels,
         init_input_channels=input_channels,
         value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
-        value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
+        init_value_head_sizes=args.init_value_head_sizes if args.init_value_heads == "per-size" else (),
+        value_bins=value_bins,
+        init_value_bins=init_value_bins,
         value_min=args.value_min,
         value_max=args.value_max,
         value_sigma=args.value_sigma,
         outcome_head=args.outcome_head,
+        init_outcome_head=args.init_outcome_head,
         strategy_aux=args.strategy_aux,
+        init_strategy_aux=args.init_strategy_aux,
         strategy_spatial_aux=args.strategy_spatial_aux,
+        init_strategy_spatial_aux=args.init_strategy_spatial_aux,
         strategy_finish_outputs=args.strategy_finish_outputs,
-        init_strategy_finish_outputs=args.strategy_finish_outputs,
+        init_strategy_finish_outputs=args.init_strategy_finish_outputs,
         global_context=network_global_context,
         init_global_context=network_global_context,
         context_residual=args.context_residual,
@@ -1471,7 +1547,7 @@ def main():
             input_channels=input_channels,
             init_input_channels=input_channels,
             value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
-            value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
+            value_bins=value_bins,
             value_min=args.value_min,
             value_max=args.value_max,
             value_sigma=args.value_sigma,
@@ -1498,7 +1574,7 @@ def main():
                 input_channels=input_channels,
                 init_input_channels=input_channels,
                 value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
-                value_bins=args.value_bins if args.value_loss == "hl-gauss" else 0,
+                value_bins=value_bins,
                 value_min=args.value_min,
                 value_max=args.value_max,
                 value_sigma=args.value_sigma,
@@ -1654,6 +1730,10 @@ def main():
             gate_label = f", finish-threshold={args.policy_adapter_finish_threshold:g}"
         else:
             gate_label = ""
+        if args.policy_adapter_min_grid_size > 0 or args.policy_adapter_max_grid_size > 0:
+            min_label = args.policy_adapter_min_grid_size if args.policy_adapter_min_grid_size > 0 else "-inf"
+            max_label = args.policy_adapter_max_grid_size if args.policy_adapter_max_grid_size > 0 else "inf"
+            gate_label += f", size=[{min_label},{max_label}]"
         print(f"Policy adapter: {args.policy_adapter_path}")
         print(f"Policy adapter: scale={args.policy_adapter_scale:g}{gate_label}")
         if args.policy_adapter_feature_model_path is not None:
@@ -1730,6 +1810,8 @@ def main():
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
                     args.policy_adapter_gate_threshold,
+                    args.policy_adapter_min_grid_size,
+                    args.policy_adapter_max_grid_size,
                 )
             else:
                 info = evaluate_policy_opponent_batch(
@@ -1773,6 +1855,8 @@ def main():
                     args.policy_adapter_scale,
                     args.policy_adapter_finish_threshold,
                     args.policy_adapter_gate_threshold,
+                    args.policy_adapter_min_grid_size,
+                    args.policy_adapter_max_grid_size,
                 )
             jax.block_until_ready(info.winner)
             row_jax = summarize_row(info, grid_size, policy_player, args.num_games)
@@ -1840,6 +1924,8 @@ def main():
         "policy_adapter_feature_model_path": args.policy_adapter_feature_model_path,
         "policy_adapter_scale": args.policy_adapter_scale,
         "policy_adapter_finish_threshold": args.policy_adapter_finish_threshold,
+        "policy_adapter_min_grid_size": args.policy_adapter_min_grid_size,
+        "policy_adapter_max_grid_size": args.policy_adapter_max_grid_size,
         "policy_adapter_gate_path": args.policy_adapter_gate_path,
         "policy_adapter_gate_threshold": args.policy_adapter_gate_threshold,
         "policy_adapter_gate_hidden_dim": args.policy_adapter_gate_hidden_dim,

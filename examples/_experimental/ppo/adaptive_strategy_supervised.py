@@ -553,6 +553,37 @@ def load_plan_q_prefix_strategy_dataset(
     return dataset
 
 
+def concatenate_strategy_datasets(datasets: list[dict[str, jnp.ndarray]]) -> dict[str, jnp.ndarray]:
+    """Concatenate loaded strategy datasets, padding variable top-k search fields."""
+    if not datasets:
+        raise ValueError("at least one dataset is required")
+    if len(datasets) == 1:
+        return datasets[0]
+
+    search_2d_fields = (
+        "search_candidate_indices",
+        "search_prior_scores",
+        "search_scores",
+        "search_outcomes",
+    )
+    max_search_count = max(int(dataset["search_candidate_indices"].shape[1]) for dataset in datasets)
+    output: dict[str, list[jnp.ndarray]] = {name: [] for name in datasets[0]}
+    domain_offset = 0
+    for dataset in datasets:
+        for name, value in dataset.items():
+            if name == "domain":
+                output[name].append(value + domain_offset)
+            elif name in search_2d_fields and value.shape[1] < max_search_count:
+                pad_width = max_search_count - value.shape[1]
+                constant = 0 if name == "search_candidate_indices" else (-1 if name == "search_outcomes" else -1.0e4)
+                output[name].append(jnp.pad(value, ((0, 0), (0, pad_width)), constant_values=constant))
+            else:
+                output[name].append(value)
+        if "domain" in dataset:
+            domain_offset += int(jnp.max(dataset["domain"])) + 1
+    return {name: jnp.concatenate(values, axis=0) for name, values in output.items()}
+
+
 def balance_strategy_dataset(dataset: dict[str, jnp.ndarray], mode: str, seed: int) -> dict[str, jnp.ndarray]:
     """Balance strategy rows to equal task strata before JAX training."""
     if mode == "none":
@@ -798,52 +829,60 @@ def train_step(
     ) = batch
 
     def loss_fn(net):
-        outputs = jax.vmap(lambda o, m, a: net.strategy_auxiliary(o, m, a))(obs, masks, active)
         teacher_legal = teacher_logits > -9999.0
 
-        intent_log_probs = jax.nn.log_softmax(outputs.intent_logits, axis=-1)
-        intent_losses = -intent_log_probs[jnp.arange(intent_log_probs.shape[0]), intent_targets]
-        intent_loss = jnp.mean(intent_losses)
-        intent_accuracy = jnp.mean((jnp.argmax(outputs.intent_logits, axis=-1) == intent_targets).astype(jnp.float32))
+        outputs = None
+        intent_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        intent_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        finish_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        finish_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
+        belief_loss = jnp.asarray(0.0, dtype=jnp.float32)
+        if net.strategy_aux:
+            outputs = jax.vmap(lambda o, m, a: net.strategy_auxiliary(o, m, a))(obs, masks, active)
 
-        finish_normalizer = jnp.maximum(jnp.sum(finish_weights), 1.0)
-        if multi_horizon_finish:
-            finish_losses = binary_cross_entropy_with_logits(outputs.finish_logits, finish_targets)
-            finish_label_weights = jnp.where(
-                balance_finish_labels,
-                binary_balance_weights(finish_targets, finish_weights[:, None]),
+            intent_log_probs = jax.nn.log_softmax(outputs.intent_logits, axis=-1)
+            intent_losses = -intent_log_probs[jnp.arange(intent_log_probs.shape[0]), intent_targets]
+            intent_loss = jnp.mean(intent_losses)
+            intent_accuracy = jnp.mean((jnp.argmax(outputs.intent_logits, axis=-1) == intent_targets).astype(jnp.float32))
+
+            finish_normalizer = jnp.maximum(jnp.sum(finish_weights), 1.0)
+            if multi_horizon_finish:
+                finish_losses = binary_cross_entropy_with_logits(outputs.finish_logits, finish_targets)
+                finish_label_weights = jnp.where(
+                    balance_finish_labels,
+                    binary_balance_weights(finish_targets, finish_weights[:, None]),
+                    1.0,
+                )
+                weighted_finish = finish_losses * finish_weights[:, None] * finish_label_weights
+                finish_loss = jnp.sum(weighted_finish)
+                finish_loss = finish_loss / jnp.maximum(jnp.sum(finish_weights[:, None] * finish_label_weights), 1.0)
+                finish_predictions = (jax.nn.sigmoid(outputs.finish_logits) >= 0.5).astype(jnp.float32)
+                finish_accuracy = jnp.sum(
+                    (finish_predictions == finish_targets).astype(jnp.float32) * finish_weights[:, None]
+                )
+                finish_accuracy = finish_accuracy / jnp.maximum(finish_normalizer * finish_targets.shape[-1], 1.0)
+            else:
+                finish_log_probs = jax.nn.log_softmax(outputs.finish_logits, axis=-1)
+                finish_losses = -finish_log_probs[jnp.arange(finish_log_probs.shape[0]), finish_targets]
+                finish_label_weights = jnp.where(
+                    balance_finish_labels,
+                    binary_balance_weights(finish_targets, finish_weights),
+                    1.0,
+                )
+                finish_loss = jnp.sum(finish_losses * finish_weights * finish_label_weights)
+                finish_loss = finish_loss / jnp.maximum(jnp.sum(finish_weights * finish_label_weights), 1.0)
+                finish_accuracy = jnp.sum(
+                    (jnp.argmax(outputs.finish_logits, axis=-1) == finish_targets).astype(jnp.float32) * finish_weights
+                )
+                finish_accuracy = finish_accuracy / finish_normalizer
+
+            active_f = active.astype(jnp.float32)
+            belief_per_cell = binary_cross_entropy_with_logits(outputs.enemy_general_logits, enemy_general)
+            belief_per_sample = jnp.sum(belief_per_cell * active_f, axis=(1, 2)) / jnp.maximum(
+                jnp.sum(active_f, axis=(1, 2)),
                 1.0,
             )
-            weighted_finish = finish_losses * finish_weights[:, None] * finish_label_weights
-            finish_loss = jnp.sum(weighted_finish)
-            finish_loss = finish_loss / jnp.maximum(jnp.sum(finish_weights[:, None] * finish_label_weights), 1.0)
-            finish_predictions = (jax.nn.sigmoid(outputs.finish_logits) >= 0.5).astype(jnp.float32)
-            finish_accuracy = jnp.sum(
-                (finish_predictions == finish_targets).astype(jnp.float32) * finish_weights[:, None]
-            )
-            finish_accuracy = finish_accuracy / jnp.maximum(finish_normalizer * finish_targets.shape[-1], 1.0)
-        else:
-            finish_log_probs = jax.nn.log_softmax(outputs.finish_logits, axis=-1)
-            finish_losses = -finish_log_probs[jnp.arange(finish_log_probs.shape[0]), finish_targets]
-            finish_label_weights = jnp.where(
-                balance_finish_labels,
-                binary_balance_weights(finish_targets, finish_weights),
-                1.0,
-            )
-            finish_loss = jnp.sum(finish_losses * finish_weights * finish_label_weights)
-            finish_loss = finish_loss / jnp.maximum(jnp.sum(finish_weights * finish_label_weights), 1.0)
-            finish_accuracy = jnp.sum(
-                (jnp.argmax(outputs.finish_logits, axis=-1) == finish_targets).astype(jnp.float32) * finish_weights
-            )
-            finish_accuracy = finish_accuracy / finish_normalizer
-
-        active_f = active.astype(jnp.float32)
-        belief_per_cell = binary_cross_entropy_with_logits(outputs.enemy_general_logits, enemy_general)
-        belief_per_sample = jnp.sum(belief_per_cell * active_f, axis=(1, 2)) / jnp.maximum(
-            jnp.sum(active_f, axis=(1, 2)),
-            1.0,
-        )
-        belief_loss = jnp.mean(belief_per_sample)
+            belief_loss = jnp.mean(belief_per_sample)
 
         outcome_loss = jnp.asarray(0.0, dtype=jnp.float32)
         outcome_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
@@ -1141,6 +1180,12 @@ def parse_args():
         default="strategy",
         help="Read ordinary strategy shards or Plan-Q best-command prefix rows.",
     )
+    parser.add_argument(
+        "--extra-plan-q-prefix-dataset",
+        action="append",
+        default=[],
+        help="Additional Plan-Q prefix NPZ shard path or glob to mix with the main dataset. Repeatable.",
+    )
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-samples-per-shard", type=int, default=None)
     parser.add_argument("--min-row-turn", type=int, default=0)
@@ -1182,6 +1227,12 @@ def parse_args():
     parser.add_argument("--init-value-bins", type=int, default=None)
     parser.add_argument("--outcome-head", action="store_true")
     parser.add_argument("--init-outcome-head", action="store_true")
+    parser.add_argument(
+        "--strategy-aux",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable strategy auxiliary heads on the trained model. Use --no-strategy-aux for pure policy adapters.",
+    )
     parser.add_argument("--init-strategy-aux", action="store_true")
     parser.add_argument("--finish-head-mode", choices=("binary", "multi-horizon"), default="binary")
     parser.add_argument("--init-finish-head-mode", choices=("binary", "multi-horizon"), default="binary")
@@ -1329,6 +1380,24 @@ def parse_args():
         )
     ):
         parser.error("loss weights must be non-negative")
+    if not args.strategy_aux:
+        if args.strategy_spatial_aux:
+            parser.error("--strategy-spatial-aux requires --strategy-aux")
+        if args.update_scope in ("strategy-heads", "strategy-value-heads"):
+            parser.error("--no-strategy-aux requires --update-scope policy-heads or all")
+        disabled_aux_weights = (
+            args.intent_weight,
+            args.finish_weight,
+            args.belief_weight,
+            args.q_kl_weight,
+            args.q_action_ce_weight,
+            args.search_q_rank_weight,
+            args.search_q_value_weight,
+            args.source_weight,
+            args.target_weight,
+        )
+        if any(weight > 0.0 for weight in disabled_aux_weights):
+            parser.error("--no-strategy-aux requires auxiliary/Q/source/target loss weights to be 0")
     if args.search_q_temperature <= 0.0:
         parser.error("--search-q-temperature must be positive")
     if args.search_q_score_scale <= 0.0:
@@ -1391,6 +1460,28 @@ def main():
             args.min_search_score_gap,
             True,
         )
+    extra_load_stats = []
+    if args.extra_plan_q_prefix_dataset:
+        extra_paths = expand_dataset_paths(args.extra_plan_q_prefix_dataset)
+        extra_dataset, extra_stats = load_plan_q_prefix_strategy_dataset(
+            extra_paths,
+            args.max_samples,
+            args.max_samples_per_shard,
+            args.seed + 104729,
+            args.finish_head_mode,
+            args.action_ce_weight_mode,
+            tuple(args.action_ce_path_contains),
+            args.min_row_turn,
+            args.max_row_turn,
+            False,
+            False,
+            False,
+            args.min_search_score_gap,
+            not args.keep_pass_prefix_labels,
+            True,
+        )
+        dataset = concatenate_strategy_datasets([dataset, extra_dataset])
+        extra_load_stats.append({"paths": len(extra_paths), **extra_stats})
     dataset = balance_strategy_dataset(dataset, args.balance_strata, args.seed)
     if args.label_source == "search-best" and float(jnp.sum(dataset["outcome_weight"])) <= 0.0:
         raise ValueError("--label-source search-best requires shards with search_best_outcome labels")
@@ -1408,6 +1499,8 @@ def main():
     print(f"Device:        {jax.devices()[0]}")
     print(f"Shards:        {len(paths)}")
     print(f"Data format:   {args.dataset_format}")
+    if extra_load_stats:
+        print(f"Extra prefix:  {sum(item['paths'] for item in extra_load_stats)} shards")
     print(f"Samples:       {dataset['obs'].shape[0]}")
     print(
         "Row filters:   "
@@ -1469,7 +1562,7 @@ def main():
         init_value_bins=init_value_bins,
         outcome_head=args.outcome_head,
         init_outcome_head=args.init_outcome_head,
-        strategy_aux=True,
+        strategy_aux=args.strategy_aux,
         init_strategy_aux=args.init_strategy_aux,
         strategy_finish_outputs=finish_outputs,
         init_strategy_finish_outputs=init_finish_outputs,

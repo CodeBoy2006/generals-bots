@@ -1425,18 +1425,28 @@ def parse_args():
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--network-arch", choices=("cnn", "unet"), default="unet")
     parser.add_argument("--channels", default=None)
+    parser.add_argument("--init-channels", default=None)
     parser.add_argument("--input-channels", type=int, default=None)
+    parser.add_argument("--init-input-channels", type=int, default=None)
     parser.add_argument("--global-context", action="store_true")
     parser.add_argument("--scoreboard-history", action="store_true")
     parser.add_argument("--fog-memory", action="store_true")
     parser.add_argument("--value-heads", choices=("shared", "per-size"), default="shared")
+    parser.add_argument("--init-value-heads", choices=("shared", "per-size"), default=None)
     parser.add_argument("--value-head-sizes", default=None)
+    parser.add_argument("--init-value-head-sizes", default=None)
     parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--init-value-loss", choices=("mse", "hl-gauss"), default=None)
     parser.add_argument("--value-bins", type=int, default=128)
+    parser.add_argument("--init-value-bins", type=int, default=None)
     parser.add_argument("--outcome-head", action="store_true")
+    parser.add_argument("--init-outcome-head", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-aux", action="store_true")
+    parser.add_argument("--init-strategy-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-spatial-aux", action="store_true")
+    parser.add_argument("--init-strategy-spatial-aux", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strategy-finish-outputs", type=int, default=2)
+    parser.add_argument("--init-strategy-finish-outputs", type=int, default=None)
     parser.add_argument("--policy-mode", choices=POLICY_MODE_NAMES, default="sample")
     parser.add_argument("--source-count", type=int, default=4)
     parser.add_argument("--target-count", type=int, default=4)
@@ -1479,12 +1489,30 @@ def parse_args():
         args.grid_sizes = parse_grid_sizes(args.grid_sizes)
         args.grid_size_weights = parse_grid_size_weights(args.grid_size_weights, args.grid_sizes)
         args.channels = parse_policy_channels(args.channels)
+        args.init_channels = parse_policy_channels(args.init_channels) if args.init_channels is not None else None
         args.opponent_channels = parse_policy_channels(args.opponent_channels)
         args.value_head_sizes = (
             parse_grid_sizes(args.value_head_sizes) if args.value_head_sizes is not None else args.grid_sizes
         )
+        args.init_value_head_sizes = (
+            parse_grid_sizes(args.init_value_head_sizes) if args.init_value_head_sizes is not None else args.value_head_sizes
+        )
     except ValueError as exc:
         parser.error(str(exc))
+    if args.init_value_head_sizes is None:
+        args.init_value_head_sizes = args.value_head_sizes
+    if args.init_value_heads is None:
+        args.init_value_heads = args.value_heads
+    if args.init_value_loss is None:
+        args.init_value_loss = args.value_loss
+    if args.init_outcome_head is None:
+        args.init_outcome_head = args.outcome_head
+    if args.init_strategy_aux is None:
+        args.init_strategy_aux = args.strategy_aux
+    if args.init_strategy_spatial_aux is None:
+        args.init_strategy_spatial_aux = args.strategy_spatial_aux
+    if args.init_strategy_finish_outputs is None:
+        args.init_strategy_finish_outputs = args.strategy_finish_outputs
     if args.pad_to < max(args.grid_sizes):
         parser.error("--pad-to must be at least the maximum grid size")
     if args.num_envs < 2:
@@ -1499,10 +1527,20 @@ def parse_args():
         parser.error("--truncation must be positive")
     if args.input_channels is not None and args.input_channels <= 0:
         parser.error("--input-channels must be positive")
+    if args.init_input_channels is not None and args.init_input_channels <= 0:
+        parser.error("--init-input-channels must be positive")
     if args.value_loss == "hl-gauss" and args.value_bins <= 1:
         parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
+    if args.init_value_loss == "hl-gauss":
+        init_bins = args.value_bins if args.init_value_bins is None else args.init_value_bins
+        if init_bins <= 1:
+            parser.error("--init-value-bins must be greater than 1 for --init-value-loss hl-gauss")
+    elif args.init_value_bins is not None:
+        parser.error("--init-value-bins requires --init-value-loss hl-gauss")
     if args.strategy_finish_outputs <= 0:
         parser.error("--strategy-finish-outputs must be positive")
+    if args.init_strategy_finish_outputs <= 0:
+        parser.error("--init-strategy-finish-outputs must be positive")
     if args.source_count <= 0 or args.target_count <= 0:
         parser.error("--source-count and --target-count must be positive")
     if args.candidate_source == "belief":
@@ -1558,7 +1596,13 @@ def main():
         if args.input_channels is not None
         else adaptive_input_channel_count(network_global_context, args.scoreboard_history, args.fog_memory)
     )
+    init_input_channels = input_channels if args.init_input_channels is None else args.init_input_channels
     value_bins = args.value_bins if args.value_loss == "hl-gauss" else 0
+    init_value_bins = (
+        (args.value_bins if args.init_value_bins is None else args.init_value_bins)
+        if args.init_value_loss == "hl-gauss"
+        else 0
+    )
     policy_mode = POLICY_MODE_NAME_TO_ID[args.policy_mode]
     opponent_policy_mode = POLICY_MODE_NAME_TO_ID[args.opponent_policy_mode]
     candidate_source_mode = CANDIDATE_MODE_TO_ID[args.candidate_source]
@@ -1599,20 +1643,21 @@ def main():
         pad_size=args.pad_to,
         init_model_path=args.model_path,
         channels=args.channels,
+        init_channels=args.init_channels,
         input_channels=input_channels,
-        init_input_channels=input_channels,
+        init_input_channels=init_input_channels,
         value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
-        init_value_head_sizes=args.value_head_sizes if args.value_heads == "per-size" else (),
+        init_value_head_sizes=args.init_value_head_sizes if args.init_value_heads == "per-size" else (),
         value_bins=value_bins,
-        init_value_bins=value_bins,
+        init_value_bins=init_value_bins,
         outcome_head=args.outcome_head,
-        init_outcome_head=args.outcome_head,
+        init_outcome_head=args.init_outcome_head,
         strategy_aux=args.strategy_aux,
-        init_strategy_aux=args.strategy_aux,
+        init_strategy_aux=args.init_strategy_aux,
         strategy_spatial_aux=args.strategy_spatial_aux,
-        init_strategy_spatial_aux=args.strategy_spatial_aux,
+        init_strategy_spatial_aux=args.init_strategy_spatial_aux,
         strategy_finish_outputs=args.strategy_finish_outputs,
-        init_strategy_finish_outputs=args.strategy_finish_outputs,
+        init_strategy_finish_outputs=args.init_strategy_finish_outputs,
         global_context=network_global_context,
         init_global_context=network_global_context,
         network_arch=args.network_arch,

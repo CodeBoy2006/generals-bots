@@ -12128,3 +12128,89 @@ Do not do next:
   promote the prefix CE checkpoint
   keep scaling pure 8x8 winning-prefix action CE without preservation data
 ```
+
+## 2026-06-20 14:31 - V4 Adapter Size-Gate Follow-up
+
+Implementation changes:
+
+```text
+adaptive_plan_q_dataset.py:
+  added init-template flags for channels/input/value/outcome/strategy heads
+  allows old checkpoints such as adaptive-unet-ppo-v4 to load into newer target templates
+
+adaptive_strategy_supervised.py:
+  added --no-strategy-aux for pure policy-delta adapters
+  plan-q-prefix CE-only adapters can now keep the base policy schema
+
+evaluate_adaptive_policy.py:
+  added main-model init-template flags
+  added policy-adapter min/max grid-size gates
+```
+
+GPU results:
+
+```text
+v4 heuristic Plan-Q prefix collection:
+  runs/adaptive-plan-q-prefix-v4-8win-v0/
+  432 best-plan-win states
+  5051 non-pass prefix rows
+  mean_gap about 1.16-1.19
+
+pure v4 prefix adapter:
+  runs/adaptive-prefix-policy-v4-8win-v0/
+  fixed-v5 max250 256-row seed 95640:
+    v4 base min 8.98%
+    adapter scale=1.0 min 7.81%
+    adapter scale=0.25 min 8.20%
+  conclusion: heuristic best-plan prefix CE still makes the policy lose more often
+
+v4 base + midgame trajectory v3 as 8x8-only policy adapter:
+  fixed-v5 max250 512-row seed 95740:
+    expanded v4 base p0/p1/min: 10.16 / 10.94 / 10.16
+    adapter p0/p1/min: 11.52 / 13.67 / 11.52
+
+  Expander 8/12/16 512-row seed 95780:
+    adapter min: 73.05
+    rows:
+      8p0 73.24
+      8p1 73.05
+      12p0 82.03
+      12p1 84.77
+      16p0 76.95
+      16p1 82.03
+
+  same-seed Expander 256-row check:
+    expanded v4 base min 71.09
+    adapter min 73.83
+```
+
+Interpretation:
+
+```text
+The best current deployment-shaped composition is not a new full checkpoint.
+It is:
+
+  base:
+    runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx
+
+  8x8 adapter:
+    runs/adaptive-midgame-contact-searchwin-imitation-v3/
+      generals-adaptive-midgame-contact-searchwin-imitation-v3.eqx
+
+  inference:
+    --policy-adapter-scale 1.0
+    --policy-adapter-max-grid-size 8
+```
+
+This keeps the stronger v4 12/16 behavior and injects the existing midgame
+trajectory fixed-v5 signal only on 8x8. It is still a modest gain, not a v5
+breakthrough: fixed-v5 max250 moved from 10.16% to 11.52% min at 512 rows.
+
+Do next:
+
+```text
+Use the adapter-size-gate pattern as the default diagnostic wrapper.
+Collect more genuine midgame decisive trajectory data, not heuristic Plan-Q prefixes.
+Train/validate adapters per size before mixing them into the base.
+Run GPU evals serially; parallel JAX evals triggered CUDA allocation warnings on the 16GB card.
+```
