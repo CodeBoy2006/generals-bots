@@ -1370,3 +1370,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not use score-gap gating for promotion. Keep default `--online-search-min-score-gap 0.0`; richer gate/controller features are still needed.
 - **Context:** With `v4 + static conversion adapter v1 + online search top_k=4 rollout=16`, fixed-v5 max500 128-row seed `101060` default min was `50.78%`. Gap `0.5` dropped min to `47.66%`; gap `2.0` dropped min to `46.09%`. The gate improved p1 but hurt p0, so simple score-gap confidence is not a reliable enter/exit mechanism.
+
+## [2026-06-20 22:29] Max500 Horizon Default
+- **Changes:** Changed `adaptive_strategy_supervised.py --finish-target-horizon` default from `250` to `500` and updated README, Chinese manual, and strategy notes to make fixed-v5 `max500` the primary gate. `max250` remains available only by explicit flag for historical compressed ablations.
+- **Status:** Completed
+- **Next Steps:** Run future fixed-v5 data collection, supervised distillation, and promotion gates at `max500`; use `max750` or longer only for confirmation/ablation after a candidate clears max500.
+- **Context:** This aligns the CLI default with the current fixed-v5 evidence and avoids accidentally training new finish heads on old `finish_within_250` labels. Old shards without `finish_within_500` still fall back to `finish_within_250` for compatibility.

@@ -161,7 +161,7 @@ def load_strategy_dataset(
     require_finish_within_500: bool = False,
     require_win_or_finish_within_500: bool = False,
     min_search_score_gap: float = 0.0,
-    finish_target_horizon: int = 250,
+    finish_target_horizon: int = 500,
     online_action_field: str = "teacher_action_index",
     return_stats: bool = False,
 ) -> dict[str, jnp.ndarray] | tuple[dict[str, jnp.ndarray], dict]:
@@ -1494,8 +1494,11 @@ def parse_args():
         "--finish-target-horizon",
         type=int,
         choices=(250, 500),
-        default=250,
-        help="Trajectory finish target used by binary finish heads and the third multi-horizon output.",
+        default=500,
+        help=(
+            "Trajectory finish target used by binary finish heads and the third multi-horizon output. "
+            "Defaults to 500 for the current fixed-v5 gate; pass 250 for historical compressed shards."
+        ),
     )
     parser.add_argument(
         "--min-teacher-action-logit-margin",

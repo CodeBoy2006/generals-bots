@@ -14841,7 +14841,7 @@ For current fixed-v5 work, prefer:
   --truncation 500
   --conversion-rollout-steps 500
   --require-finish-within-500 / --require-win-or-finish-within-500
-  --finish-target-horizon 500
+  --finish-target-horizon 500  # now the supervised-trainer default
 
 Use max750 only as a longer confirmation or ablation horizon.
 ```
@@ -15182,4 +15182,40 @@ gap; some low-margin replacements are apparently important.
 
 Keep --online-search-min-score-gap as a diagnostic/risk-control switch, but
 default 0.0 remains the current best deployment/teacher setting.
+```
+
+### 2026-06-20 22:29 - Max500 Horizon Default
+
+User-facing horizon policy is now explicit:
+
+```text
+fixed-v5 primary gate:
+  max500
+
+long confirmation / ablation:
+  max750 or longer
+
+legacy compressed diagnostics:
+  max250 only when explicitly requested
+```
+
+Implementation:
+
+```text
+adaptive_strategy_supervised.py:
+  --finish-target-horizon default changed from 250 to 500
+
+README / zh-manual:
+  current fixed-v5 examples now state that finish supervision defaults to
+  finish_within_500 and old finish_within_250 labels are for historical shards
+  or deliberately compressed ablations.
+```
+
+Rationale:
+
+```text
+max250 over-compresses otherwise realistic fixed-v5 games and can reward
+premature draw/loss conversion.  max500 matches the current fixed-v5 wrapper,
+conversion-label, and adapter-distillation evidence better.  Longer gates are
+still useful as confirmation, but max500 is the fast triage/promotion horizon.
 ```
