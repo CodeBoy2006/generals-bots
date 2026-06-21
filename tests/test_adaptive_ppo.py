@@ -930,7 +930,7 @@ def test_collect_mixed_rollout_combines_both_learner_seats():
     states_p1, sizes_p1 = make_adaptive_initial_states(pool, 1)
     network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(1), pad_size=pad_size, channels=(16, 16, 16, 8))
 
-    _, _, history_p0, _, _, history_p1, batch, _ = collect_mixed_rollout(
+    _, _, history_p0, fog_memory_p0, _, _, history_p1, fog_memory_p1, batch, _ = collect_mixed_rollout(
         states_p0,
         sizes_p0,
         states_p1,
@@ -959,6 +959,8 @@ def test_collect_mixed_rollout_combines_both_learner_seats():
     assert infos.winner.shape == (1, 2)
     assert history_p0.shape == (1, 5)
     assert history_p1.shape == (1, 5)
+    assert fog_memory_p0.explored_ever.shape == (1, pad_size, pad_size)
+    assert fog_memory_p1.explored_ever.shape == (1, pad_size, pad_size)
 
 
 def test_adaptive_expander_target_probs_has_single_pass_slot():

@@ -1508,3 +1508,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep the hook. Do not promote prefix v2 as the late adapter; train a p0/p1-balanced option adapter or a learned false-positive-penalized gate before retesting the two-adapter deployment shape.
 - **Context:** CPU smoke passed. True wrapper `v4 + static v1 max8 replace + prefix v2 late replace turn>=80/contact` scored fixed-v5 max500 256 games/seat seed `122520`: p0 `32.81%`, p1 `41.02%`, min `32.81%`, below same-seed static v1 min `33.98%`.
+
+## [2026-06-21 10:20] Mixed Rollout Test Contract Repair
+- **Changes:** Updated `tests/test_adaptive_ppo.py` so `test_collect_mixed_rollout_combines_both_learner_seats` unpacks the current 10-value `collect_mixed_rollout` contract and verifies carried fog-memory state shape.
+- **Status:** Completed
+- **Next Steps:** Continue fixed-v5 and Expander research iteration from a passing baseline.
+- **Context:** Baseline `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` now passes `215 passed in 130.37s`. Sandbox CUDA probing fails with `CUDA_ERROR_NO_DEVICE`, but the same JAX probe succeeds under escalation with backend `gpu` and `CudaDevice(id=0)`.
