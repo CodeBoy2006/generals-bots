@@ -147,7 +147,7 @@ def parse_args():
     parser.add_argument("--num-iterations", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--pool-size", type=int, default=4096)
-    parser.add_argument("--truncation", type=int, default=250)
+    parser.add_argument("--truncation", type=int, default=500)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
     parser.add_argument("--num-cities-min", type=int, default=4)
@@ -157,7 +157,7 @@ def parse_args():
     parser.add_argument("--city-army-min", type=int, default=40)
     parser.add_argument("--city-army-max", type=int, default=51)
     parser.add_argument("--init-model-path", default=None)
-    parser.add_argument("--model-path", default="/tmp/generals-bc-8x8.eqx")
+    parser.add_argument("--model-path", default="runs/generals-bc-8x8.eqx")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -244,6 +244,7 @@ def main():
                 f"SPS: {samples / elapsed:8.0f} | Time: {elapsed:.2f}s"
             )
 
+    Path(args.model_path).parent.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(args.model_path, network)
     print(f"\nModel saved to: {args.model_path}")
 

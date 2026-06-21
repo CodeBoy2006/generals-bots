@@ -196,8 +196,8 @@ rollout-search GUI 目前只支持 9 通道 observation checkpoint，当前
 ```bash
 uv run python examples/play_against_model.py \
   --machine-vs-machine \
-  --model-0-path /tmp/generals-ppo-a.eqx \
-  --model-1-path /tmp/generals-ppo-b.eqx \
+  --model-0-path runs/generals-ppo-a.eqx \
+  --model-1-path runs/generals-ppo-b.eqx \
   --model-0-policy-input augmented-full-state \
   --model-1-policy-input observation \
   --grid-size 8 \
@@ -241,7 +241,7 @@ uv run python examples/play_against_model.py generals-ppo-8x8-expander-gpu-v5.eq
 手动指定 checkpoint 和参数：
 
 ```bash
-uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx \
+uv run python examples/play_against_model.py runs/generals-ppo-8x8-generated.eqx \
   --grid-size 8 \
   --map-generator generated \
   --policy-mode sample \
@@ -268,7 +268,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 - `--machine-vs-machine` 会关闭人类输入流程，让两个 PPO agent 按自动 tick 对战；`--model-0-path` 和 `--model-1-path` 可分别指定两个 checkpoint。
 - `--opponent-model-path` 仍可作为 `--model-1-path` 的兼容别名。
 
-加载 checkpoint 时，`--grid-size` 必须与保存该 `.eqx` 模型时使用的网络尺寸一致。`.eqx` 属于实验产物，建议放在 `/tmp` 或其他实验目录，不要提交进 Git。
+加载 checkpoint 时，`--grid-size` 必须与保存该 `.eqx` 模型时使用的网络尺寸一致。`.eqx` 属于实验产物，建议放在项目内已忽略的 `runs/` 或其他非缓存实验目录，不要提交进 Git。
 
 4x4 PPO smoke test：
 
@@ -276,7 +276,7 @@ uv run python examples/play_against_model.py /tmp/generals-ppo-8x8-generated.eqx
 uv run python examples/_experimental/ppo/train.py 64 \
   --num-steps 64 \
   --num-iterations 10 \
-  --model-path /tmp/generals-ppo-4x4.eqx
+  --model-path runs/generals-ppo-4x4.eqx
 ```
 
 8x8 generated 地图 PPO：
@@ -293,7 +293,7 @@ uv run python examples/_experimental/ppo/train.py 64 \
   --num-steps 64 \
   --num-iterations 10 \
   --pool-size 512 \
-  --model-path /tmp/generals-ppo-8x8-generated.eqx
+  --model-path runs/generals-ppo-8x8-generated.eqx
 ```
 
 从已有 checkpoint 继续 PPO，并使用多 epoch/minibatch 更新：
@@ -315,8 +315,8 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --minibatch-size 4096 \
   --lr 0.000005 \
   --opponent expander \
-  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v4.eqx \
-  --model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx
+  --init-model-path runs/generals-ppo-8x8-expander-gpu-v4.eqx \
+  --model-path runs/generals-ppo-8x8-expander-gpu-v5.eqx
 ```
 
 冻结 checkpoint 自博弈训练：
@@ -337,12 +337,12 @@ uv run python examples/_experimental/ppo/train.py 512 \
   --num-epochs 4 \
   --minibatch-size 4096 \
   --lr 0.000005 \
-  --init-model-path /tmp/generals-ppo-current.eqx \
-  --opponent-policy-path /tmp/generals-ppo-best-frozen.eqx \
+  --init-model-path runs/generals-ppo-current.eqx \
+  --opponent-policy-path runs/generals-ppo-best-frozen.eqx \
   --opponent-policy-mode sample \
   --learner-player 0 \
   --terminal-reward-scale 1.0 \
-  --model-path /tmp/generals-ppo-selfplay-next.eqx
+  --model-path runs/generals-ppo-selfplay-next.eqx
 ```
 
 当前策略自博弈训练：
@@ -363,15 +363,117 @@ uv run python examples/_experimental/ppo/train.py 256 \
   --num-epochs 2 \
   --minibatch-size 4096 \
   --lr 0.000002 \
-  --init-model-path /tmp/generals-ppo-current.eqx \
+  --init-model-path runs/generals-ppo-current.eqx \
   --self-play-opponent \
   --opponent-policy-mode sample \
   --learner-player 0 \
   --terminal-reward-scale 1.0 \
-  --model-path /tmp/generals-ppo-current-selfplay.eqx
+  --model-path runs/generals-ppo-current-selfplay.eqx
 ```
 
 `--self-play-opponent` 会让非 learner 玩家在每次 rollout 中使用当前正在更新的同一个 policy；它不能和 `--opponent-policy-path` 或 `--opponent-policy-pool` 同时使用。`--opponent-policy-pool a.eqx,b.eqx` 会让普通 PPO 从多个同架构 frozen checkpoint 中采样对手，适合 checkpoint league best-response；可用 `--opponent-policy-pool-modes sample,greedy` 指定各自执行模式。`--checkpoint-dir`、`--checkpoint-every` 和 `--keep-checkpoints` 可周期保存并保留中间模型，便于后续 league 评估选模。`--learner-player` 可以把 learner 放在 player 0 或 player 1；`--terminal-reward-scale` 会在 decisive terminal transition 上额外加入零和胜负奖励。`--general-target-reward-scale` 会用完整状态奖励强兵靠近敌方 general 的势能变化，可配合 `--general-target-min-army` 和 `--general-target-max-distance` 控制触发条件。`--path-assignment-reward-scale` 会在 reward 内缓存 passable shortest-path 距离场，并把强兵分配到敌方 general、非己方城市或前线目标，可用 `--path-assignment-*-weight` 控制目标优先级。`--policy-input augmented-full-state` 可让 PPO learner 使用 18 通道输入，通常与 `--init-input-channels 9` 一起从 v5 这类 9 通道 checkpoint 扩展。如果候选模型和冻结对手使用不同网络容量，可用 `--channels` 和 `--opponent-channels` 分别指定四层卷积通道，例如 `--channels 64,64,64,32 --opponent-channels 32,32,32,16`。
+
+自适应多尺寸 PPO：
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/behavior_clone_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 12288 \
+  --num-steps 32 \
+  --num-iterations 2000 \
+  --lr 0.0007 \
+  --channels 64,64,64,32 \
+  --checkpoint-dir runs/generals-adaptive-bc-checkpoints \
+  --checkpoint-every 100 \
+  --keep-checkpoints 10 \
+  --model-path runs/generals-adaptive-bc-8-12-16.eqx
+```
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1.5,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 64 \
+  --num-iterations 700 \
+  --num-epochs 4 \
+  --minibatch-size 4096 \
+  --lr 0.000005 \
+  --opponent expander \
+  --learner-player mixed \
+  --terminal-reward-scale 1.0 \
+  --truncation-reward-scale 0.5 \
+  --init-model-path runs/generals-adaptive-bc-8-12-16.eqx \
+  --init-channels 64,64,64,32 \
+  --checkpoint-dir runs/generals-adaptive-ppo-checkpoints \
+  --checkpoint-every 50 \
+  --keep-checkpoints 10 \
+  --model-path runs/generals-adaptive-ppo-8-12-16.eqx
+```
+
+```bash
+JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py runs/generals-adaptive-ppo-8-12-16.eqx \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-games 2048 \
+  --max-steps 750 \
+  --opponent expander \
+  --policy-mode sample \
+  --map-generator generated \
+  --json-output runs/generals-adaptive-ppo-8-12-16-eval.json \
+  --require-win-rate 0.90
+```
+
+`behavior_clone_adaptive.py`、`train_adaptive.py` 和 `evaluate_adaptive_policy.py` 使用固定 `--pad-to` 画布保存一个 checkpoint，并通过 `--grid-sizes` 在 8x8、12x12、16x16 等有效棋盘之间切换。评估器默认会跑每个尺寸的 player 0 和 player 1 两个座位；用 `--policy-players 1` 或 `--policy-players 0,1` 可只跑指定座位，便于快速复测弱行。`--require-win-rate 0.90` 会在任一被评估的尺寸或座位未达标时返回非零退出码。昂贵的 max500/max750 online-search 评估可加 `--eval-batch-size 64` 等把每个 size/seat row 分成较小 JAX batch，最终 `num_games` 和汇总 JSON 仍按完整 row 统计。当前 GUI 和固定尺寸 `evaluate_policy.py` 仍只支持普通 `PolicyValueNetwork` checkpoint，不能直接加载 adaptive checkpoint。
+`behavior_clone_adaptive.py` 和 `train_adaptive.py` 都支持 `--channels` 指定 adaptive 网络容量，也支持 `--grid-size-weights` 对困难尺寸过采样；`train_adaptive.py` 还支持 `--init-channels` 从不同容量的 adaptive checkpoint 零填充扩容 warm start。`--learner-player alternate` 按 training iteration 交替更新两个座位；`--learner-player mixed` 会把总 `num_envs` 拆成 player 0 和 player 1 两半，并把两侧轨迹拼进同一个 PPO update，适合减少按轮次交替造成的座位遗忘。`--reward-mode terminal` 会关闭 dense composite reward，只保留 terminal win/loss；`--gamma`、`--gae-lambda`、`--top-advantage-fraction`、`--top-advantage-mode stratified`、`--ema-decay` 和 `--eval-ema` 用于 v3-noarch 长 rollout/EMA 训练；默认 `--top-advantage-mode global` 会在整个 rollout batch 里取最高 advantage transition，`stratified` 会按 effective size 和 learner seat 分开取样，适合诊断困难行是否被全局 top-k 饿死。`train_adaptive.py --opponent-policy-path` 可让 adaptive PPO 在单一有效尺寸上对抗固定 `PolicyValueNetwork` checkpoint；`evaluate_adaptive_policy.py --opponent-policy-path` 可用同一机制评估 adaptive checkpoint 对固定 8x8 v5 等 policy 对手；当只评估或训练单个尺寸但 checkpoint 带有多尺寸 per-size value heads 时，用 `--value-head-sizes` 和 `--init-value-head-sizes` 指定 checkpoint 内实际 value head 尺寸。`--value-loss hl-gauss --value-bins 128 --value-sigma 0.04` 会把 PPO value loss 从 scalar MSE 切换为 HL-Gauss categorical CE。`--outcome-aux-weight` 会启用 loss/draw/win 辅助头，只用同一 rollout 内已知结局的 episode segment 做监督；`--strategy-aux`、`--strategy-spatial-aux` 和 `--strategy-finish-outputs` 会让 PPO 输出 checkpoint 保留 strategy auxiliary heads，`--init-strategy-aux`、`--init-strategy-spatial-aux` 和 `--init-strategy-finish-outputs` 则描述 warm-start checkpoint。只传 `init-*` 会读取并丢弃这些 aux heads、保留共享权重；若要 PPO 续训后仍可用 strategy heads，输出端和 init 端都要传匹配 flag。`--global-context` 会把 land/army/time scoreboard 标量追加为 20 通道输入，`--scoreboard-history` 进一步追加 previous scoreboard 和 one-step delta，形成 30 通道输入，并通过零初始化上下文分支 warm start 旧 15 通道 checkpoint，旧 checkpoint 通常配 `--init-input-channels 15`。`--context-residual` 会在 adaptive CNN trunk 后追加零输出 5x5 residual context branch，`--pyramid-context` 会追加 16→8→4→8→16 的零输出 U-Net-style pyramid branch，二者都适合从旧 checkpoint 保持初始行为不变后继续学习更大感受野；`--context-only-update` 可先只更新这些 context/pyramid branch，降低全量 PPO 续训导致的旧策略漂移；从已有 context/pyramid checkpoint 续训或评估时同时传对应的 `--init-context-residual`、`--init-pyramid-context`、`evaluate_adaptive_policy.py --context-residual` 或 `--pyramid-context`。`adaptive_search_distill.py` 的 `--base-global-context` / `--base-scoreboard-history` 可让 base/search/opponent teacher 使用 20/30 通道 shared-MSE adaptive checkpoint；不传这两个参数时 teacher 仍按旧 15 通道 checkpoint 加载。distill 脚本也支持 student `--context-residual` / `--pyramid-context`，并可用 `--freeze-context-strategy-aux` 只训练 context/pyramid branch 与 strategy auxiliary heads。`adaptive_teacher_imitation.py --fixed-teacher-model-path` 可把固定 8x8 policy teacher 的 logits 映射到 adaptive padded action space，并可配 `--opponent-policy-path` 在 v5-vs-v5 分布上做 U-Net 行为克隆；`--outcome-weight-mode terminal` 会按同一 rollout 内已知 loss/draw/win 给 KL/CE 样本加权，配套 `--win-action-weight`、`--loss-action-weight`、`--draw-action-weight` 和 `--unknown-action-weight` 可用于偏向赢家轨迹或弱化超时 draw 轨迹；`--terminal-action-window` 会把动作监督进一步聚焦到下一次终局前的最后 N 步，`--p0-action-weight`/`--p1-action-weight` 可做 seat-specific reweight，`--outcome-aux-weight` 可在 imitation 中同时监督 loss/draw/win head。`--strategy-q-weight`、`--strategy-q-rank-weight`、`--strategy-intent-weight`、`--strategy-finish-weight` 和 `--strategy-belief-weight` 会启用 top-k Q、pairwise Q-rank、弱 intent、finish 和敌方 general belief 辅助头；`--strategy-q-target outcome` 会把 Q/rank target 从 shaped rollout score 改为候选动作的 replacement outcome（loss/draw/win -> `-1/0/+1`），`--strategy-q-target outcome-score` 会用胜/平/负做主排序并用 `--strategy-q-outcome-score-weight` 加少量 shaped score 作为 tie-break，默认 `score` 保持旧行为；`--strategy-q-weight-mode accepted` 只在候选动作相对 top-prior 有 outcome 改善或同 outcome 高 margin 改善时训练 Q/rank，默认 `active` 保持旧的全 active-row 辅助监督；`--strategy-q-replay-capacity` 和 `--strategy-q-replay-ratio` 会缓存 accepted Q rows 并按比例追加到后续 batch，replay 行只保留 Q/rank 权重、不会重复放大 KL/search/intent/belief loss；`--freeze-strategy-aux-only` 只更新这些 strategy auxiliary heads，适合先做辅助头预训练而不扰动 policy/trunk；从已有 strategy checkpoint 续训时用 `--init-strategy-aux`。`evaluate_adaptive_policy.py --strategy-q-rerank-scale <x>` 可以在 `--strategy-aux` checkpoint 上把 strategy-Q 输出作为 policy logits 的中心化 bias 做推理探针。`adaptive_worker_pretrain.py` 会把 target heatmap、eligible source heatmap 和 BFS route potential 追加为 18 通道 Worker 输入，用 full-state BFS/path-assignment 生成 soft action targets；`--action-loss-weight`、`--source-loss-weight` 和 `--direction-loss-weight` 可把 Worker 训练从单一 flat action CE 改成 source-cell 与 direction 的分解监督。`evaluate_worker_policy.py` 可以用 fogged observation command wrapper 单独或混合 fallback adaptive checkpoint 评估 Worker 接管，`--hybrid-mode rerank --worker-logit-scale <x>` 会把 Worker logits 作为 fallback logits 的中心化 bias；fallback 是 U-Net、fog-memory 或 scoreboard-history checkpoint 时，配套传 `--fallback-network-arch unet`、`--fallback-fog-memory`、`--fallback-scoreboard-history` 以及必要的 fallback value-head 模板参数。但这些 checkpoint 仍是 Commander/Worker 实验件，不是 `evaluate_adaptive_policy.py` promotion 策略。 如果 checkpoint 使用 categorical/per-size value head、outcome head、strategy aux、global/context residual、pyramid context、scoreboard history 或 global context，评估时也要给 `evaluate_adaptive_policy.py` 传匹配的 `--value-heads`、value-loss 模板参数、`--outcome-head`、`--strategy-aux`、`--context-residual`、`--pyramid-context`、`--global-context` 或 `--scoreboard-history`。
+
+`evaluate_adaptive_policy.py` also accepts main-model init template flags such as `--init-value-heads`, `--init-value-loss`, `--no-init-outcome-head`, `--no-init-strategy-aux`, and `--init-strategy-finish-outputs`. Use these when the evaluated target template includes newer heads only so that an older base checkpoint can be expanded and then combined with a newer policy adapter. `--drop-mismatched-init-leaves` is an explicit legacy-checkpoint escape hatch in `evaluate_adaptive_policy.py`, `adaptive_strategy_supervised.py`, `adaptive_plan_q_dataset.py`, and `train_adaptive.py`: matching leaves are loaded and shape-mismatched leaves, usually obsolete value heads, are reinitialized while the serialized stream is still consumed in order. `train_adaptive.py` also has `--teacher-drop-mismatched-init-leaves` for KL teachers. `--policy-adapter-min-grid-size` and `--policy-adapter-max-grid-size` restrict adapter use to a board-size range, which is useful for 8x8 fixed-v5 probes without touching 12x12/16x16 rows. `--policy-adapter-mode delta|blend|replace` controls composition: `delta` adds the centered adapter delta, `blend` interpolates legal logits, and `replace` lets a gated adapter directly provide legal logits. `delta --policy-adapter-scale 1.0` is equivalent to replacement up to a legal-logit constant shift. `--policy-adapter-commit-steps <n>` is a diagnostic enter-plan probe for gated adapters: after a learned gate or finish-threshold trigger, the evaluator forces the adapter for the next `n` policy turns. Keep it at the default `0` unless testing whether a gate needs short-horizon commitment; early fixed-v5 checks regressed, so it is not a promotion setting.
+
+下一轮 adaptive PPO v3-outcome continuation 建议从当前最强候选启动；本地 16GB GPU 已验证 512 envs x 256 steps 会 OOM，先用 256 envs 和 1024 minibatch 做 256 games/row triage：
+
+```bash
+JAX_PLATFORMS=cuda TF_GPU_ALLOCATOR=cuda_malloc_async XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --extra dev --extra cuda13 python examples/_experimental/ppo/train_adaptive.py 256 \
+  --grid-sizes 8,12,16 \
+  --grid-size-weights 8:1,12:1,16:2 \
+  --pad-to 16 \
+  --map-generator generated \
+  --pool-size 16384 \
+  --num-steps 256 \
+  --num-iterations 80 \
+  --num-epochs 1 \
+  --minibatch-size 1024 \
+  --lr 0.000003 \
+  --opponent expander \
+  --learner-player mixed \
+  --reward-mode terminal \
+  --terminal-reward-scale 1.0 \
+  --gamma 1.0 \
+  --gae-lambda 0.9 \
+  --top-advantage-fraction 0.25 \
+  --ema-decay 0.999 \
+  --eval-ema \
+  --value-heads per-size \
+  --init-value-heads shared \
+  --value-loss hl-gauss \
+  --init-value-loss mse \
+  --value-bins 128 \
+  --value-sigma 0.04 \
+  --outcome-aux-weight 0.05 \
+  --init-model-path runs/generals-adaptive-search-distill-p1-v1-ckpts/generals-adaptive-search-distill-p1-v1-iter-000040.eqx \
+  --checkpoint-dir runs/generals-adaptive-ppo-v3-outcome-ckpts \
+  --checkpoint-every 10 \
+  --keep-checkpoints 8 \
+  --model-path runs/generals-adaptive-ppo-v3-outcome.eqx \
+  --seed 68000
+```
 
 Residual GRU 记忆 PPO：
 
@@ -380,11 +482,11 @@ JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
 uv run python examples/_experimental/ppo/train_recurrent.py 512 \
   --grid-size 8 \
   --map-generator generated \
-  --opponent-policy-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
-  --init-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --opponent-policy-path runs/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --init-model-path runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --hidden-size 64 \
   --freeze-base \
-  --model-path /tmp/generals-recurrent-ppo-8x8-v5.eqx
+  --model-path runs/generals-recurrent-ppo-8x8-v5.eqx
 ```
 
 `train_recurrent.py` 会在 CNN policy 上叠加 GRU hidden state 和 residual logits/value delta；`--freeze-base` 会冻结 warm-start 的 CNN，只训练记忆适配器，适合保护 v5 或行为克隆基线。用 `evaluate_recurrent_policy.py` 可评估 recurrent checkpoint；没有 `--opponent-policy-path` 时也可直接测 `--opponent expander`。
@@ -406,13 +508,13 @@ uv run python examples/_experimental/ppo/outcome_clone.py 256 \
   --num-cities-min 4 \
   --num-cities-max 8 \
   --min-generals-distance 5 \
-  --init-model-path /tmp/generals-ppo-current.eqx \
-  --opponent-policy-path /tmp/generals-ppo-best-frozen.eqx \
+  --init-model-path runs/generals-ppo-current.eqx \
+  --opponent-policy-path runs/generals-ppo-best-frozen.eqx \
   --policy-mode sample \
   --opponent-policy-mode sample \
   --winner-source both \
   --negative-weight 0.0 \
-  --model-path /tmp/generals-ppo-outcome-clone.eqx
+  --model-path runs/generals-ppo-outcome-clone.eqx
 ```
 
 `outcome_clone.py` 会完整 rollout 对局，并只用最终胜者视角的动作做监督样本；`--winner-source learner` 只保留 learner 赢局，`--negative-weight` 可额外压低败者动作概率。
@@ -421,7 +523,7 @@ rollout-search 强辅助评估：
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/search_policy.py /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+uv run python examples/_experimental/ppo/search_policy.py runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --num-games 512 \
   --grid-size 8 \
   --map-generator generated \
@@ -445,7 +547,7 @@ uv run python examples/_experimental/ppo/search_policy.py /tmp/generals-ppo-8x8-
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
 uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
-  --base-model-path /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+  --base-model-path runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --target-mode soft \
   --num-steps 64 \
   --num-iterations 80 \
@@ -454,7 +556,7 @@ uv run python examples/_experimental/ppo/conservative_search_distill.py 128 \
   --improve-weight 0.02 \
   --kl-weight 1.0 \
   --lr 0.000001 \
-  --model-path /tmp/generals-ppo-8x8-conservative-search.eqx
+  --model-path runs/generals-ppo-8x8-conservative-search.eqx
 ```
 
 该脚本用固定 base checkpoint 做 rollout-search teacher，并用 KL 约束学生贴近 base。`--target-mode hard` 只在 search 最优动作明显优于 base top-prior 动作时加入小权重动作监督；`--target-mode soft` 会把 top-k rollout 分数转成软目标，避免把近似并列候选强行压成单标签。`--policy-input full-state` 会用 privileged 完整状态替换标准 observation；`--policy-input augmented-full-state` 会保留原 9 个 observation 通道，并追加 9 个 full-state 通道。augmented 模式默认使用 18 输入通道，并支持从 9 通道 checkpoint 自动扩展 conv1 权重。评估时也要给 `evaluate_policy.py` 传同名 `--policy-input`，必要时传 `--input-channels` 和 `--opponent-input-channels`。它适合继续研究 search distillation，不应把训练 loss 当成棋力指标；仍需用 `evaluate_policy.py --opponent-policy-path` 独立评估。
@@ -471,14 +573,14 @@ uv run python examples/_experimental/ppo/behavior_clone.py 128 \
   --num-steps 32 \
   --num-iterations 2000 \
   --lr 0.0007 \
-  --model-path /tmp/generals-bc-8x8-soft.eqx
+  --model-path runs/generals-bc-8x8-soft.eqx
 ```
 
 批量评估 checkpoint：
 
 ```bash
 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-8x8-expander-gpu-v5.eqx \
+uv run python examples/_experimental/ppo/evaluate_policy.py runs/generals-ppo-8x8-expander-gpu-v5.eqx \
   --num-games 2048 \
   --grid-size 8 \
   --map-generator generated \
@@ -492,6 +594,462 @@ uv run python examples/_experimental/ppo/evaluate_policy.py /tmp/generals-ppo-8x
 
 评估两个 checkpoint 之间的对局时，给 `evaluate_policy.py` 传入 `--opponent-policy-path` 和 `--opponent-policy-mode`。
 评估非默认容量 checkpoint 时，给候选传入 `--channels`；如果对手 checkpoint 容量不同，再传入 `--opponent-channels`。评估非默认输入通道或 privileged 输入时，使用 `--policy-input`、`--input-channels` 和 `--opponent-input-channels` 保持网络结构与 checkpoint 一致。
+
+Adaptive strategic trunk experiments can now use a real U-Net backbone instead of the legacy shallow CNN:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python examples/_experimental/ppo/adaptive_teacher_imitation.py 128 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --grid-size-weights 8:2,12:2,16:1 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --global-context \
+  --scoreboard-history \
+  --fog-memory \
+  --value-heads per-size \
+  --value-loss hl-gauss \
+  --teacher-model-path legacymodels/generals-adaptive-ppo-v3-composite-balanced-probe1.eqx \
+  --teacher-global-context \
+  --teacher-scoreboard-history \
+  --teacher-input-channels 30 \
+  --teacher-policy-mode greedy \
+  --kl-weight 1.0 \
+  --action-ce-weight 5.0 \
+  --model-path runs/adaptive-unet-imitation/generals-adaptive-unet-imitation.eqx
+```
+
+`--fog-memory` appends explored-ever, last-seen enemy ownership, last-seen enemy army, seen city, and seen general planes. `adaptive_teacher_imitation.py` lets the legacy adaptive CNN drive mixed-seat rollouts and trains the U-Net with all-action teacher KL plus action CE. Greedy teacher action labels are much less noisy than sampled labels, while KL still preserves the teacher distribution. U-Net checkpoints must be evaluated with matching `--network-arch unet`, `--channels`, `--scoreboard-history`, `--fog-memory`, and value-head flags.
+
+`adaptive_strategy_dataset.py` collects offline strategy-supervision shards under `runs/` without changing policy weights. Each `.npz` shard stores adaptive observations, legal masks, teacher logits/actions, outcome/terminal labels, enemy-general and hidden-enemy maps, weak intent labels, and source/target heatmaps. Example U-Net teacher collection:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 16 \
+  --grid-sizes 8,12,16 \
+  --pad-to 16 \
+  --num-steps 128 \
+  --teacher-kind adaptive \
+  --teacher-model-path runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx \
+  --teacher-network-arch unet \
+  --teacher-channels 64,96,128,64 \
+  --teacher-input-channels 35 \
+  --teacher-scoreboard-history \
+  --teacher-value-heads per-size \
+  --teacher-value-head-sizes 8,12,16 \
+  --teacher-value-loss hl-gauss \
+  --teacher-outcome-head \
+  --scoreboard-history \
+  --fog-memory \
+  --opponent expander \
+  --output-dir runs/adaptive-strategy-dataset-v0/unet-v3-expander
+```
+
+For midgame decisive trajectory imitation, use save-time filters so the shard keeps contact-heavy, terminal-window, or gather/attack states instead of every opening move. `--min-save-turn`, `--max-save-turn`, `--require-contact`, `--min-visible-enemy-cells`, `--terminal-window`, `--require-win`, `--require-finish-within-250`, `--require-win-or-finish-within-250`, `--require-finish-within-500`, `--require-win-or-finish-within-500`, and `--draw-only` filter rows after rollout labels are computed and before the shard is written. Use the 500-step variants for current fixed-v5 short-game data; the 250-step variants remain for old shards and deliberately compressed ablations. Separate shards are preferred for separate windows, for example terminal-120 wins and draw-heavy contact states, then mix those shards in `adaptive_strategy_supervised.py`.
+
+`adaptive_strategy_dataset.py --teacher-kind search` uses an adaptive checkpoint as the policy prior, scores its top-k actions with short rollouts, and saves the best search action as the imitation action while still storing the prior logits for KL anchoring. It supports scoreboard-history and fog-memory U-Net checkpoints, so current 35-channel models can generate midgame decisive trajectory shards. `--teacher-adapter-model-path`, `--teacher-adapter-scale`, `--teacher-adapter-mode delta|blend|replace`, and teacher adapter min/max grid-size gates compose a policy-head adapter into both the search prior and rollout policy; use this when collecting data from the same wrapper used at evaluation, such as v4 plus an 8x8-only legacy adapter. `--teacher-drop-mismatched-init-leaves` is available for old adapter checkpoints with obsolete value-head leaves. `--teacher-kind fixed-search` does the same for a fixed 8x8 `PolicyValueNetwork` teacher such as v5: it crops the teacher observation, maps the fixed teacher's top-k actions back into adaptive padded action indices, and writes the same search metadata. Use it with `--fixed-teacher-model-path` and a single `--grid-sizes` value. Complex adaptive teacher checkpoints that include auxiliary heads can be loaded with `--teacher-strategy-aux`, `--teacher-strategy-spatial-aux`, and `--teacher-strategy-finish-outputs`. Keep the search budget small for smoke runs, then raise `--search-top-k`, `--search-rollout-steps`, and `--search-rollouts-per-action` for production shards.
+
+Search and fixed-search teacher shards also store `search_candidate_indices`, `search_scores`, `search_outcomes`, `search_best_outcome`, and `search_score_gap`. The gap is computed as best score minus the second valid prior candidate, so pass-only opening states do not get fake high-margin labels. Use `--min-search-score-gap` and optionally `--require-search-best-win` to keep only high-confidence search decisions:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_dataset.py 32 \
+  --grid-sizes 8,12,16 \
+  --teacher-kind search \
+  --teacher-model-path runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx \
+  --teacher-network-arch unet \
+  --teacher-channels 64,96,128,64 \
+  --teacher-input-channels 35 \
+  --teacher-scoreboard-history \
+  --teacher-value-heads per-size \
+  --teacher-value-head-sizes 8,12,16 \
+  --teacher-value-loss hl-gauss \
+  --teacher-outcome-head \
+  --teacher-strategy-aux \
+  --teacher-strategy-finish-outputs 3 \
+  --scoreboard-history \
+  --fog-memory \
+  --search-top-k 4 \
+  --search-rollout-steps 8 \
+  --search-rollouts-per-action 1 \
+  --min-save-turn 80 \
+  --require-contact \
+  --min-visible-enemy-cells 1 \
+  --require-win-or-finish-within-500 \
+  --terminal-window 120 \
+  --min-search-score-gap 0.25 \
+  --output-dir runs/adaptive-strategy-search-highgap-v1
+```
+
+`adaptive_strategy_supervised.py` consumes those shards and trains only the frozen-base strategy heads. The first stage intentionally leaves the policy/trunk logits unchanged while learning intent, finishability, and enemy-general belief:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v0/unet-v3-expander/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-model-path runs/adaptive-unet-imitation-v3/generals-adaptive-unet-imitation-v3.eqx \
+  --num-epochs 20 \
+  --minibatch-size 512 \
+  --intent-weight 0.2 \
+  --finish-weight 0.4 \
+  --belief-weight 0.3 \
+  --model-path runs/adaptive-strategy-supervised-v0/generals-adaptive-strategy-supervised-v0.eqx
+```
+
+For multi-horizon finishability, use `--finish-head-mode multi-horizon`. This expands the strategy finish head to three independent BCE logits for `finish_within_50`, `finish_within_100`, and a long horizon. The long horizon now defaults to 500 for the current fixed-v5 max500 gate, so the third logit uses `finish_within_500` when that field is present. Pass `--finish-target-horizon 250` only for historical compressed shards or deliberate max250 ablations. Warm-start old binary-finish checkpoints with `--init-finish-head-mode binary`. Evaluation should pass `--strategy-finish-outputs 3`. PPO warm-starts that only need to read and discard the old head can pass `--init-strategy-finish-outputs 3`; PPO runs that should preserve strategy heads in the output checkpoint must also pass `--strategy-aux --strategy-finish-outputs 3`.
+
+Draw-heavy shards should not usually contribute action CE. `adaptive_strategy_supervised.py --action-ce-weight-mode non-draw` keeps policy KL, outcome, finish, belief, and intent losses on known draw samples, but removes those rows from action CE/QCE. `wins` is stricter and only applies action CE/QCE to known winning rows; `search-best-win` applies action CE only when a search-teacher shard's local `search_best_outcome` is win, which is useful for broad midgame/contact datasets where draw/loss rows should still train outcome/finish/belief but not primitive actions. `--action-ce-path-contains <token>` can be repeated to restrict action CE to shards whose path contains one of the tokens while still using every shard for KL and auxiliary losses. This is useful when fixed-v5 decisive rows should provide primitive actions and Expander rows should only protect the base policy. `all` preserves the historical behavior.
+
+The supervised trainer can also filter rows at load time, so existing broad shards can be reused without writing derived NPZ files. `--min-row-turn`, `--max-row-turn`, `--require-contact`, `--min-visible-enemy-cells`, `--min-visible-enemy-density`, `--require-outcome-win`, `--require-outcome-draw`, `--require-outcome-nonwin`, `--require-search-best-win`, `--require-finish-within-250`, `--require-win-or-finish-within-250`, `--require-finish-within-500`, `--require-win-or-finish-within-500`, and `--min-search-score-gap` apply before `--max-samples-per-shard`, then the trainer prints kept/sampled row counts. The default finish target horizon is 500, so binary finish heads and the third multi-horizon output follow the max500 label when the shard contains `finish_within_500`; old shards without that field fall back to `finish_within_250` for target construction. Combining `--require-outcome-draw` or `--require-outcome-nonwin` with `--require-search-best-win` isolates states where the recorded policy failed to win but rollout-search found a winning continuation. This is useful for quick midgame decisive imitation probes; keep draw-heavy contrast rows in the same command only when action CE is gated off for those shard paths.
+
+Use `adaptive_strategy_supervised.py --balance-strata size-seat` when a filtered shard is concentrated in a few grid-size or learner-seat rows. It downsamples to equal `(grid_size, seat)` counts before shuffling, which is useful for high-gap or terminal-window imitation probes where raw row counts can hide seat tradeoffs. For mixed-domain datasets, `--balance-strata size-seat-domain` further splits rows by coarse shard domain, using sidecar metadata such as fixed policy opponent versus Expander opponent when available. This prevents fixed-v5 8x rows from drowning same-size Expander protection rows during coupled policy updates. The `size-seat-oversample` and `size-seat-domain-oversample` modes instead repeat rare strata up to the largest stratum count; use them when strict filtering leaves valuable contrast rows but downsampling would discard most of them.
+
+`adaptive_strategy_supervised.py --label-source search-best` switches only the finish/outcome/value labels from full-trajectory outcome to the saved rollout-search best-action outcome. This is useful on high-gap search shards where the recorded trajectory may eventually win but the local search best action still distinguishes immediate win-like states from draw-like states. `--label-source search-best-or-trajectory` uses search-best labels when a shard has them and falls back to trajectory labels for ordinary contrast shards, so fixed-search positives can be mixed with draw/loss rows that do not carry search metadata. Pair it with `--finish-head-mode binary --init-finish-head-mode multi-horizon` when converting a 3-logit finish checkpoint into a 2-logit finish gate. `--balance-finish-labels` and `--balance-outcome-labels` apply batch-level inverse-frequency weighting so rare search-win labels are not drowned by search-draw rows. `--value-target-weight` fits the PPO value head to the same loss/draw/win target (`-1/0/+1`), using HL-Gauss CE when `--value-loss hl-gauss` is active; this is intended for value/finish calibration before PPO, not direct gameplay promotion.
+
+`adaptive_strategy_supervised.py --update-scope strategy-value-heads` is the middle setting between frozen-head probes and full policy coupling. It keeps trunk/policy/action logits frozen, but lets the strategy auxiliary heads, optional outcome head, shared pooled value bottleneck (`value_linear1`), and `--value-target-weight` value heads update. Use it for search-best or trajectory finish/outcome/value representation work where the last-layer heads alone underfit, but a full `--update-scope all` policy update would risk seat/size regressions.
+
+`adaptive_strategy_supervised.py --update-scope policy-heads` is a narrower policy-coupled mode for decisive imitation probes. It freezes the U-Net/CNN trunk and value heads, but updates the primitive policy output head (`policy_conv`/`pass_linear`) plus the strategy auxiliary heads and optional outcome head. This is useful when full-trunk imitation shows fixed-opponent signal but causes Expander forgetting; keep a positive `--policy-kl-weight` so the output head stays anchored to the warm-start policy. For pure policy-delta adapters, pass `--no-strategy-aux` and set auxiliary/Q/source/target loss weights to `0`; this saves a checkpoint with the base policy schema, which can be mixed by `evaluate_adaptive_policy.py --policy-adapter-path` without requiring strategy heads.
+
+This is a representation-learning step, not a gameplay promotion step. For ordinary trajectory labels, use `--outcome-weight 0` initially; the U-Net imitation v3 outcome head is poorly calibrated on fixed-v5 draw-heavy states, so outcome supervision should wait for better balanced shards or a fresh outcome head. Search-best labels are a separate probe because they supervise local search outcome, not the final rollout winner.
+
+For a cautious policy-coupled follow-up, start from a checkpoint that already has trained strategy heads, cap each shard to avoid long fixed-v5 rollouts dominating the batch, and require a positive policy KL anchor:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v1/v4-expander-balanced/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max750/*.npz' \
+  --max-samples-per-shard 4096 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --init-model-path runs/adaptive-strategy-heads-v4-balanced-v1/generals-adaptive-strategy-heads-v4-balanced-v1.eqx \
+  --update-scope all \
+  --policy-kl-weight 1.0 \
+  --action-ce-weight 0.05 \
+  --lr 0.0000005 \
+  --model-path runs/adaptive-strategy-coupled-v4-balanced-v1/generals-adaptive-strategy-coupled-v4-balanced-v1.eqx
+```
+
+`--update-scope all` is intentionally guarded by `--policy-kl-weight > 0` because otherwise the offline strategy losses can move the trunk without an action-distribution anchor. Current coupled checkpoints are diagnostic artifacts; keep using 256/512-row promotion gates before replacing the active Expander base.
+
+`train_adaptive.py --teacher-kl-weight` can also anchor PPO to complex adaptive checkpoints. When the teacher checkpoint has per-size HL-Gauss value heads, outcome head, or strategy auxiliary heads, pass the matching `--teacher-value-heads`, `--teacher-value-head-sizes`, `--teacher-value-loss`, `--teacher-outcome-head`, `--teacher-strategy-aux`, and `--teacher-strategy-finish-outputs` flags so the teacher tree matches the serialized checkpoint. This is useful for KL-anchoring PPO to strategy-supervised U-Net checkpoints without using the teacher for rollout actions.
+
+To train only the strategy-Q head for inference-time reranking, keep the base policy frozen and add Q losses against teacher logits/actions:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v1/v4-expander-balanced/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max750/*.npz' \
+  --max-samples-per-shard 4096 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --init-model-path runs/adaptive-strategy-heads-v4-balanced-v1/generals-adaptive-strategy-heads-v4-balanced-v1.eqx \
+  --q-kl-weight 1.0 \
+  --q-action-ce-weight 0.05 \
+  --intent-weight 0.05 \
+  --finish-weight 0.1 \
+  --belief-weight 0.05 \
+  --model-path runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx
+```
+
+Evaluate Q reranking with `evaluate_adaptive_policy.py --strategy-aux --strategy-q-rerank-scale <scale>`. Treat this as a probe: current results show the Q head can learn the offline teacher distribution, but direct all-action reranking has not passed 512-row promotion.
+
+Search-teacher shards can also train the strategy-Q head from rollout-search top-k rankings instead of policy/action labels. `adaptive_strategy_supervised.py --search-q-rank-weight <w>` consumes `search_candidate_indices`, `search_prior_scores`, `search_scores`, and `search_score_gap`, builds a soft ranking target with `--search-q-temperature`, and only updates rows with at least two valid candidates and positive search gap. `--search-q-value-weight <w>` instead regresses candidate action-Q values to rollout-search replacement outcomes (`loss/draw/win -> -1/0/+1`), with optional shaped-score tie-breaks from `--search-q-score-scale` and `--search-q-outcome-score-weight`. This keeps high-gap rollout-search signal out of primitive policy CE:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-search-highgap-v1/*.npz' \
+  --balance-strata size-seat \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --init-value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --finish-head-mode multi-horizon \
+  --init-finish-head-mode multi-horizon \
+  --init-model-path runs/adaptive-midgame-search-imitation-v1/generals-adaptive-midgame-search-imitation-v1.eqx \
+  --update-scope strategy-heads \
+  --intent-weight 0 \
+  --finish-weight 0 \
+  --belief-weight 0 \
+  --outcome-weight 0 \
+  --policy-kl-weight 0 \
+  --action-ce-weight 0 \
+  --search-q-rank-weight 1.0 \
+  --search-q-temperature 1.0 \
+  --model-path runs/adaptive-midgame-search-q-rank-v0/generals-adaptive-midgame-search-q-rank-v0.eqx
+```
+
+The first high-gap probe learned the search rank loss, but q-rerank remained a diagnostic path: scale `0.001` only moved Expander 256-row min from `71.09%` to `71.48%`, while scale `0.01` collapsed the 8x8 player-1 row at 64 games. A later fixed-v5 short-horizon candidate-outcome value probe reduced offline value MSE but still failed direct `--strategy-q-replace-threshold` promotion at 128 games. Do not promote Q-rerank or Q-replace from these results; use them as evidence that rollout-search should feed finish/outcome/belief or midgame trajectory imitation before primitive action replacement.
+
+The strategy supervised trainer can also add explicit source/target spatial heads from `source_heatmap` and `target_heatmap` shard labels. Use `--strategy-spatial-aux` when creating the target checkpoint and leave `--init-strategy-spatial-aux` off when expanding an older strategy checkpoint that does not yet contain these heads:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_strategy_supervised.py \
+  --dataset 'runs/adaptive-strategy-dataset-v1/v4-expander-balanced/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max500/*.npz' \
+  --dataset 'runs/adaptive-strategy-dataset-v0/fixed-v5-max750/*.npz' \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --init-strategy-aux \
+  --strategy-spatial-aux \
+  --init-model-path runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx \
+  --source-weight 0.5 \
+  --target-weight 0.5 \
+  --model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx
+```
+
+Evaluate explicit source/target inference bias with `evaluate_adaptive_policy.py --strategy-aux --strategy-spatial-aux --strategy-spatial-rerank-scale <scale>`. This is still a probe; the current spatial v1 run learned the labels offline but did not pass 256-row Expander or fixed-v5 promotion.
+
+`adaptive_plan_q_dataset.py` collects source-target plan-Q shards. By default it samples candidate source cells and target cells from privileged state, forces each plan's first primitive action, rolls out the base adaptive policy briefly, and saves plan scores plus source/target score marginals. `--learner-seat mixed|p0|p1` controls whether shards collect both learner seats or force a single seat; use `p0`/`p1` to repair accepted-prefix seat imbalance before `adaptive_strategy_supervised.py --balance-strata size-seat` would otherwise discard most rows. `--candidate-source model --candidate-target model` instead takes candidates from the checkpoint's strategy spatial source/target heads, masked to legal movable sources and active passable targets; use this for gate/Worker data that must match inference-time command generation. `--candidate-source model-worker --candidate-target model` uses the same route/army-adjusted source scoring as the evaluator's worker command for the top model target. `--candidate-source main-stack --candidate-target belief` matches `evaluate_adaptive_policy.py --strategy-plan-worker-command-source belief-main-stack`: target candidates come from `enemy_general_logits`, and source candidates use army mass plus route distance with no source-head prior. `--min-plan-gap <gap>`, `--require-best-plan-win`, `--min-save-turn`, and `--max-save-turn` filter rows before shard saving, so high-gap/decisive or mid/late Commander data can be collected without keeping every draw-heavy low-margin state. `--save-worker-prefix-steps <N>` additionally stores the selected best command's first N executed Worker states/actions after `--plan-worker-steps`, so `adaptive_plan_worker_supervised.py --dataset-format plan-q-prefix` can train on multi-step command execution rather than only first-step labels. Prefix shards also save `worker_prefix_teacher_logits`; `adaptive_strategy_supervised.py --dataset-format plan-q-prefix` can flatten those prefix states into main-policy KL/action-CE examples, where `--require-outcome-win` refers to the selected plan outcome. If the collector loads a checkpoint whose disk schema differs from the target template, use `--init-value-heads`, `--init-value-loss`, `--init-value-bins`, `--init-outcome-head/--no-init-outcome-head`, `--init-strategy-aux/--no-init-strategy-aux`, `--init-strategy-spatial-aux/--no-init-strategy-spatial-aux`, and `--init-strategy-finish-outputs` to describe the source checkpoint. This is the replacement path for direct spatial rerank scale sweeps.
+
+For Plan-Q prefix main-policy training, `adaptive_strategy_supervised.py --min-teacher-action-logit-margin <margin>` filters prefix steps by saved base-policy support before flattening them. The margin is `teacher_logit(chosen_prefix_action) - max_teacher_logit`; for example `-1.0` keeps labels that are within one logit of the saved policy top action. This is a data-quality diagnostic for executed-prefix imitation, not a promotion rule by itself.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_plan_q_dataset.py 8 \
+  --grid-sizes 8 \
+  --num-steps 16 \
+  --warmup-steps 0 \
+  --num-shards 1 \
+  --pool-size 128 \
+  --model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --input-channels 35 \
+  --scoreboard-history \
+  --fog-memory \
+  --value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --outcome-head \
+  --strategy-aux \
+  --strategy-spatial-aux \
+  --source-count 4 \
+  --target-count 4 \
+  --plan-rollout-steps 8 \
+  --rollouts-per-plan 1 \
+  --output-dir runs/adaptive-plan-q-v0 \
+  --shard-prefix plan-q
+```
+
+The first smoke shard is intentionally small. It validates the data path and produces non-uniform Plan-Q marginals, but does not yet provide anti-draw outcome labels because the 8-step rollout horizon remains nonterminal. Fixed-v5 `max500` shards are the current data step; use `max750` only as a longer confirmation or ablation.
+
+For fixed-v5 `max500` data, use `--truncation 500` and `--warmup-steps <n>` to advance behavior games before expensive plan scoring. Counterfactual plan rollouts are truncation-aware, so wins after the max-step gate are not counted as wins. This replaced the older `max250` diagnostic gate because 250 steps over-compress otherwise realistic games.
+
+For online-search trace data, `adaptive_online_search_trace_dataset.py --conversion-rollout-steps 500 --truncation 500` now saves full max500 continuation labels for the deployment base action and the selected search action. The added fields include `base_continuation_outcome`, `search_continuation_outcome`, `search_improves_continuation`, `search_converts_to_win`, and `search_converts_draw_to_win`. Use `--require-search-converts-to-win` or `--require-search-improves-continuation` to write only causal conversion rows, and train them with `adaptive_strategy_supervised.py --label-source search-continuation` plus `--action-ce-weight-mode search-converts-win` when primitive action CE should be limited to draw/loss-to-win replacements.
+
+`adaptive_online_search_trace_dataset.py --save-executed-prefix-steps <N>` also saves same-env consecutive rollout windows as `worker_prefix_*` arrays on online-search trace shards. These fields are meant for max500 executed-prefix imitation and Worker/conditional-head training from the actual post-search action stream, rather than another single-step search-action CE dataset. Keep these shards under `runs/`; they are ignored artifacts and should not be treated as cache output.
+
+Use `--plan-worker-steps <n>` when first-step plan forcing only separates draw from loss. This keeps the forced source-target first move, then executes `n` additional target-conditioned worker moves before handing control back to the base policy. In the fixed-v5 warm190 probe, `--plan-worker-steps 16` produced a small number of winning plan labels where the first-step-only shard had none. The default is `0` for backward-compatible first-step scoring.
+
+Train source/target heads from Plan-Q marginals with `adaptive_plan_q_supervised.py`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
+  --dataset 'runs/adaptive-plan-q-v0-scale10/*.npz' \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --init-channels 64,96,128,64 \
+  --input-channels 35 \
+  --init-input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --strategy-aux \
+  --init-strategy-aux \
+  --strategy-spatial-aux \
+  --init-strategy-spatial-aux \
+  --init-model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
+  --source-weight 0.5 \
+  --target-weight 0.5 \
+  --model-path runs/adaptive-plan-q-supervised-v0/generals-adaptive-plan-q-supervised-v0.eqx
+```
+
+This trainer defaults to frozen trunk/policy updates and only moves the source/target strategy heads. It is a data-quality and representation probe until the Plan-Q shards include longer-horizon fixed-v5 outcome labels.
+When the init checkpoint uses multi-horizon finishability, pass both `--strategy-finish-outputs 3` and `--init-strategy-finish-outputs 3` so the Plan-Q trainer builds the same auxiliary-head template as the serialized model.
+
+For outcome/Q proposal-map supervision, the trainer also accepts
+`--source-q-mse-weight`, `--target-q-mse-weight`, `--source-q-rank-weight`,
+`--target-q-rank-weight`, `--plan-pair-rank-weight`,
+`--q-rank-temperature`, and `--q-target-outcome-weight`. These losses recompute
+source/target targets from the saved `plan_q` matrix, optionally blending
+decisive plan outcomes into loss/draw/win values, then train candidate-local
+source/target value rankings instead of only the precomputed source/target CE
+marginals. `--plan-pair-rank-weight` ranks the full source-target candidate
+matrix with additive `source_logit + target_logit` pair scores; it is a
+diagnostic for whether decomposed proposal maps can recover the best plan
+without adding an explicit Commander pair scorer.
+
+The same trainer can train the strategy action-Q head directly from plan outcomes:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/adaptive_plan_q_supervised.py \
+  --dataset runs/adaptive-plan-q-fixed-v5-worker-v2/plan-q-00000.npz \
+  --init-model-path runs/adaptive-strategy-spatial-v1/generals-adaptive-strategy-spatial-v1.eqx \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --input-channels 35 \
+  --global-context \
+  --value-heads per-size \
+  --init-value-heads per-size \
+  --value-loss hl-gauss \
+  --init-value-loss hl-gauss \
+  --outcome-head \
+  --init-outcome-head \
+  --strategy-aux \
+  --init-strategy-aux \
+  --strategy-spatial-aux \
+  --init-strategy-spatial-aux \
+  --source-weight 0 \
+  --target-weight 0 \
+  --action-q-weight 1.0 \
+  --action-q-mse-weight 0.1 \
+  --gap-weighting \
+  --model-path runs/adaptive-plan-q-action-q-v1/generals-adaptive-plan-q-action-q-v1.eqx
+```
+
+Plan action labels use the standard adaptive action index, including the single global pass index. The action-Q loss aggregates duplicate plan slots onto their shared primitive action before applying ranking CE, then can be probed with `evaluate_adaptive_policy.py --strategy-q-rerank-scale <scale>`. A more conservative diagnostic is `--strategy-q-replace-threshold <q_advantage>`, which keeps the sampled/greedy policy action unless the best legal strategy-Q action clears a predicted advantage threshold; `--strategy-q-replace-policy-margin <logit_margin>` can additionally require policy support.
+
+`adaptive_plan_q_supervised.py --replacement-gate-weight` trains the same action-Q head as a pairwise accepted-replacement gate. It compares the best source-target plan action with the teacher/base action when both appear in the candidate set, using `--replacement-score-margin` to define same-outcome improvements and `--replacement-target-margin` as the desired Q gap. This is still a diagnostic path: the first fixed-v5 shard run reduced draw under conservative replacement but did not improve 256-row min win rate.
+
+`evaluate_adaptive_policy.py --strategy-q-replace-worker-candidate` restricts the replacement gate to the single source/target worker action produced by the spatial heads instead of taking the best Q over every legal primitive action. Use it with `--strategy-q-replace-threshold` and `--strategy-aux --strategy-spatial-aux`. Earlier short-horizon probes did not improve the fixed-v5 gate either, so this is useful mainly for separating action-Q calibration failures from candidate-generation failures.
+
+`adaptive_plan_worker_supervised.py` trains a separate target-conditioned Worker from Plan-Q shards or strategy shards. It appends `source_one_hot`, `target_one_hot`, and `route_potential` command planes to the saved adaptive observation, then supervises the Worker policy with the selected plan action. For Plan-Q data, `--selection best` uses the best plan per row, `--selection accepted` keeps candidate plans that improve over the teacher/base action when that action is present in the candidate set, and `--selection mixed` combines both with configurable weights. `--dataset-format plan-q-prefix` reads `worker_prefix_*` arrays saved by `adaptive_plan_q_dataset.py --save-worker-prefix-steps`, flattening the selected command's executed prefix into Worker examples; with this format, `--require-outcome-win` means the selected plan outcome must be a win. For strategy data, `--dataset-format strategy` uses each shard's `source_heatmap`, `target_heatmap`, and `teacher_action_index`; `--require-outcome-win`, `--require-search-best-win`, `--require-finish-within-250`, and `--require-finish-within-500` can keep only decisive rollout-search trajectory windows. Prefer the 500-step filter for current fixed-v5 work. `evaluate_adaptive_policy.py --strategy-plan-worker-path <worker.eqx> --strategy-plan-worker-rerank-scale <x>` can load that Worker and use its centered logits as a small bias. `--strategy-plan-worker-min-margin <margin>` gates the bias to states where the Worker's legal top-1/top-2 logit margin clears the threshold. By default the Worker command comes from strategy-spatial source/target heads; `--strategy-plan-worker-command-source belief-main-stack` instead uses the belief enemy-general heatmap as target and chooses the source by main-stack/route heuristic, so it only requires `--strategy-aux` rather than `--strategy-spatial-aux`. `--strategy-plan-worker-command-source main-stack-heuristic` uses public observation heuristics for targets and the same main-stack/route source picker as `adaptive_plan_q_dataset.py --candidate-source main-stack --candidate-target heuristic`, which is useful for max500 executed-prefix Workers and does not require strategy aux unless a learned Worker gate is enabled. The first best-plan v0 run improved an older fixed-v5 short-horizon gate at 256 games/row with low scale `0.02`, while keeping Expander 256-row min roughly flat, but larger best-only, mixed, accepted-only, and decisive-strategy Workers did not confirm. Treat this as a diagnostic tool, not a promotion setting.
+
+`adaptive_command_gate_supervised.py` trains an independent binary command-acceptance MLP from Plan-Q shards. It predicts whether to replace the current policy action with a source/target worker command using only inference-time features such as policy-logit delta, action-Q delta, source/target logits, finish probability, route distance, source army, and seat. `evaluate_adaptive_policy.py --strategy-command-gate-path <gate.eqx> --strategy-command-gate-threshold <p>` loads the gate; `--strategy-command-gate-source-count` and `--strategy-command-gate-target-count` let it score a top-k source by top-k target command set. Early model, model-worker, and multi-command probes fit offline labels or expose useful candidates, but fixed-v5 confirmation still regressed, so this is a diagnosis tool until source/target proposal quality improves.
+
+`adaptive_policy_adapter_gate_supervised.py --feature-model-path <model.eqx>` and `evaluate_adaptive_policy.py --policy-adapter-feature-model-path <model.eqx>` decouple gate features from the policy adapter delta. The adapter checkpoint still supplies the centered policy-logit delta, while the feature model supplies strategy finish and outcome probabilities for the gate. New adapter gates save 18 feature names including draw/win probabilities, normalized time, land/army scoreboard advantage, and contact; old 12/14-feature gate sidecars still load because evaluation slices the feature vector to the saved feature count. `--dataset-format plan-q-prefix` reads executed-prefix shards from `adaptive_plan_q_dataset.py --save-worker-prefix-steps` and labels a positive gate example only when the adapter top action matches a high-advantage accepted prefix action. `--dataset-format online-search` reads `adaptive_online_search_trace_dataset.py` conversion shards and can label positives from `search_converts_to_win`, `search_converts_draw_to_win`, or `search_improves_continuation`; by default, the adapter top action must match the search action, because opening the gate cannot help when the adapter would not execute the converted action. `--online-action-field adapter_action_index` can instead train against direct adapter continuation labels such as `adapter_converts_to_win`. Use `--min-prefix-plan-advantage`, `--require-prefix-base-not-win`, `--max-prefix-plan-time-to-terminal`, and `--max-prefix-step` to keep prefix gates focused on decisive enter-plan windows. When training gates for a plain base checkpoint plus a strategy-head adapter, use `--no-base-outcome-head`, `--no-base-strategy-aux`, `--no-base-strategy-spatial-aux`, and `--base-strategy-finish-outputs <n>` to describe only the base model schema; the regular `--outcome-head`/`--strategy-aux` flags still describe the adapter and optional feature model. In evaluation, `--policy-adapter-feature-outcome-head`, `--policy-adapter-feature-strategy-aux`, `--policy-adapter-feature-strategy-spatial-aux`, and `--policy-adapter-feature-strategy-finish-outputs` describe the feature model independently, so the deployed base and policy adapter can keep their original non-aux schema.
+
+The first max500 online-search gates did not beat the static conversion adapter. Conversion-only gate v0 had only `6/1162` strict positives and triggered `100%` even at thresholds `0.8` and `0.95`, making it equivalent to static v1. A broader `search_improves_continuation` gate triggered about `68%`, but fixed-v5 max500 128-row same-seed min was `38.28%`, below static v1's `40.62%`. Keep `runs/adaptive-online-search-conversion-adapter-v1/generals-adaptive-online-search-conversion-adapter-v1.eqx` as the current max500 static adapter; learned gates need more adapter-matching conversion positives or direct adapter-vs-base continuation labels before promotion.
+
+`adaptive_online_search_gate_supervised.py` is a lighter offline diagnostic gate for trace shards from `adaptive_online_search_trace_dataset.py`. It trains a `CommandGateNetwork` directly from search score/prior/phase features and labels positives with `search_converts_to_win`, `search_converts_draw_to_win`, or `search_improves_continuation`; pass `--require-search-used --require-action-changed` for the current rpa2 max500 contact-only traces. Evaluation can load this explicit diagnostic gate with `--online-search-gate-path <gate.eqx> --online-search-gate-threshold <p>`. The first combined rpa2 v0+v1 dataset had `2078` rows, `1317` changed actions, and `153` strict conversion rows, but the shallow gate separated weakly: conversion-v0 ended at `13.10%` precision / `94.74%` recall, and improve-v0 ended at `14.75%` precision / `56.63%` recall. Do not use this gate for promotion; these features are useful for diagnostics, but the next controller needs richer state/route/model features or a planner-aware conditional action head.
+
+The same gate trainer also supports `--dataset-format strategy-worker`. This reads decisive strategy shards, runs a learned `--plan-worker-path`, and labels the Worker's top-1 replacement as positive only when it matches the rollout-search teacher action on decisive `search_best_outcome == win` or optional finish-window rows. `--include-finish250-worker-positives` uses `finish_within_250`; `--include-finish500-worker-positives` uses `finish_within_500` and is the current fixed-v5 max500 choice. `--filter-outcome-win`, `--filter-search-best-win`, `--filter-finish-within-250`, and `--filter-finish-within-500` apply the same row filters before building gate examples. The gate feature vector includes active-area fraction; saved sidecar metadata lets evaluation load older 12-feature gates and newer 13-feature gates. `evaluate_adaptive_policy.py --strategy-plan-worker-gate-path <gate.eqx> --strategy-plan-worker-gate-threshold <p>` then lets that gate decide whether the Plan-Worker replaces the current primitive action. `--strategy-plan-worker-min-grid-size <n>` and `--strategy-plan-worker-max-grid-size <n>` restrict both gated replacement and rerank bias to an in-domain board-size range; this is useful when a Worker helps 12x12/16x16 but should leave 8x8 to the base policy. The first belief-main-stack proxy gate trained on GPU but did not beat the no-gate fixed-v5 short-horizon baseline. A later true winning-trajectory gate with non-decisive positives improved the older short-horizon gate from the same-seed base `8.59%` to `11.33%`, while `--strategy-plan-worker-max-grid-size 8` kept Expander 12/16 rows at baseline; still treat this as a diagnostic signal rather than a promotion setting.
+
+`evaluate_adaptive_policy.py --online-search-top-k <k>` enables deployment-style online counterfactual search against either a fixed checkpoint opponent or the built-in heuristic opponents such as Expander. It composes the base policy and optional policy adapter, takes the top-k primitive actions by prior logit, forces each candidate first move, rolls out the same deployment policy against the opponent for `--online-search-rollout-steps` and `--online-search-rollouts-per-action`, then executes the highest-scoring action. Use `--online-search-min-turn`, `--online-search-require-contact`, and size gates to keep compute focused on decisive midgame states. `--online-search-min-score-gap` is a diagnostic risk-control switch that falls back to the original policy action unless the best-vs-second rollout score gap clears the threshold; early max500 checks regressed at `0.5` and `2.0`, so leave it at `0` for current promotion runs. Candidate scoring uses the same sampled opponent first action that the real environment step will execute, which avoids evaluating plans against a different stochastic first response. In the max500 fixed-v5 gate, `v4 + legacy Plan-Q prefix v0 adapter + online search top_k=4 rollout=16 contact-only turn>=80` moved same-seed 512-row min from `41.99%` to `51.56%`, with draw below `7%` on both seats. The stronger `v4 + static conversion adapter v1 + online search top_k=4 rollout=16 rollouts/action=2` teacher reached fixed-v5 max500 256-row min `58.20%` with draw below `9%`; treat it as the current high-budget teacher candidate, not a cheap promotion setting. In the 8/12/16 Expander max750 gate, the same search settings with `--online-search-max-grid-size 16` reached 64-row min `89.06%`, with 12x/16x rows at `95.31%`-`98.44%` and draw at `0%`-`1.56%`. This is a planner/wrapper result rather than a pure `.eqx` checkpoint, but it is the strongest current fixed-v5 and large-map Expander signal and should drive the next distillation targets.
+
+`adaptive_online_search_gate_supervised.py` trains a post-search accept/reject MLP from online-search trace shards, and evaluation loads it with `--online-search-gate-path <gate.eqx> --online-search-gate-threshold <p>`. This gate runs after expensive search scoring, so it is a search-risk filter rather than a compute-saving controller. The first rpa2 `search_improves_continuation` gate trained on `972` trace rows (`605` changed-action examples, `84` positives), but fixed-v5 max500 128-row same-seed min dropped from ungated rpa2 `58.59%` to gated `57.03%` at threshold `0.5`. Keep it as a diagnostic/controller hook; do not use it for promotion yet.
+
+`adaptive_online_search_candidate_scorer.py` trains a richer offline scorer over the online-search top-k candidate actions. It expands each candidate into inference-available policy prior, source/destination geometry, local observation features, capture-margin approximations, time, seat, active-area, and visible-enemy features, then learns the search-score ranking. `evaluate_adaptive_policy.py --candidate-scorer-path <scorer.eqx> --candidate-scorer-top-k <k>` can deploy base+local-channel scorer sidecars as a cheap learned top-k action selector, with `--candidate-scorer-min-turn`, `--candidate-scorer-require-contact`, size gates, and `--candidate-scorer-min-score-gap` mirroring the online-search controls. The evaluator intentionally rejects heatmap/trunk scorer sidecars for now because those extra features are not wired for online inference. The scorer freezes its dataset normalization stats; earlier checkpoints with mutable normalization leaves overestimated validation strength. With fixed normalization, rpa2 v0+v1 all-changed rows reached val top1 `34.22%` / top2 `67.68%` versus prior top1 `1.06%`; strict `search_converts_to_win` soft-rank rows reached val top1 `40.0%` / top2 `60.0%` on only `101` rows, while hard-best CE overfit. Use `--val-dataset <glob>` for independent-shard validation, `--heatmap-features` to add saved source/target/enemy-general heatmaps, and `--feature-model-path <adaptive.eqx>` to append frozen adaptive trunk source/destination/delta features. On the larger v0+v1+v2-small -> v3-small strict-conversion holdout, the plain fixed-normalization scorer reached top1/top2/pair `35.75%/64.25%/53.07%`; heatmaps reached `37.31%/58.03%/52.55%`; frozen v4 U-Net trunk features did not improve (`32.12%` with local channels, `35.75%` with local channels disabled, `34.72%` with heatmaps+local0). Treat deployed scorer results as a cheap-controller probe; if gameplay regresses, move the next controller inside the U-Net policy/adapter head instead of sweeping this MLP.
+
+`adaptive_online_search_trace_dataset.py` collects those aligned online-search decisions as ignored `runs/` NPZ shards. It saves the deployment observation, legal mask, base logits/action, executed search action, top-k candidate indices, prior scores, rollout scores, score margin, search-enter flag, weak intent/belief heatmaps, grid size, seat, and turn. `--warmup-steps` advances games before saving so `--search-min-turn 80 --search-require-contact --require-search-used` can target the same midgame distribution that improved fixed-v5 and Expander gates. `--save-executed-prefix-steps <n>` additionally stores same-env `worker_prefix_*` windows compatible with `adaptive_strategy_supervised.py --dataset-format plan-q-prefix`, so the planner can supervise short executed options instead of only one replacement action. Initial smoke shards wrote finite trace fields; the first real samples saved `57` Expander 8/12/16 midgame rows with `64.9%` action-change rate and `88` fixed-v5 max500 rows with `56.8%` action-change rate. The first strict max500 prefix shard using static v1 plus search saved `56` balanced conversion rows and `425/448` valid prefix steps; it trained successfully, but the resulting prefix policy adapter did not beat the same-seed static v1 baseline at 256 games/seat (`37.50%` min vs `38.67%`). Treat this as proof that the prefix data path is usable, not yet a promotion result.
+
+`adaptive_strategy_supervised.py --dataset-format online-search` consumes those trace shards directly. `--require-search-used`, `--require-search-action-changed`, and `--min-search-score-gap` filter to entered/high-margin planner states; `--action-ce-weight-mode search-used|search-changed` limits primitive action CE to rows where the planner actually entered or changed the base action. Pairwise prefix margin uses `base_action_index` when present, so it can rank the executed search action over the original deployment action instead of over the same teacher label. `--seat-loss-multipliers p0,p1` scales only the supervised action CE and pairwise weights after row balancing, which is useful for diagnosing p0/p1 tradeoffs without changing the shard format. `--val-dataset <glob>` loads independent holdout shards with the same filters, `--selection-metric auto|...` selects the `.best.eqx` checkpoint, and the trainer writes a JSON summary next to the checkpoint. Use this for pure-checkpoint online-search distillation against the current fixed-v5 `max500` gate; keep `max750` as a longer confirmation rather than the first triage gate. Current strict-conversion probes are negative for direct policy coupling: policy-head CE and policy-head rank stayed at `15.79%` independent holdout top1, while a strategy-Q head reached `57.89%` holdout rank accuracy but regressed fixed-v5 max500 64-game/seat gameplay from same-seed base min `31.25%` to `25.00%` with Q replacement. A later v1-init policy-head fine-tune on the larger v0+v1+v2-small strict-conversion set looked positive at 128 games/seat (`39.06%` min), but failed the same-seed 256-game comparison against static v1 (`33.59%` min versus `36.72%`). Treat this as evidence to stop single-step strict-conversion distillation and move back to executed-prefix or longer conditional-head data.
+
+For a separate in-checkpoint conditional action path, pass `--conversion-policy-head` when constructing/loading an adaptive checkpoint and train it with `adaptive_strategy_supervised.py --update-scope conversion-policy-head`. The trainer routes policy KL, action CE, pairwise margin, and search policy-rank losses through `network.conversion_policy_logits(...)` while the base policy head and trunk remain frozen. Evaluation composes that head with `--conversion-policy-scale <x>` and `--conversion-policy-mode delta|blend|replace`; it reuses the policy-adapter size, turn, and contact gates, so `--policy-adapter-max-grid-size 8 --policy-adapter-min-turn 80 --policy-adapter-require-contact` matches the current fixed-v5 max500 contact-only trace domain. The first v4-initialized strict-conversion head trained on rpa2 v0+v1+v2-small with v3-small validation selected epoch 34 at only `10.42%` holdout pairwise accuracy and scored fixed-v5 max500 128 games/seat min `20.31%` in replace mode, below the static adapter and online-search teachers. Keep the hook for future executed-prefix/conditional training, but do not promote that one-step head.
+
+`--search-policy-rank-weight <w>` trains the main policy logits directly from the online-search top-k soft score distribution. This is different from `--search-q-rank-weight`, which only trains the auxiliary strategy-Q head. Use policy-rank when hard search-action CE is too noisy but the top-k search scores still contain a stable preference. Early mixed fixed-v5/Expander v1 training fit this loss offline but did not improve the fixed-v5 max500 gate, so keep it as a tool for larger/better trace shards rather than a promotion result.
+
+`evaluate_adaptive_policy.py --policy-adapter-path <adapter.eqx> --policy-adapter-scale <x>` loads a second adaptive checkpoint with the same network template and adds its centered legal policy-logit delta to the base policy. `--policy-adapter-finish-threshold <p>` gates that delta on the adapter's strategy finish probability, using a hard on/off gate; multi-horizon finish checkpoints use the last horizon. `adaptive_policy_adapter_gate_supervised.py` can train a small learned gate for the same adapter delta from strategy shards, and evaluation loads it with `--policy-adapter-gate-path <gate.eqx> --policy-adapter-gate-threshold <p>`. This is useful for policy-head-only decisive imitation checkpoints that help fixed-v5 but hurt Expander when used as the full policy. The first p0mix adapter probe improved fixed-v5 less than the full p0mix checkpoint but recovered most Expander loss; the first learned gate probes were negative because the adapter changed greedy top-1 on very few saved states, so treat this as diagnostic evidence for stronger adapter data rather than a promotion setting.
+
+Policy adapters also support simple inference-time context gates: `--policy-adapter-min-turn <n>` and `--policy-adapter-require-contact`. These gates are applied after the size gate and before adapter composition, and are useful for matching midgame trace distributions such as turn>=80 contact-only online-search states. The first fixed-v5 action adapter with `turn>=80, contact` changed about 10% of decisions but did not beat the same-seed v4 max500 baseline, so this is a containment tool, not a substitute for better adapter labels.
+
+For stacked deployment probes, `evaluate_adaptive_policy.py` also supports a second adapter composed after the primary one: `--late-policy-adapter-path`, `--late-policy-adapter-scale`, `--late-policy-adapter-mode`, `--late-policy-adapter-min-grid-size`, `--late-policy-adapter-max-grid-size`, `--late-policy-adapter-min-turn`, and `--late-policy-adapter-require-contact`. This is intended for wrappers such as `v4 base + static v1 8x replace + prefix/option adapter only in contact midgame`. The first max500 prefix v2 late-adapter probe did not promote, but the hook is the correct evaluator shape for testing opening-preserving option adapters without touching 12x/16x behavior.
+
+`adaptive_plan_pair_supervised.py` trains an explicit source-target pair scorer from Plan-Q shards. Unlike the additive `source_logit + target_logit` probe, it applies an MLP to inference-time pair features, including policy/action-Q deltas, source/target logits, finish probability, source/target cell features, coordinates, route distance, turn, grid size, and seat. It saves both the final checkpoint and a `.best.eqx` checkpoint selected by validation pair top-1 accuracy, and reports pair@1/pair@2/pair@4 so Commander candidate quality is not judged only by argmax. `--min-plan-gap <gap>` can filter out low-margin rows before splitting, which is useful because larger model-worker shards are draw-heavy and the rank signal concentrates in high-gap states. The first worker-source gap-weighted run improved validation pair top-1 over the additive same-split baseline; a larger same-family shard only held a weak edge without filtering, while `--min-plan-gap 0.25` and `0.5` restored stronger pair ranking on fewer rows. This remains an offline Commander-scorer probe until high-gap performance is stable across larger shards/seeds.
+
+`adaptive_plan_pair_evaluate.py` replays the same Plan-Q pair dataset split and reports additive-baseline versus explicit-scorer metrics without training. Use it to confirm pair@1/pair@2/pair@4, source/target accuracy, and score correlation before deciding whether a scorer is good enough for shortlist diagnostics. The first high-gap recheck showed useful top-k signal but weak argmax quality, so it should not be wired directly into gameplay inference.
+
+`--plan-policy-weight` uses the same aggregated Plan-Q action target to update policy logits directly. Use it only with `--update-scope all` and a positive `--policy-kl-weight`; early probes showed it can damage seat balance even when KL anchored.
+
+`evaluate_adaptive_policy.py` also supports a target-conditioned probe that uses the strategy enemy-general belief head to bias legal moves toward the predicted target:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+uv run python examples/_experimental/ppo/evaluate_adaptive_policy.py \
+  runs/adaptive-strategy-q-rerank-v1/generals-adaptive-strategy-q-rerank-v1.eqx \
+  --grid-sizes 8,12,16 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --scoreboard-history \
+  --fog-memory \
+  --value-heads per-size \
+  --value-head-sizes 8,12,16 \
+  --value-loss hl-gauss \
+  --outcome-head \
+  --strategy-aux \
+  --strategy-target-rerank-scale 0.5
+```
+
+For explicit source/target execution probes, `evaluate_adaptive_policy.py` also supports `--strategy-worker-mix-prob <p>`. This selects a source/target plan from the spatial heads and, with probability `p`, executes one legal target-conditioned worker move instead of the sampled policy action. `--strategy-worker-policy-margin <margin>` only permits worker moves whose base-policy logit is within `margin` of the current best action, and `--strategy-worker-finish-gate` scales the mix probability by the finish head. Current fixed-v5 probes regressed, so treat this as a diagnostic path rather than a promotion setting.
+
+`--strategy-target-finish-gate` multiplies that target bias by the finish-head probability. This is an inference-only probe and does not change checkpoint weights; current evidence says it can move wins between rows, but has not passed 256-row confirmation.
+
+`adaptive_online_search_candidate_scorer.py` trains an offline top-k action scorer from max500 online-search trace shards. It supports `--val-dataset` for independent shard validation, `--heatmap-features` for saved source/target/enemy-general maps, and `--feature-model-path` to append frozen adaptive trunk features at the candidate source and destination cells. For `adaptive-unet-ppo-v4`, load the feature model as U-Net shared HL-Gauss (`--feature-network-arch unet --feature-channels 64,96,128,64 --feature-value-loss hl-gauss --feature-value-bins 128`), not per-size value heads. Current evidence says this scorer is an offline diagnostic only: strict-conversion rows transfer with early stopping, but final-epoch overfitting and small independent validation splits make direct gameplay integration premature.
 
 ## 验证
 
@@ -519,5 +1077,5 @@ git status
 
 - 4x4 训练命令主要用于 smoke test，不适合作为策略质量结论。
 - 更有意义的实验建议使用 8x8 或更大 generated 地图，并在独立 seed 上批量评估。
-- `.eqx` checkpoint 属于实验产物，建议放在 `/tmp` 或其他实验目录，不要提交进 Git。
+- `.eqx` checkpoint 属于实验产物，建议放在项目内已忽略的 `runs/` 或其他非缓存实验目录，不要提交进 Git。
 - `bench.py` 和 `examples/_experimental/benchmark_performance.py` 仍含旧版环境接口痕迹，使用前应先按当前 `reset(key) -> (pool, state)` 和 `step(state, actions, pool)` 接口修复。

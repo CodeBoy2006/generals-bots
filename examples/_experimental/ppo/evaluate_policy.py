@@ -181,7 +181,7 @@ def parse_args():
     parser.add_argument("--input-channels", type=int, default=None, help="Policy checkpoint input channels.")
     parser.add_argument("--opponent-input-channels", type=int, default=9)
     parser.add_argument("--policy-player", type=int, choices=(0, 1), default=0)
-    parser.add_argument("--max-steps", type=int, default=250)
+    parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--mountain-density-min", type=float, default=0.12)
     parser.add_argument("--mountain-density-max", type=float, default=0.22)
     parser.add_argument("--num-cities-min", type=int, default=4)
