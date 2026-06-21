@@ -24,6 +24,20 @@ def test_parse_grid_sizes_and_auto_distances():
     assert min_distance_for_size(16) == 9
 
 
+def test_parse_policy_players_accepts_focused_seats():
+    import pytest
+
+    from examples._experimental.ppo.evaluate_adaptive_policy import parse_policy_players
+
+    assert parse_policy_players("0,1") == (0, 1)
+    assert parse_policy_players("1") == (1,)
+    assert parse_policy_players("1,0") == (1, 0)
+
+    for value in ("", "2", "0,0", "0,2"):
+        with pytest.raises(ValueError):
+            parse_policy_players(value)
+
+
 def test_parse_grid_size_weights_requires_matching_positive_sizes():
     import pytest
 
@@ -2565,6 +2579,20 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
     data = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert "adaptive policy evaluation" in completed.stdout.lower()
+    assert data["policy_players"] == [0, 1]
     assert len(data["rows"]) == 4
     assert {row["grid_size"] for row in data["rows"]} == {4, 6}
     assert {row["policy_player"] for row in data["rows"]} == {0, 1}
+
+    focused_output_path = tmp_path / "adaptive-eval-p1.json"
+    focused_cmd = list(cmd)
+    focused_cmd[focused_cmd.index("--json-output") + 1] = str(focused_output_path)
+    focused_cmd.extend(["--policy-players", "1"])
+
+    subprocess.run(focused_cmd, check=True, text=True, capture_output=True, env=env)
+    focused_data = json.loads(focused_output_path.read_text(encoding="utf-8"))
+
+    assert focused_data["policy_players"] == [1]
+    assert len(focused_data["rows"]) == 2
+    assert {row["grid_size"] for row in focused_data["rows"]} == {4, 6}
+    assert {row["policy_player"] for row in focused_data["rows"]} == {1}

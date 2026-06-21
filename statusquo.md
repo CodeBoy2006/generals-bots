@@ -1514,3 +1514,9 @@
 - **Status:** Completed
 - **Next Steps:** Continue fixed-v5 and Expander research iteration from a passing baseline.
 - **Context:** Baseline `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` now passes `215 passed in 130.37s`. Sandbox CUDA probing fails with `CUDA_ERROR_NO_DEVICE`, but the same JAX probe succeeds under escalation with backend `gpu` and `CudaDevice(id=0)`.
+
+## [2026-06-21 10:46] Focused Seat Eval and 12/16 Search Compression Probe
+- **Changes:** Added `evaluate_adaptive_policy.py --policy-players` for focused seat evaluation, documented it in `README.md`, and added parser/CLI tests. Trained two ignored 12/16 Expander search-compression policy-head adapters under `runs/adaptive-expander-1216-search-policy-v0/` and `runs/adaptive-expander-1216-search-policy-v1-aggressive/`.
+- **Status:** Completed
+- **Next Steps:** Do not continue direct 12/16 policy-head CE/rank compression from these shards. Use focused-seat eval for weak-row checks, and treat expensive 32-step search as a teacher/diagnostic rather than an inner-loop evaluator.
+- **Context:** In-session baselines: static-v1 vs fixed-v5 max500 64-row seed `200001` min `28.12%`; runtime search vs fixed-v5 max500 64-row seed `200021` min `56.25%`; runtime search vs Expander 8/12/16 64-row seed `200041` min `89.06%`. Model-only Expander seed `200061` min was `73.44%`; late 12/16 adapter v0 dropped to `71.88%`, aggressive v1 dropped to `68.75%`. Stronger 32-step teacher search on larger maps produced completed rows `12p0 90.62%`, `12p1 90.62%`, `16p0 93.75%`, then targeted `16p1 87.50%`; it is strong but too slow for routine triage.

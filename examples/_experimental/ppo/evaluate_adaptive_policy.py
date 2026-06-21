@@ -88,6 +88,18 @@ class AdaptiveEvalRow:
         return data
 
 
+def parse_policy_players(value: str) -> tuple[int, ...]:
+    """Parse a comma-separated list of policy seats for focused evaluation."""
+    players = tuple(int(part.strip()) for part in value.split(",") if part.strip())
+    if not players:
+        raise ValueError("at least one policy player is required")
+    if any(player not in (0, 1) for player in players):
+        raise ValueError("--policy-players entries must be 0 or 1")
+    if len(set(players)) != len(players):
+        raise ValueError("--policy-players cannot repeat a seat")
+    return players
+
+
 @eqx.filter_jit
 def _policy_action(
     network,
@@ -2116,6 +2128,11 @@ def parse_args():
     parser.add_argument("--pad-to", type=int, default=16)
     parser.add_argument("--num-games", type=int, default=1024)
     parser.add_argument(
+        "--policy-players",
+        default="0,1",
+        help="Comma-separated policy seats to evaluate. Defaults to both seats: 0,1.",
+    )
+    parser.add_argument(
         "--eval-batch-size",
         type=int,
         default=0,
@@ -2349,6 +2366,10 @@ def parse_args():
 
     try:
         args.grid_sizes = parse_grid_sizes(args.grid_sizes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        args.policy_players = parse_policy_players(args.policy_players)
     except ValueError as exc:
         parser.error(str(exc))
     try:
@@ -2873,6 +2894,7 @@ def main():
     print(f"Model:       {args.model_path}")
     print(f"Device:      {jax.devices()[0]}")
     print(f"Grid sizes:  {','.join(str(size) for size in args.grid_sizes)} padded to {args.pad_to}")
+    print(f"Policy seats:{','.join(str(player) for player in args.policy_players)}")
     if opponent_network is None:
         print(f"Opponent:    {args.opponent}")
     else:
@@ -3045,7 +3067,7 @@ def main():
     print()
 
     for grid_size in args.grid_sizes:
-        for policy_player in (0, 1):
+        for policy_player in args.policy_players:
             t0 = time.time()
             wins = 0
             losses = 0
@@ -3262,6 +3284,7 @@ def main():
     payload = {
         "model_path": args.model_path,
         "grid_sizes": list(args.grid_sizes),
+        "policy_players": list(args.policy_players),
         "pad_to": args.pad_to,
         "opponent": args.opponent,
         "opponent_policy_path": args.opponent_policy_path,
