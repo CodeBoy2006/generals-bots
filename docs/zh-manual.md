@@ -933,4 +933,4 @@ JAX JIT 适合静态形状和函数式数据流。预生成 state pool 后，终
 --feature-value-bins 128
 ```
 
-不要把 v4 base 当作 per-size value checkpoint 加载。当前 scorer 只作为离线诊断：strict-conversion rows 有迁移信号，但独立验证样本仍小，且 final epoch 容易过拟合，暂不应直接接入 gameplay 推理。
+不要把 v4 base 当作 per-size value checkpoint 加载。`evaluate_adaptive_policy.py --candidate-scorer-path <scorer.eqx> --candidate-scorer-top-k <k>` 现在可以把 base+local-channel scorer sidecar 接入 gameplay，作为低成本 top-k 动作选择器，并支持 `--candidate-scorer-min-turn`、`--candidate-scorer-require-contact`、尺寸 gate 和 `--candidate-scorer-min-score-gap`。带 heatmap 或 frozen-trunk 额外特征的 scorer 仍然只适合离线诊断，因为这些特征还没有在线推理实现。

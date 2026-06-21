@@ -1520,3 +1520,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not continue direct 12/16 policy-head CE/rank compression from these shards. Use focused-seat eval for weak-row checks, and treat expensive 32-step search as a teacher/diagnostic rather than an inner-loop evaluator.
 - **Context:** In-session baselines: static-v1 vs fixed-v5 max500 64-row seed `200001` min `28.12%`; runtime search vs fixed-v5 max500 64-row seed `200021` min `56.25%`; runtime search vs Expander 8/12/16 64-row seed `200041` min `89.06%`. Model-only Expander seed `200061` min was `73.44%`; late 12/16 adapter v0 dropped to `71.88%`, aggressive v1 dropped to `68.75%`. Stronger 32-step teacher search on larger maps produced completed rows `12p0 90.62%`, `12p1 90.62%`, `16p0 93.75%`, then targeted `16p1 87.50%`; it is strong but too slow for routine triage.
+
+## [2026-06-21 11:04] Candidate Scorer Deployment Hook
+- **Changes:** Added `evaluate_adaptive_policy.py --candidate-scorer-*` to deploy base+local-channel online-search candidate scorers as a cheap top-k action selector, with parser validation, JSON metadata, README/Chinese manual docs, and focused tests.
+- **Status:** Completed
+- **Next Steps:** Keep the hook for diagnostics, but do not promote the existing rpa2 MLP scorer. The next controller should use richer model/state features or move inside the U-Net policy/conditional head rather than threshold-sweeping this scorer.
+- **Context:** `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` passed `218 passed in 138.64s`. Feature parity against saved rpa2 shards matched offline extraction to `1.19e-07`, so gameplay failure is not a feature-order bug. GPU probe `v4 + static conversion adapter v1 + rpa2-v1 scorer top4 turn>=80/contact` vs fixed-v5 max500 64 games/seat seed `200201` scored p0 `1.56%`, p1 `7.81%`, min `1.56%`; offline scorer gap calibration also worsened with threshold (`gap>=0.5` kept `7.6%` rows at `30.4%` top1).

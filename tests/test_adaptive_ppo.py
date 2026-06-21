@@ -38,6 +38,80 @@ def test_parse_policy_players_accepts_focused_seats():
             parse_policy_players(value)
 
 
+def test_candidate_scorer_sidecar_loads_best_checkpoint(tmp_path):
+    import json
+
+    import equinox as eqx
+
+    from examples._experimental.ppo.evaluate_adaptive_policy import (
+        OnlineSearchCandidateScorer,
+        candidate_scorer_feature_names,
+        load_candidate_scorer,
+    )
+
+    feature_names = candidate_scorer_feature_names(local_channels=2)
+    model = OnlineSearchCandidateScorer(jrandom.PRNGKey(0), input_dim=len(feature_names), hidden_dim=4)
+    model_path = tmp_path / "candidate.eqx"
+    best_path = tmp_path / "candidate.best.eqx"
+    eqx.tree_serialise_leaves(model_path, model)
+    eqx.tree_serialise_leaves(best_path, model)
+    model_path.with_suffix(".json").write_text(
+        json.dumps({"feature_names": feature_names, "hidden_dim": 4}),
+        encoding="utf-8",
+    )
+
+    loaded, local_channels, loaded_feature_names = load_candidate_scorer(str(best_path))
+
+    assert local_channels == 2
+    assert loaded_feature_names == feature_names
+    assert jnp.isfinite(loaded(jnp.zeros((len(feature_names),), dtype=jnp.float32)))
+
+
+def test_candidate_scorer_features_match_online_layout():
+    from examples._experimental.ppo.adaptive_common import (
+        adaptive_action_space_size,
+        adaptive_action_to_index,
+        adaptive_obs_to_array,
+        compute_adaptive_valid_move_mask,
+    )
+    from examples._experimental.ppo.evaluate_adaptive_policy import (
+        candidate_scorer_feature_names,
+        candidate_scorer_features,
+    )
+
+    pad_size = 6
+    state = make_padded_state(size=4, pad_to=pad_size)
+    obs = game.get_observation(state, 0)
+    obs_arr, active = adaptive_obs_to_array(obs, effective_size=4, pad_size=pad_size)
+    mask = compute_adaptive_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains, 4, pad_size)
+    move = jnp.array([0, 0, 0, 1, 0], dtype=jnp.int32)
+    candidate_indices = jnp.array(
+        [adaptive_action_to_index(move, pad_size), adaptive_action_space_size(pad_size) - 1],
+        dtype=jnp.int32,
+    )
+    prior_scores = jnp.array([2.0, 0.5], dtype=jnp.float32)
+    logits = jnp.zeros((adaptive_action_space_size(pad_size),), dtype=jnp.float32)
+
+    features = candidate_scorer_features(
+        obs_arr,
+        active,
+        mask,
+        logits,
+        move,
+        candidate_indices,
+        prior_scores,
+        effective_size=4,
+        time=jnp.asarray(12, dtype=jnp.int32),
+        policy_player=0,
+        max_steps=100,
+        pad_size=pad_size,
+        local_channels=3,
+    )
+
+    assert features.shape == (2, len(candidate_scorer_feature_names(local_channels=3)))
+    assert jnp.all(jnp.isfinite(features))
+
+
 def test_parse_grid_size_weights_requires_matching_positive_sizes():
     import pytest
 
@@ -2580,6 +2654,9 @@ def test_evaluate_adaptive_policy_cli_writes_size_rows(tmp_path):
 
     assert "adaptive policy evaluation" in completed.stdout.lower()
     assert data["policy_players"] == [0, 1]
+    assert data["candidate_scorer_path"] is None
+    assert data["candidate_scorer_top_k"] == 0
+    assert data["candidate_scorer_feature_names"] == []
     assert len(data["rows"]) == 4
     assert {row["grid_size"] for row in data["rows"]} == {4, 6}
     assert {row["policy_player"] for row in data["rows"]} == {0, 1}

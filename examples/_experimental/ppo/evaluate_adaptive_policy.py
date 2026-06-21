@@ -53,6 +53,140 @@ PLAN_WORKER_COMMAND_SOURCE_TO_ID = {name: index for index, name in enumerate(PLA
 POLICY_ADAPTER_MODE_NAMES = ("delta", "blend", "replace")
 POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODE_NAMES)}
 ONLINE_SEARCH_GATE_FEATURE_DIM = 17
+CANDIDATE_SCORER_BASE_FEATURE_NAMES = (
+    "prior_score",
+    "prior_rank",
+    "candidate_minus_base_prior",
+    "candidate_is_base_action",
+    "is_pass",
+    "is_half",
+    "dir_up",
+    "dir_down",
+    "dir_left",
+    "dir_right",
+    "source_row_norm",
+    "source_col_norm",
+    "dest_row_norm",
+    "dest_col_norm",
+    "source_active",
+    "dest_active",
+    "source_legal_dir",
+    "source_army_log",
+    "dest_army_log",
+    "source_owned",
+    "dest_owned",
+    "dest_enemy",
+    "dest_neutral",
+    "dest_city",
+    "dest_fog",
+    "dest_structure_fog",
+    "source_general",
+    "dest_general",
+    "full_capture_margin_log",
+    "half_capture_margin_log",
+    "time_norm",
+    "seat",
+    "grid_norm",
+    "active_fraction",
+    "visible_enemy_density",
+    "contact",
+)
+
+
+class OnlineSearchCandidateScorer(eqx.Module):
+    """Small normalized MLP used to score top-k primitive candidates at inference."""
+
+    linear1: eqx.nn.Linear
+    linear2: eqx.nn.Linear
+    linear3: eqx.nn.Linear
+    feature_mean: jnp.ndarray
+    feature_std: jnp.ndarray
+    input_dim: int = eqx.field(static=True)
+    hidden_dim: int = eqx.field(static=True)
+
+    def __init__(
+        self,
+        key: jnp.ndarray,
+        input_dim: int,
+        hidden_dim: int = 128,
+        feature_mean: jnp.ndarray | None = None,
+        feature_std: jnp.ndarray | None = None,
+    ):
+        key1, key2, key3 = jrandom.split(key, 3)
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.linear1 = eqx.nn.Linear(self.input_dim, self.hidden_dim, key=key1)
+        self.linear2 = eqx.nn.Linear(self.hidden_dim, self.hidden_dim, key=key2)
+        self.linear3 = eqx.nn.Linear(self.hidden_dim, 1, key=key3)
+        self.feature_mean = (
+            jnp.zeros((self.input_dim,), dtype=jnp.float32)
+            if feature_mean is None
+            else jnp.asarray(feature_mean, dtype=jnp.float32)
+        )
+        self.feature_std = (
+            jnp.ones((self.input_dim,), dtype=jnp.float32)
+            if feature_std is None
+            else jnp.asarray(feature_std, dtype=jnp.float32)
+        )
+
+    def __call__(self, features: jnp.ndarray) -> jnp.ndarray:
+        feature_mean = jax.lax.stop_gradient(self.feature_mean)
+        feature_std = jnp.maximum(jax.lax.stop_gradient(self.feature_std), 1.0e-6)
+        x = (features - feature_mean) / feature_std
+        x = jax.nn.relu(self.linear1(x))
+        x = jax.nn.relu(self.linear2(x))
+        return self.linear3(x)[0]
+
+
+def candidate_scorer_feature_names(local_channels: int) -> list[str]:
+    """Return the currently supported online candidate-scorer feature layout."""
+    names = list(CANDIDATE_SCORER_BASE_FEATURE_NAMES)
+    names.extend(f"source_ch{idx}" for idx in range(local_channels))
+    names.extend(f"dest_ch{idx}" for idx in range(local_channels))
+    names.extend(f"source_minus_dest_ch{idx}" for idx in range(local_channels))
+    return names
+
+
+def candidate_scorer_sidecar_path(model_path: Path) -> Path:
+    """Return the JSON metadata path for a candidate scorer checkpoint."""
+    direct = model_path.with_suffix(".json")
+    if direct.exists():
+        return direct
+    if model_path.stem.endswith(".best"):
+        fallback = model_path.with_name(model_path.stem.removesuffix(".best") + ".json")
+        if fallback.exists():
+            return fallback
+    return direct
+
+
+def load_candidate_scorer(model_path: str, seed: int = 0) -> tuple[OnlineSearchCandidateScorer, int, list[str]]:
+    """Load an offline candidate scorer and validate its online feature schema."""
+    path = Path(model_path)
+    sidecar_path = candidate_scorer_sidecar_path(path)
+    if not sidecar_path.exists():
+        raise FileNotFoundError(f"Candidate-scorer sidecar not found: {sidecar_path}")
+    metadata = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    feature_names = list(metadata.get("feature_names", ()))
+    if not feature_names:
+        raise ValueError("Candidate-scorer sidecar is missing feature_names")
+    base_dim = len(CANDIDATE_SCORER_BASE_FEATURE_NAMES)
+    extra_dim = len(feature_names) - base_dim
+    if extra_dim < 0 or extra_dim % 3 != 0:
+        raise ValueError("Candidate-scorer feature layout is not supported by online evaluation")
+    local_channels = extra_dim // 3
+    expected_names = candidate_scorer_feature_names(local_channels)
+    if feature_names != expected_names:
+        raise ValueError(
+            "Candidate-scorer online evaluation currently supports only base+local-channel "
+            "feature sidecars without heatmap or trunk features"
+        )
+    hidden_dim = int(metadata.get("hidden_dim", 128))
+    template = OnlineSearchCandidateScorer(
+        jrandom.PRNGKey(seed),
+        input_dim=len(feature_names),
+        hidden_dim=hidden_dim,
+    )
+    return eqx.tree_deserialise_leaves(path, template), local_channels, feature_names
 
 
 @dataclass(frozen=True)
@@ -604,6 +738,172 @@ def adapter_policy_action_with_memory(
         None,
     )
     return adaptive_index_to_action(index, pad_size), current_scoreboard, current_memory
+
+
+def candidate_scorer_features(
+    obs_arr: jnp.ndarray,
+    active: jnp.ndarray,
+    mask: jnp.ndarray,
+    policy_logits: jnp.ndarray,
+    fallback_action: jnp.ndarray,
+    candidate_indices: jnp.ndarray,
+    prior_scores: jnp.ndarray,
+    effective_size: int,
+    time: jnp.ndarray,
+    policy_player: int,
+    max_steps: int,
+    pad_size: int,
+    local_channels: int,
+) -> jnp.ndarray:
+    """Build online features matching adaptive_online_search_candidate_scorer.py."""
+    top_k = candidate_indices.shape[0]
+    pass_index = ADAPTIVE_MOVE_PLANES * pad_size * pad_size
+    safe_indices = jnp.minimum(jnp.clip(candidate_indices, 0, pass_index), pass_index - 1)
+    plane = safe_indices // (pad_size * pad_size)
+    position = safe_indices % (pad_size * pad_size)
+    source_row = position // pad_size
+    source_col = position % pad_size
+    direction = plane % 4
+    is_pass = candidate_indices == pass_index
+    is_half = plane >= 4
+    direction_deltas = jnp.asarray(DIRECTIONS, dtype=jnp.int32)
+    raw_dest_row = source_row + direction_deltas[direction, 0]
+    raw_dest_col = source_col + direction_deltas[direction, 1]
+    dest_in_bounds = (
+        (raw_dest_row >= 0)
+        & (raw_dest_row < pad_size)
+        & (raw_dest_col >= 0)
+        & (raw_dest_col < pad_size)
+    )
+    dest_row = jnp.clip(raw_dest_row, 0, pad_size - 1)
+    dest_col = jnp.clip(raw_dest_col, 0, pad_size - 1)
+
+    source_planes = jnp.moveaxis(obs_arr[:, source_row, source_col], 0, 1)
+    dest_planes = jnp.moveaxis(obs_arr[:, dest_row, dest_col], 0, 1)
+    source_active = active[source_row, source_col]
+    dest_active = active[dest_row, dest_col] & dest_in_bounds
+    source_legal_dir = mask[source_row, source_col, direction]
+    fallback_index = adaptive_action_to_index(fallback_action, pad_size)
+    fallback_prior = policy_logits[fallback_index]
+    source_army = source_planes[:, 0]
+    dest_army = dest_planes[:, 0]
+    move_all = jnp.maximum(jnp.expm1(jnp.maximum(source_army, 0.0)) - 1.0, 0.0)
+    move_half = jnp.floor(jnp.maximum(jnp.expm1(jnp.maximum(source_army, 0.0)), 0.0) / 2.0)
+    dest_army_raw = jnp.maximum(jnp.expm1(jnp.maximum(dest_army, 0.0)), 0.0)
+    active_float = active.astype(jnp.float32)
+    active_fraction = jnp.mean(active_float)
+    active_count = jnp.maximum(jnp.sum(active_float), 1.0)
+    visible_enemy_density = jnp.sum(obs_arr[6] * active_float) / active_count
+    contact = (visible_enemy_density > 0.0).astype(jnp.float32)
+    rank_denom = jnp.maximum(jnp.asarray(top_k - 1, dtype=jnp.float32), 1.0)
+    coords_denom = jnp.maximum(jnp.asarray(pad_size - 1, dtype=jnp.float32), 1.0)
+
+    feature_parts = [
+        prior_scores[:, None],
+        (jnp.arange(top_k, dtype=jnp.float32) / rank_denom)[:, None],
+        (prior_scores - fallback_prior)[:, None],
+        (candidate_indices == fallback_index).astype(jnp.float32)[:, None],
+        is_pass.astype(jnp.float32)[:, None],
+        is_half.astype(jnp.float32)[:, None],
+        jax.nn.one_hot(direction, 4, dtype=jnp.float32),
+        (source_row.astype(jnp.float32) / coords_denom)[:, None],
+        (source_col.astype(jnp.float32) / coords_denom)[:, None],
+        (dest_row.astype(jnp.float32) / coords_denom)[:, None],
+        (dest_col.astype(jnp.float32) / coords_denom)[:, None],
+        source_active.astype(jnp.float32)[:, None],
+        dest_active.astype(jnp.float32)[:, None],
+        source_legal_dir.astype(jnp.float32)[:, None],
+        source_army[:, None],
+        dest_army[:, None],
+        source_planes[:, 5:6],
+        dest_planes[:, 5:6],
+        dest_planes[:, 6:7],
+        dest_planes[:, 4:5],
+        dest_planes[:, 2:3],
+        dest_planes[:, 7:8],
+        dest_planes[:, 8:9],
+        (source_planes[:, 1:2] * source_planes[:, 5:6]),
+        (dest_planes[:, 1:2] * dest_planes[:, 6:7]),
+        jnp.log1p(jnp.maximum(move_all - dest_army_raw, 0.0))[:, None],
+        jnp.log1p(jnp.maximum(move_half - dest_army_raw, 0.0))[:, None],
+        jnp.full((top_k, 1), time.astype(jnp.float32) / jnp.asarray(max(max_steps, 1), dtype=jnp.float32)),
+        jnp.full((top_k, 1), jnp.asarray(policy_player, dtype=jnp.float32)),
+        jnp.full((top_k, 1), jnp.asarray(effective_size / max(pad_size, 1), dtype=jnp.float32)),
+        jnp.full((top_k, 1), active_fraction),
+        jnp.full((top_k, 1), visible_enemy_density),
+        jnp.full((top_k, 1), contact),
+    ]
+    kept_channels = min(local_channels, obs_arr.shape[0])
+    if kept_channels > 0:
+        feature_parts.extend(
+            [
+                source_planes[:, :kept_channels],
+                dest_planes[:, :kept_channels],
+                source_planes[:, :kept_channels] - dest_planes[:, :kept_channels],
+            ]
+        )
+    return jnp.concatenate(feature_parts, axis=-1)
+
+
+def candidate_scorer_action(
+    network,
+    policy_adapter_network,
+    candidate_scorer_network,
+    obs_arr: jnp.ndarray,
+    mask: jnp.ndarray,
+    active: jnp.ndarray,
+    fallback_action: jnp.ndarray,
+    effective_size: int,
+    time: jnp.ndarray,
+    policy_player: int,
+    max_steps: int,
+    pad_size: int,
+    policy_adapter_scale: float,
+    policy_adapter_mode: int,
+    policy_adapter_min_grid_size: int,
+    policy_adapter_max_grid_size: int,
+    top_k: int,
+    min_score_gap: float,
+    local_channels: int,
+) -> jnp.ndarray:
+    """Choose a top-k prior action with a learned offline search scorer."""
+    logits = adapter_composed_policy_logits(
+        network,
+        policy_adapter_network,
+        obs_arr,
+        mask,
+        active,
+        effective_size,
+        policy_adapter_scale,
+        policy_adapter_mode,
+        policy_adapter_min_grid_size,
+        policy_adapter_max_grid_size,
+    )
+    prior_scores, candidate_indices = jax.lax.top_k(logits, top_k)
+    features = candidate_scorer_features(
+        obs_arr,
+        active,
+        mask,
+        logits,
+        fallback_action,
+        candidate_indices,
+        prior_scores,
+        effective_size,
+        time,
+        policy_player,
+        max_steps,
+        pad_size,
+        local_channels,
+    )
+    candidate_scores = jax.vmap(candidate_scorer_network)(features)
+    best_position = jnp.argmax(candidate_scores)
+    best_index = candidate_indices[best_position]
+    score_gap = jnp.asarray(jnp.inf, dtype=candidate_scores.dtype)
+    if top_k >= 2:
+        top_scores, _ = jax.lax.top_k(candidate_scores, 2)
+        score_gap = top_scores[0] - top_scores[1]
+    best_action = adaptive_index_to_action(best_index, pad_size)
+    return jnp.where(score_gap >= min_score_gap, best_action, fallback_action)
 
 
 def online_search_action_policy_opponent(
@@ -1457,6 +1757,7 @@ def evaluate_batch(
     late_policy_adapter_network,
     plan_worker_network,
     command_gate_network,
+    candidate_scorer_network,
     states,
     effective_size,
     key,
@@ -1519,6 +1820,13 @@ def evaluate_batch(
     online_search_min_score_gap=0.0,
     online_search_gate_threshold=-1.0,
     online_search_gate_feature_dim=ONLINE_SEARCH_GATE_FEATURE_DIM,
+    candidate_scorer_top_k=0,
+    candidate_scorer_min_turn=0,
+    candidate_scorer_require_contact=False,
+    candidate_scorer_min_grid_size=0,
+    candidate_scorer_max_grid_size=0,
+    candidate_scorer_min_score_gap=0.0,
+    candidate_scorer_local_channels=0,
 ):
     """Evaluate one adaptive checkpoint on one grid size and player seat."""
     num_envs = states.armies.shape[0]
@@ -1550,6 +1858,11 @@ def evaluate_batch(
         and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
     )
     online_search_enabled = online_search_top_k > 0 and online_search_size_allowed
+    candidate_scorer_size_allowed = (
+        (candidate_scorer_min_grid_size <= 0 or effective_size >= candidate_scorer_min_grid_size)
+        and (candidate_scorer_max_grid_size <= 0 or effective_size <= candidate_scorer_max_grid_size)
+    )
+    candidate_scorer_enabled = candidate_scorer_top_k > 0 and candidate_scorer_size_allowed
     initial_adapter_commit = jnp.zeros((num_envs,), dtype=jnp.int32)
 
     def body(carry, _):
@@ -1701,6 +2014,39 @@ def evaluate_batch(
             row_policy_adapter_allowed,
             row_late_policy_adapter_allowed,
         )
+        if candidate_scorer_enabled:
+            visible_contact = jnp.sum(policy_obs.opponent_cells.reshape(num_envs, -1), axis=-1) > 0
+            scorer_turn_allowed = states.time >= candidate_scorer_min_turn
+            scorer_contact_allowed = visible_contact | (not candidate_scorer_require_contact)
+            use_candidate_scorer = (~pre_infos.is_done) & scorer_turn_allowed & scorer_contact_allowed
+            policy_actions = jax.vmap(
+                lambda o, m, a, base_action, turn, use_scorer: jax.lax.cond(
+                    use_scorer,
+                    lambda _: candidate_scorer_action(
+                        network,
+                        policy_adapter_network,
+                        candidate_scorer_network,
+                        o,
+                        m,
+                        a,
+                        base_action,
+                        effective_size,
+                        turn,
+                        policy_player,
+                        max_steps,
+                        pad_size,
+                        size_policy_adapter_scale,
+                        policy_adapter_mode,
+                        policy_adapter_min_grid_size,
+                        policy_adapter_max_grid_size,
+                        candidate_scorer_top_k,
+                        candidate_scorer_min_score_gap,
+                        candidate_scorer_local_channels,
+                    ),
+                    lambda _: base_action,
+                    None,
+                )
+            )(obs_arr, masks, active, policy_actions, states.time, use_candidate_scorer)
         if online_search_enabled:
             key, search_key = jrandom.split(key)
             search_keys = jrandom.split(search_key, num_envs)
@@ -1790,6 +2136,7 @@ def evaluate_policy_opponent_batch(
     late_policy_adapter_network,
     plan_worker_network,
     command_gate_network,
+    candidate_scorer_network,
     opponent_network,
     states,
     effective_size,
@@ -1853,6 +2200,13 @@ def evaluate_policy_opponent_batch(
     online_search_min_score_gap=0.0,
     online_search_gate_threshold=-1.0,
     online_search_gate_feature_dim=ONLINE_SEARCH_GATE_FEATURE_DIM,
+    candidate_scorer_top_k=0,
+    candidate_scorer_min_turn=0,
+    candidate_scorer_require_contact=False,
+    candidate_scorer_min_grid_size=0,
+    candidate_scorer_max_grid_size=0,
+    candidate_scorer_min_score_gap=0.0,
+    candidate_scorer_local_channels=0,
 ):
     """Evaluate one adaptive checkpoint against one fixed-size PPO checkpoint."""
     num_envs = states.armies.shape[0]
@@ -1884,6 +2238,11 @@ def evaluate_policy_opponent_batch(
         and (online_search_max_grid_size <= 0 or effective_size <= online_search_max_grid_size)
     )
     online_search_enabled = online_search_top_k > 0 and online_search_size_allowed
+    candidate_scorer_size_allowed = (
+        (candidate_scorer_min_grid_size <= 0 or effective_size >= candidate_scorer_min_grid_size)
+        and (candidate_scorer_max_grid_size <= 0 or effective_size <= candidate_scorer_max_grid_size)
+    )
+    candidate_scorer_enabled = candidate_scorer_top_k > 0 and candidate_scorer_size_allowed
     initial_adapter_commit = jnp.zeros((num_envs,), dtype=jnp.int32)
 
     def body(carry, _):
@@ -2039,6 +2398,39 @@ def evaluate_policy_opponent_batch(
             row_policy_adapter_allowed,
             row_late_policy_adapter_allowed,
         )
+        if candidate_scorer_enabled:
+            visible_contact = jnp.sum(policy_obs.opponent_cells.reshape(num_envs, -1), axis=-1) > 0
+            scorer_turn_allowed = states.time >= candidate_scorer_min_turn
+            scorer_contact_allowed = visible_contact | (not candidate_scorer_require_contact)
+            use_candidate_scorer = (~pre_infos.is_done) & scorer_turn_allowed & scorer_contact_allowed
+            policy_actions = jax.vmap(
+                lambda o, m, a, base_action, turn, use_scorer: jax.lax.cond(
+                    use_scorer,
+                    lambda _: candidate_scorer_action(
+                        network,
+                        policy_adapter_network,
+                        candidate_scorer_network,
+                        o,
+                        m,
+                        a,
+                        base_action,
+                        effective_size,
+                        turn,
+                        policy_player,
+                        max_steps,
+                        pad_size,
+                        size_policy_adapter_scale,
+                        policy_adapter_mode,
+                        policy_adapter_min_grid_size,
+                        policy_adapter_max_grid_size,
+                        candidate_scorer_top_k,
+                        candidate_scorer_min_score_gap,
+                        candidate_scorer_local_channels,
+                    ),
+                    lambda _: base_action,
+                    None,
+                )
+            )(obs_arr, masks, active, policy_actions, states.time, use_candidate_scorer)
         if online_search_enabled:
             key, search_key = jrandom.split(key)
             search_keys = jrandom.split(search_key, num_envs)
@@ -2359,6 +2751,27 @@ def parse_args():
     parser.add_argument("--online-search-gate-path", default=None)
     parser.add_argument("--online-search-gate-threshold", type=float, default=-1.0)
     parser.add_argument("--online-search-gate-hidden-dim", type=int, default=32)
+    parser.add_argument(
+        "--candidate-scorer-path",
+        default=None,
+        help="Optional offline online-search candidate scorer used as a cheap top-k action selector.",
+    )
+    parser.add_argument(
+        "--candidate-scorer-top-k",
+        type=int,
+        default=0,
+        help="If positive, score this many prior candidates with --candidate-scorer-path.",
+    )
+    parser.add_argument("--candidate-scorer-min-turn", type=int, default=0)
+    parser.add_argument("--candidate-scorer-require-contact", action="store_true")
+    parser.add_argument("--candidate-scorer-min-grid-size", type=int, default=0)
+    parser.add_argument("--candidate-scorer-max-grid-size", type=int, default=0)
+    parser.add_argument(
+        "--candidate-scorer-min-score-gap",
+        type=float,
+        default=0.0,
+        help="If positive, keep the base action unless scorer best-minus-second clears this margin.",
+    )
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--require-win-rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=123)
@@ -2645,6 +3058,34 @@ def parse_args():
         parser.error("--online-search-gate-threshold requires --online-search-top-k > 0")
     if args.online_search_gate_hidden_dim <= 0:
         parser.error("--online-search-gate-hidden-dim must be positive")
+    if args.candidate_scorer_top_k < 0:
+        parser.error("--candidate-scorer-top-k must be non-negative")
+    if args.candidate_scorer_path is not None and args.candidate_scorer_top_k <= 0:
+        parser.error("--candidate-scorer-path requires --candidate-scorer-top-k > 0")
+    if args.candidate_scorer_top_k > 0 and args.candidate_scorer_path is None:
+        parser.error("--candidate-scorer-top-k requires --candidate-scorer-path")
+    if args.candidate_scorer_top_k > 0 and args.online_search_top_k > 0:
+        parser.error("Use either --candidate-scorer-top-k or --online-search-top-k, not both")
+    if args.candidate_scorer_top_k > ADAPTIVE_MOVE_PLANES * args.pad_to * args.pad_to + 1:
+        parser.error("--candidate-scorer-top-k exceeds the adaptive action space")
+    if args.candidate_scorer_top_k > 0 and args.policy_adapter_gate_threshold >= 0.0:
+        parser.error("--candidate-scorer-top-k currently supports ungated policy adapters only")
+    if args.candidate_scorer_top_k > 0 and args.policy_adapter_finish_threshold >= 0.0:
+        parser.error("--candidate-scorer-top-k currently supports ungated policy adapters only")
+    if args.candidate_scorer_top_k > 0 and args.policy_adapter_commit_steps > 0:
+        parser.error("--candidate-scorer-top-k currently does not support policy-adapter commit state")
+    if args.candidate_scorer_min_turn < 0:
+        parser.error("--candidate-scorer-min-turn must be non-negative")
+    if args.candidate_scorer_min_score_gap < 0.0:
+        parser.error("--candidate-scorer-min-score-gap must be non-negative")
+    if args.candidate_scorer_min_grid_size < 0 or args.candidate_scorer_max_grid_size < 0:
+        parser.error("--candidate-scorer-min/max-grid-size must be non-negative")
+    if (
+        args.candidate_scorer_min_grid_size > 0
+        and args.candidate_scorer_max_grid_size > 0
+        and args.candidate_scorer_min_grid_size > args.candidate_scorer_max_grid_size
+    ):
+        parser.error("--candidate-scorer-min-grid-size must be <= --candidate-scorer-max-grid-size")
     learned_gate_count = sum(
         threshold >= 0.0
         for threshold in (
@@ -2873,6 +3314,13 @@ def main():
                 command_gate_feature_dim = len(feature_names)
         command_gate_network = CommandGateNetwork(net_key, input_dim=command_gate_feature_dim, hidden_dim=gate_hidden_dim)
         command_gate_network = eqx.tree_deserialise_leaves(gate_path, command_gate_network)
+    candidate_scorer_network = None
+    candidate_scorer_local_channels = 0
+    candidate_scorer_features_used: list[str] = []
+    if args.candidate_scorer_path is not None:
+        candidate_scorer_network, candidate_scorer_local_channels, candidate_scorer_features_used = (
+            load_candidate_scorer(args.candidate_scorer_path, seed=args.seed + 707)
+        )
     opponent_network = None
     if args.opponent_policy_path is not None:
         opponent_network = PolicyValueNetwork(
@@ -3051,6 +3499,22 @@ def main():
                 "Online search gate: "
                 f"threshold={args.online_search_gate_threshold:g}, feature_dim={command_gate_feature_dim}"
             )
+    if args.candidate_scorer_top_k > 0:
+        if args.candidate_scorer_min_grid_size > 0 or args.candidate_scorer_max_grid_size > 0:
+            min_label = args.candidate_scorer_min_grid_size if args.candidate_scorer_min_grid_size > 0 else "-inf"
+            max_label = args.candidate_scorer_max_grid_size if args.candidate_scorer_max_grid_size > 0 else "inf"
+            size_label = f", size=[{min_label},{max_label}]"
+        else:
+            size_label = ""
+        contact_label = ", contact-only" if args.candidate_scorer_require_contact else ""
+        print(f"Candidate scorer: {args.candidate_scorer_path}")
+        print(
+            "Candidate scorer: "
+            f"top_k={args.candidate_scorer_top_k}, min_turn={args.candidate_scorer_min_turn}, "
+            f"min_score_gap={args.candidate_scorer_min_score_gap:g}, "
+            f"features={len(candidate_scorer_features_used)}, local_channels={candidate_scorer_local_channels}"
+            f"{contact_label}{size_label}"
+        )
     if args.context_residual:
         print("Context res: 5x5 residual branch")
     if args.pyramid_context:
@@ -3103,6 +3567,7 @@ def main():
                         late_policy_adapter_network,
                         plan_worker_network,
                         command_gate_network,
+                        candidate_scorer_network,
                         states,
                         grid_size,
                         eval_key,
@@ -3165,6 +3630,13 @@ def main():
                         args.online_search_min_score_gap,
                         args.online_search_gate_threshold,
                         command_gate_feature_dim,
+                        args.candidate_scorer_top_k,
+                        args.candidate_scorer_min_turn,
+                        args.candidate_scorer_require_contact,
+                        args.candidate_scorer_min_grid_size,
+                        args.candidate_scorer_max_grid_size,
+                        args.candidate_scorer_min_score_gap,
+                        candidate_scorer_local_channels,
                     )
                 else:
                     info, adapter_stats = evaluate_policy_opponent_batch(
@@ -3174,6 +3646,7 @@ def main():
                         late_policy_adapter_network,
                         plan_worker_network,
                         command_gate_network,
+                        candidate_scorer_network,
                         opponent_network,
                         states,
                         grid_size,
@@ -3237,6 +3710,13 @@ def main():
                         args.online_search_min_score_gap,
                         args.online_search_gate_threshold,
                         command_gate_feature_dim,
+                        args.candidate_scorer_top_k,
+                        args.candidate_scorer_min_turn,
+                        args.candidate_scorer_require_contact,
+                        args.candidate_scorer_min_grid_size,
+                        args.candidate_scorer_max_grid_size,
+                        args.candidate_scorer_min_score_gap,
+                        candidate_scorer_local_channels,
                     )
                 jax.block_until_ready(info.winner)
                 row_jax = summarize_row(info, grid_size, policy_player, chunk_games, adapter_stats)
@@ -3371,6 +3851,15 @@ def main():
         "online_search_gate_path": args.online_search_gate_path,
         "online_search_gate_threshold": args.online_search_gate_threshold,
         "online_search_gate_hidden_dim": args.online_search_gate_hidden_dim,
+        "candidate_scorer_path": args.candidate_scorer_path,
+        "candidate_scorer_top_k": args.candidate_scorer_top_k,
+        "candidate_scorer_min_turn": args.candidate_scorer_min_turn,
+        "candidate_scorer_require_contact": args.candidate_scorer_require_contact,
+        "candidate_scorer_min_grid_size": args.candidate_scorer_min_grid_size,
+        "candidate_scorer_max_grid_size": args.candidate_scorer_max_grid_size,
+        "candidate_scorer_min_score_gap": args.candidate_scorer_min_score_gap,
+        "candidate_scorer_local_channels": candidate_scorer_local_channels,
+        "candidate_scorer_feature_names": candidate_scorer_features_used,
         "min_win_rate": min_win_rate,
         "rows": [row.to_dict() for row in rows],
     }
