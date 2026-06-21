@@ -1627,3 +1627,9 @@
 - **Status:** Completed
 - **Next Steps:** Restart the live web service so existing browser sessions use the compiled action path. Online search after turn 80/contact can still be much slower than the base policy because rollout search is intentionally expensive.
 - **Context:** Root cause of the apparent freeze was server-side synchronous action latency, not canvas rendering: live WebSocket ticks were arriving every `2.7-3.0s` despite `tick_rate=2`. Real checkpoint timing after the JIT change measured init `5.046s`, then ticks `1.510s`, `0.400s`, and hot-path ticks around `0.002s`. Verification passed targeted runtime/web tests, `compileall`, `git diff --check`, and full `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `249 passed in 139.27s`.
+
+## [2026-06-21 18:13] README Cleanup
+- **Changes:** Condensed `README.md` into a short project entry point with setup, quick run commands, Web service pointer, current model status, training script index, verification commands, and artifact policy. Removed the long raw experiment command/log sections and linked to the detailed manuals instead.
+- **Status:** Completed
+- **Next Steps:** Keep future long recipes and training logs in `docs/zh-manual.md`, `docs/expander-training-strategy.md`, `docs/devlogs/`, or `statusquo.md` rather than expanding README again.
+- **Context:** README is now 96 lines, down from 1116 lines. `git diff --check` passed, linked docs/directories exist, and obsolete guessed script paths were corrected to the actual `examples/*_example.py` and `examples/_experimental/ppo/*.py` locations.
