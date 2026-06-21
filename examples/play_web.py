@@ -93,6 +93,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-army-weight", type=float, default=12.0)
     parser.add_argument("--search-land-weight", type=float, default=8.0)
     parser.add_argument("--search-prior-weight", type=float, default=0.01)
+    parser.add_argument("--adaptive-policy", action="store_true", help="Load player 0 as an adaptive checkpoint.")
+    parser.add_argument(
+        "--opponent-adaptive-policy",
+        action="store_true",
+        help="Load player 1 as an adaptive checkpoint.",
+    )
+    parser.add_argument("--pad-to", type=int, default=16)
+    parser.add_argument("--network-arch", choices=("cnn", "unet"), default="cnn")
+    parser.add_argument("--channels", default=None)
+    parser.add_argument("--global-context", action="store_true")
+    parser.add_argument("--scoreboard-history", action="store_true")
+    parser.add_argument("--fog-memory", action="store_true")
+    parser.add_argument("--value-loss", choices=("mse", "hl-gauss"), default="mse")
+    parser.add_argument("--value-bins", type=int, default=128)
+    parser.add_argument("--value-min", type=float, default=-1.0)
+    parser.add_argument("--value-max", type=float, default=1.0)
+    parser.add_argument("--value-sigma", type=float, default=0.04)
+    parser.add_argument("--policy-adapter-path", default=None)
+    parser.add_argument("--policy-adapter-scale", type=float, default=0.0)
+    parser.add_argument("--policy-adapter-mode", choices=("delta", "blend", "replace"), default="delta")
+    parser.add_argument("--policy-adapter-min-grid-size", type=int, default=0)
+    parser.add_argument("--policy-adapter-max-grid-size", type=int, default=0)
+    parser.add_argument(
+        "--adaptive-online-search",
+        action="store_true",
+        help="Run adaptive top-k rollout search after the adaptive policy chooses a fallback action.",
+    )
+    parser.add_argument("--online-search-min-turn", type=int, default=0)
+    parser.add_argument("--online-search-require-contact", action="store_true")
+    parser.add_argument("--online-search-min-grid-size", type=int, default=0)
+    parser.add_argument("--online-search-max-grid-size", type=int, default=0)
+    parser.add_argument("--online-search-terminal-score", type=float, default=100.0)
+    parser.add_argument("--online-search-min-score-gap", type=float, default=0.0)
+    parser.add_argument("--online-search-max-steps", type=int, default=750)
+    parser.add_argument("--adaptive-online-search-opponent-path", default=None)
+    parser.add_argument(
+        "--adaptive-online-search-opponent-policy-mode",
+        choices=("greedy", "sample"),
+        default="sample",
+    )
+    parser.add_argument("--adaptive-online-search-opponent-channels", default=None)
+    parser.add_argument("--adaptive-online-search-opponent-input-channels", type=int, default=9)
     parser.add_argument("--policy-input", choices=POLICY_INPUT_CHOICES, default=None)
     parser.add_argument("--model-0-policy-input", choices=POLICY_INPUT_CHOICES, default=None)
     parser.add_argument("--model-1-policy-input", choices=POLICY_INPUT_CHOICES, default=None)
@@ -123,6 +165,55 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-steps must be non-negative")
     if not (1 <= args.preview_top_k <= 5):
         parser.error("--preview-top-k must be between 1 and 5")
+    if args.search_top_k <= 0:
+        parser.error("--search-top-k must be positive")
+    if args.search_rollout_steps <= 0:
+        parser.error("--search-rollout-steps must be positive")
+    if args.search_rollouts_per_action <= 0:
+        parser.error("--search-rollouts-per-action must be positive")
+    if args.adaptive_policy and args.search_policy:
+        parser.error("Use --adaptive-online-search with --adaptive-policy instead of --search-policy")
+    if args.opponent_adaptive_policy and args.opponent_search_policy:
+        parser.error("Use --adaptive-online-search with --opponent-adaptive-policy instead of --opponent-search-policy")
+    if args.pad_to < args.grid_size:
+        parser.error("--pad-to must be at least --grid-size")
+    if args.value_loss == "hl-gauss":
+        if args.value_bins <= 1:
+            parser.error("--value-bins must be greater than 1 for --value-loss hl-gauss")
+        if args.value_min >= args.value_max:
+            parser.error("--value-min must be less than --value-max")
+        if args.value_sigma <= 0.0:
+            parser.error("--value-sigma must be positive")
+    if args.policy_adapter_scale < 0.0:
+        parser.error("--policy-adapter-scale must be non-negative")
+    if args.policy_adapter_scale > 0.0 and args.policy_adapter_path is None:
+        parser.error("--policy-adapter-scale requires --policy-adapter-path")
+    if args.policy_adapter_min_grid_size < 0 or args.policy_adapter_max_grid_size < 0:
+        parser.error("--policy-adapter-min/max-grid-size must be non-negative")
+    if (
+        args.policy_adapter_min_grid_size > 0
+        and args.policy_adapter_max_grid_size > 0
+        and args.policy_adapter_min_grid_size > args.policy_adapter_max_grid_size
+    ):
+        parser.error("--policy-adapter-min-grid-size must be <= --policy-adapter-max-grid-size")
+    if args.adaptive_online_search and not (args.adaptive_policy or args.opponent_adaptive_policy):
+        parser.error("--adaptive-online-search requires --adaptive-policy or --opponent-adaptive-policy")
+    if args.online_search_min_turn < 0:
+        parser.error("--online-search-min-turn must be non-negative")
+    if args.online_search_min_grid_size < 0 or args.online_search_max_grid_size < 0:
+        parser.error("--online-search-min/max-grid-size must be non-negative")
+    if (
+        args.online_search_min_grid_size > 0
+        and args.online_search_max_grid_size > 0
+        and args.online_search_min_grid_size > args.online_search_max_grid_size
+    ):
+        parser.error("--online-search-min-grid-size must be <= --online-search-max-grid-size")
+    if args.online_search_min_score_gap < 0.0:
+        parser.error("--online-search-min-score-gap must be non-negative")
+    if args.online_search_max_steps <= 0:
+        parser.error("--online-search-max-steps must be positive")
+    if args.adaptive_online_search_opponent_input_channels <= 0:
+        parser.error("--adaptive-online-search-opponent-input-channels must be positive")
     if not (0.0 <= args.mountain_density_min <= args.mountain_density_max <= 1.0):
         parser.error("mountain density must satisfy 0 <= min <= max <= 1")
     if not (2 <= args.num_cities_min <= args.num_cities_max):
@@ -180,6 +271,36 @@ def args_to_config(args: argparse.Namespace) -> WebSessionConfig:
         search_army_weight=args.search_army_weight,
         search_land_weight=args.search_land_weight,
         search_prior_weight=args.search_prior_weight,
+        adaptive_policy=args.adaptive_policy,
+        opponent_adaptive_policy=args.opponent_adaptive_policy,
+        pad_to=args.pad_to,
+        network_arch=args.network_arch,
+        channels=args.channels,
+        global_context=args.global_context,
+        scoreboard_history=args.scoreboard_history,
+        fog_memory=args.fog_memory,
+        value_loss=args.value_loss,
+        value_bins=args.value_bins,
+        value_min=args.value_min,
+        value_max=args.value_max,
+        value_sigma=args.value_sigma,
+        policy_adapter_path=args.policy_adapter_path,
+        policy_adapter_scale=args.policy_adapter_scale,
+        policy_adapter_mode=args.policy_adapter_mode,
+        policy_adapter_min_grid_size=args.policy_adapter_min_grid_size,
+        policy_adapter_max_grid_size=args.policy_adapter_max_grid_size,
+        adaptive_online_search=args.adaptive_online_search,
+        online_search_min_turn=args.online_search_min_turn,
+        online_search_require_contact=args.online_search_require_contact,
+        online_search_min_grid_size=args.online_search_min_grid_size,
+        online_search_max_grid_size=args.online_search_max_grid_size,
+        online_search_terminal_score=args.online_search_terminal_score,
+        online_search_min_score_gap=args.online_search_min_score_gap,
+        online_search_max_steps=args.online_search_max_steps,
+        adaptive_online_search_opponent_path=args.adaptive_online_search_opponent_path,
+        adaptive_online_search_opponent_policy_mode=args.adaptive_online_search_opponent_policy_mode,
+        adaptive_online_search_opponent_channels=args.adaptive_online_search_opponent_channels,
+        adaptive_online_search_opponent_input_channels=args.adaptive_online_search_opponent_input_channels,
         mountain_density_min=args.mountain_density_min,
         mountain_density_max=args.mountain_density_max,
         num_cities_min=args.num_cities_min,

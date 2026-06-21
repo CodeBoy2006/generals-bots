@@ -57,6 +57,36 @@ class WebSessionConfig:
     search_army_weight: float = 12.0
     search_land_weight: float = 8.0
     search_prior_weight: float = 0.01
+    adaptive_policy: bool = False
+    opponent_adaptive_policy: bool = False
+    pad_to: int = 16
+    network_arch: str = "cnn"
+    channels: str | None = None
+    global_context: bool = False
+    scoreboard_history: bool = False
+    fog_memory: bool = False
+    value_loss: str = "mse"
+    value_bins: int = 128
+    value_min: float = -1.0
+    value_max: float = 1.0
+    value_sigma: float = 0.04
+    policy_adapter_path: str | None = None
+    policy_adapter_scale: float = 0.0
+    policy_adapter_mode: str = "delta"
+    policy_adapter_min_grid_size: int = 0
+    policy_adapter_max_grid_size: int = 0
+    adaptive_online_search: bool = False
+    online_search_min_turn: int = 0
+    online_search_require_contact: bool = False
+    online_search_min_grid_size: int = 0
+    online_search_max_grid_size: int = 0
+    online_search_terminal_score: float = 100.0
+    online_search_min_score_gap: float = 0.0
+    online_search_max_steps: int = 750
+    adaptive_online_search_opponent_path: str | None = None
+    adaptive_online_search_opponent_policy_mode: str = "sample"
+    adaptive_online_search_opponent_channels: str | None = None
+    adaptive_online_search_opponent_input_channels: int = 9
     mountain_density_min: float = 0.12
     mountain_density_max: float = 0.22
     num_cities_min: int = 4
@@ -155,7 +185,13 @@ class WebGameSession:
     @classmethod
     def from_config(cls, config: WebSessionConfig) -> "WebGameSession":
         """Build a session from CLI/server configuration."""
-        from generals.agents.ppo_runtime import make_grid, make_player_names, make_policy_agent, make_search_config
+        from generals.agents.ppo_runtime import (
+            AdaptiveRuntimeConfig,
+            make_grid,
+            make_player_names,
+            make_policy_agent,
+            make_search_config,
+        )
 
         args = _config_namespace(config)
         key = jrandom.PRNGKey(config.seed)
@@ -185,6 +221,41 @@ class WebGameSession:
             policy_input = config.model_0_policy_input if player == 0 else config.model_1_policy_input
             input_channels = config.model_0_input_channels if player == 0 else config.model_1_input_channels
             use_search = config.search_policy if player == 0 else config.opponent_search_policy
+            use_adaptive = config.adaptive_policy if player == 0 else config.opponent_adaptive_policy
+            adaptive_config = (
+                AdaptiveRuntimeConfig(
+                    pad_to=config.pad_to,
+                    network_arch=config.network_arch,
+                    channels=config.channels,
+                    global_context=config.global_context,
+                    scoreboard_history=config.scoreboard_history,
+                    fog_memory=config.fog_memory,
+                    value_loss=config.value_loss,
+                    value_bins=config.value_bins,
+                    value_min=config.value_min,
+                    value_max=config.value_max,
+                    value_sigma=config.value_sigma,
+                    policy_adapter_path=config.policy_adapter_path,
+                    policy_adapter_scale=config.policy_adapter_scale,
+                    policy_adapter_mode=config.policy_adapter_mode,
+                    policy_adapter_min_grid_size=config.policy_adapter_min_grid_size,
+                    policy_adapter_max_grid_size=config.policy_adapter_max_grid_size,
+                    online_search=config.adaptive_online_search,
+                    online_search_min_turn=config.online_search_min_turn,
+                    online_search_require_contact=config.online_search_require_contact,
+                    online_search_min_grid_size=config.online_search_min_grid_size,
+                    online_search_max_grid_size=config.online_search_max_grid_size,
+                    online_search_terminal_score=config.online_search_terminal_score,
+                    online_search_min_score_gap=config.online_search_min_score_gap,
+                    online_search_max_steps=config.online_search_max_steps,
+                    online_search_opponent_path=config.adaptive_online_search_opponent_path,
+                    online_search_opponent_policy_mode=config.adaptive_online_search_opponent_policy_mode,
+                    online_search_opponent_channels=config.adaptive_online_search_opponent_channels,
+                    online_search_opponent_input_channels=config.adaptive_online_search_opponent_input_channels,
+                )
+                if use_adaptive
+                else None
+            )
             return make_policy_agent(
                 model_id,
                 config.grid_size,
@@ -194,6 +265,7 @@ class WebGameSession:
                 input_channels,
                 use_search,
                 search_config,
+                adaptive_config=adaptive_config,
             )
 
         if config.machine_vs_machine:
@@ -316,6 +388,7 @@ class WebGameSession:
             grid = self.grid_factory(map_key)
         self.state = create_initial_state(grid)
         self.info = game.get_info(self.state)
+        self._reset_loaded_agents()
         self.selected_cell = None
         self.move_queue.clear()
         self.split_enabled = False
@@ -323,6 +396,15 @@ class WebGameSession:
         self.step_count = 0
         self.policy_preview = None
         return self.snapshot()
+
+    def _reset_loaded_agents(self) -> None:
+        """Reset per-game agent memory for already-loaded model agents."""
+        seen = set()
+        for agent in [self.model_agent, *(self.machine_agents or ()), *self.model_agents, *self.agent_cache.values()]:
+            if agent is None or id(agent) in seen or not hasattr(agent, "reset"):
+                continue
+            seen.add(id(agent))
+            agent.reset()
 
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-safe snapshot for the current state."""
@@ -786,8 +868,10 @@ def _config_namespace(config: WebSessionConfig) -> SimpleNamespace:
     effective_min_generals_distance = config.min_generals_distance
     if effective_min_generals_distance is None:
         effective_min_generals_distance = max(3, config.grid_size // 2)
+    map_pad_to = config.pad_to if config.adaptive_policy or config.opponent_adaptive_policy else config.grid_size
     return SimpleNamespace(
         grid_size=config.grid_size,
+        map_pad_to=map_pad_to,
         map_generator=config.map_generator,
         mountain_density_min=config.mountain_density_min,
         mountain_density_max=config.mountain_density_max,

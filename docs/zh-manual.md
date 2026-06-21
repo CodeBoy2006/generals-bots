@@ -296,6 +296,40 @@ uv run python examples/play_web.py generals-ppo-8x8-expander-gpu-v5.eqx \
 只应暴露在可信网络或 SSH 隧道里。浏览器端负责 Canvas 绘制和控件输入；
 游戏规则、战争迷雾、PPO 推理和 rollout-search 仍由 Python/JAX 服务端执行。
 
+浏览器入口也支持 adaptive checkpoint 与 8x8 adapter/online-search wrapper。
+默认人类是 player 0；下面命令让 player 1 使用 adaptive champion。Adaptive 模式下
+`--grid-size` 是有效棋盘尺寸，后端状态会 pad 到 `--pad-to` 画布：
+
+```bash
+uv run python examples/play_web.py \
+  /path/to/runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx \
+  --opponent-adaptive-policy \
+  --grid-size 8 \
+  --pad-to 16 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --global-context \
+  --scoreboard-history \
+  --fog-memory \
+  --value-loss hl-gauss \
+  --policy-adapter-path /path/to/runs/adaptive-online-search-conversion-adapter-v1/generals-adaptive-online-search-conversion-adapter-v1.eqx \
+  --policy-adapter-scale 1 \
+  --policy-adapter-mode replace \
+  --policy-adapter-max-grid-size 8 \
+  --adaptive-online-search \
+  --search-top-k 4 \
+  --search-rollout-steps 16 \
+  --search-rollouts-per-action 2 \
+  --search-army-weight 1 \
+  --search-land-weight 10 \
+  --search-prior-weight 0.001 \
+  --online-search-min-turn 80 \
+  --online-search-require-contact \
+  --adaptive-online-search-opponent-path generals-ppo-8x8-expander-gpu-v5.eqx \
+  --adaptive-online-search-opponent-channels 32,32,32,16 \
+  --adaptive-online-search-opponent-input-channels 9
+```
+
 ## 6. 性能实验
 
 ### 6.1 吞吐实验入口

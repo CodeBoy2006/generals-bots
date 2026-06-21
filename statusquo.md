@@ -1603,3 +1603,9 @@
 - **Status:** Completed
 - **Next Steps:** Treat this wrapper as the current goal-satisfying baseline. Future work should improve cost/latency with a learned gate or option controller, not replace it with raw policy-head CE unless a validation gate beats this champion.
 - **Context:** Existing fixed-v5 max500 8x8 128 games/seat seed `101060` scored p0 `65.62%`, p1 `60.16%`, min `60.16%`, clearly above the v5 target. Existing Expander 8/12/16 32 games/seat rpa2 check scored min `81.25%`; the new 16x16 player-1 focused confirmation at 128 games scored wins/losses/draws `121/3/4`, win_rate `94.53%`, decisive `97.58%`. Larger-map advantage is therefore very large, and the remaining research risk is compression/compute rather than playing strength.
+
+## [2026-06-21 15:58] Adaptive Champion Web Runtime
+- **Changes:** Added adaptive checkpoint support to the browser web runtime, including adaptive U-Net loading, 8x8 policy adapter composition, padded `grid_size`/`pad_to` map generation, per-game adaptive memory reset, and adaptive online-search flags for the champion wrapper. Updated README and Chinese manual with the launch command.
+- **Status:** Completed
+- **Next Steps:** Use the web service for human-vs-champion inspection. If exact machine-vs-machine replay is needed on 12/16 maps, run adaptive search without a fixed 8x8 opponent path so the heuristic rollout branch is used.
+- **Context:** TDD covered CLI config propagation, adaptive agent factory selection, padded adaptive maps, and agent reset on restart. Verification passed `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `247 passed in 138.61s`; `compileall` and `git diff --check` passed. Real checkpoint smoke loaded adaptive v4, static conversion adapter v1, and fixed-v5 opponent from local artifacts, built a `(16,16)` padded web state, and produced an `AdaptiveWebPolicyAgent` action.

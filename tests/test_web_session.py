@@ -12,6 +12,15 @@ class FixedAgent:
         return self.action
 
 
+class ResettableAgent(FixedAgent):
+    def __init__(self, action):
+        super().__init__(action)
+        self.reset_count = 0
+
+    def reset(self):
+        self.reset_count += 1
+
+
 def _model_catalog():
     return [
         {"id": "right", "label": "right.eqx", "path": "right.eqx"},
@@ -175,6 +184,22 @@ def test_player_model_can_change_without_restarting_match():
     assert ticked["time"] == 1
     assert ticked["grid"]["ownership"][1][0] == 0
     assert ticked["grid"]["ownership"][0][1] == -1
+
+
+def test_restart_resets_loaded_model_agents():
+    resettable = ResettableAgent([1, 0, 0, 0, 0])
+    session = WebGameSession.for_testing(
+        grid=_basic_grid(),
+        names=["Human", "PPO Model"],
+        agents=(resettable,),
+        human_player=0,
+        auto_tick=True,
+        tick_rate=2.0,
+    )
+
+    session.submit_client_command({"type": "restart"})
+
+    assert resettable.reset_count == 2
 
 
 def test_active_human_player_can_switch_between_human_players():

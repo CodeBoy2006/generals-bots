@@ -85,6 +85,77 @@ def test_parse_web_args_accepts_optional_max_steps_limit(monkeypatch):
     assert config.max_steps == 42
 
 
+def test_parse_web_args_accepts_adaptive_champion_runtime_flags(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "play_web.py",
+            "runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx",
+            "--adaptive-policy",
+            "--network-arch",
+            "unet",
+            "--channels",
+            "64,96,128,64",
+            "--pad-to",
+            "16",
+            "--global-context",
+            "--scoreboard-history",
+            "--fog-memory",
+            "--value-loss",
+            "hl-gauss",
+            "--policy-adapter-path",
+            "runs/adaptive-online-search-conversion-adapter-v1/generals-adaptive-online-search-conversion-adapter-v1.eqx",
+            "--policy-adapter-scale",
+            "1",
+            "--policy-adapter-mode",
+            "replace",
+            "--policy-adapter-max-grid-size",
+            "8",
+            "--adaptive-online-search",
+            "--search-top-k",
+            "4",
+            "--search-rollout-steps",
+            "16",
+            "--search-rollouts-per-action",
+            "2",
+            "--online-search-min-turn",
+            "80",
+            "--online-search-require-contact",
+            "--adaptive-online-search-opponent-path",
+            "generals-ppo-8x8-expander-gpu-v5.eqx",
+            "--adaptive-online-search-opponent-channels",
+            "32,32,32,16",
+            "--adaptive-online-search-opponent-input-channels",
+            "9",
+        ],
+    )
+
+    args = parse_args()
+    config = args_to_config(args)
+
+    assert config.adaptive_policy is True
+    assert config.network_arch == "unet"
+    assert config.channels == "64,96,128,64"
+    assert config.pad_to == 16
+    assert config.global_context is True
+    assert config.scoreboard_history is True
+    assert config.fog_memory is True
+    assert config.value_loss == "hl-gauss"
+    assert config.policy_adapter_path.endswith("generals-adaptive-online-search-conversion-adapter-v1.eqx")
+    assert config.policy_adapter_scale == 1.0
+    assert config.policy_adapter_mode == "replace"
+    assert config.policy_adapter_max_grid_size == 8
+    assert config.adaptive_online_search is True
+    assert config.search_top_k == 4
+    assert config.search_rollouts_per_action == 2
+    assert config.online_search_min_turn == 80
+    assert config.online_search_require_contact is True
+    assert config.adaptive_online_search_opponent_path == "generals-ppo-8x8-expander-gpu-v5.eqx"
+    assert config.adaptive_online_search_opponent_channels == "32,32,32,16"
+    assert config.adaptive_online_search_opponent_input_channels == 9
+
+
 def test_parse_web_args_treats_zero_max_steps_as_unlimited(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["play_web.py", "policy.eqx", "--max-steps", "0"])
 

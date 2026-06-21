@@ -224,6 +224,41 @@ uv run python examples/play_web.py \
   --port 8765
 ```
 
+浏览器入口也可以加载 adaptive checkpoint、8x8 policy adapter 和 adaptive
+online-search wrapper。默认人类是 player 0；下面命令让 player 1 使用当前
+champion wrapper。Adaptive 模式会用 `--grid-size` 作为有效棋盘尺寸，并把
+后端状态 pad 到 `--pad-to` 画布：
+
+```bash
+uv run python examples/play_web.py \
+  /path/to/runs/adaptive-unet-ppo-v4/generals-adaptive-unet-ppo-v4.eqx \
+  --opponent-adaptive-policy \
+  --grid-size 8 \
+  --pad-to 16 \
+  --network-arch unet \
+  --channels 64,96,128,64 \
+  --global-context \
+  --scoreboard-history \
+  --fog-memory \
+  --value-loss hl-gauss \
+  --policy-adapter-path /path/to/runs/adaptive-online-search-conversion-adapter-v1/generals-adaptive-online-search-conversion-adapter-v1.eqx \
+  --policy-adapter-scale 1 \
+  --policy-adapter-mode replace \
+  --policy-adapter-max-grid-size 8 \
+  --adaptive-online-search \
+  --search-top-k 4 \
+  --search-rollout-steps 16 \
+  --search-rollouts-per-action 2 \
+  --search-army-weight 1 \
+  --search-land-weight 10 \
+  --search-prior-weight 0.001 \
+  --online-search-min-turn 80 \
+  --online-search-require-contact \
+  --adaptive-online-search-opponent-path generals-ppo-8x8-expander-gpu-v5.eqx \
+  --adaptive-online-search-opponent-channels 32,32,32,16 \
+  --adaptive-online-search-opponent-input-channels 9
+```
+
 手动打开 rollout-search：
 
 ```bash
