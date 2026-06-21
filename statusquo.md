@@ -1633,3 +1633,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep future long recipes and training logs in `docs/zh-manual.md`, `docs/expander-training-strategy.md`, `docs/devlogs/`, or `statusquo.md` rather than expanding README again.
 - **Context:** README is now 96 lines, down from 1116 lines. `git diff --check` passed, linked docs/directories exist, and obsolete guessed script paths were corrected to the actual `examples/*_example.py` and `examples/_experimental/ppo/*.py` locations.
+
+## [2026-06-21 19:01] Project Metadata Bump
+- **Changes:** Updated `pyproject.toml` project version from `2.5.0` to `2.6.0`, added `CodeBoy2006 <codeboycb@gmail.com>` to the author list, and synchronized the root package version in `uv.lock`.
+- **Status:** Completed
+- **Next Steps:** Use `2.6.0` as the next package metadata version unless a release tag or changelog needs a different numbering scheme.
+- **Context:** Kept the change intentionally minimal per request: no maintainers, classifiers, URLs, keywords, or other metadata were added. `git diff --check` and TOML parsing via `UV_CACHE_DIR=/tmp/uv-cache godpy` passed.

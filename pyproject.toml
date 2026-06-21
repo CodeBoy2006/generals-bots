@@ -1,8 +1,11 @@
 [project]
 name = "generals-bots"
-version = "2.5.0"
+version = "2.6.0"
 description = "Develop your agent for generals.io!"
-authors = [{name = "Matej Straka", email = "strakammm@gmail.com"}]
+authors = [
+    {name = "Matej Straka", email = "strakammm@gmail.com"},
+    {name = "CodeBoy2006", email = "codeboycb@gmail.com"},
+]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.11"
