@@ -1532,3 +1532,9 @@
 - **Status:** Completed
 - **Next Steps:** Do not add more raw primitive-action CE to this adapter family. Pivot to a structural controller: learn when to enter a short search/plan option, or deploy the proven online-search wrapper while compressing only a gate/option policy.
 - **Context:** The rpa2 shard kept `65/1024` strict rows, p0/p1 `36/29`, with `475` non-pass valid prefix actions and mean search continuation score delta `165.67`. Training kept `1971/2136` train prefix rows, selected epoch `4`, and reached only `33.21%` validation teacher-action accuracy. Gameplay with `v3-rpa2-ce.best.eqx` scored fixed-v5 max500 64 games/seat seed `200441`: p0 `32.81%`, p1 `39.06%`, min `32.81%`, so it is below both static-v1 and the runtime-search wrapper.
+
+## [2026-06-21 11:24] Current Champion Wrapper Confirmation
+- **Changes:** Confirmed the deployable champion as `adaptive-unet-ppo-v4 + static conversion adapter v1 on 8x8 + online search top4/r16/rpa2 after turn 80 contact`; added a focused large-map weak-seat check at `runs/goal-expander-16p1-static-v1-online-search-rpa2-128-seed200521.json`.
+- **Status:** Completed
+- **Next Steps:** Treat this wrapper as the current goal-satisfying baseline. Future work should improve cost/latency with a learned gate or option controller, not replace it with raw policy-head CE unless a validation gate beats this champion.
+- **Context:** Existing fixed-v5 max500 8x8 128 games/seat seed `101060` scored p0 `65.62%`, p1 `60.16%`, min `60.16%`, clearly above the v5 target. Existing Expander 8/12/16 32 games/seat rpa2 check scored min `81.25%`; the new 16x16 player-1 focused confirmation at 128 games scored wins/losses/draws `121/3/4`, win_rate `94.53%`, decisive `97.58%`. Larger-map advantage is therefore very large, and the remaining research risk is compression/compute rather than playing strength.
