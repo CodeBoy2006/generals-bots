@@ -95,7 +95,7 @@ class WebSessionConfig:
     max_generals_distance: int | None = None
     city_army_min: int = 40
     city_army_max: int = 51
-    model_catalog: list[dict[str, str]] | None = None
+    model_catalog: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +130,7 @@ class WebGameSession:
         player_controls: tuple[str, str] | list[str] | None = None,
         active_human_player: int | None = None,
         player_model_ids: tuple[str | None, str | None] | list[str | None] | None = None,
-        model_catalog: list[dict[str, str]] | None = None,
+        model_catalog: list[dict[str, Any]] | None = None,
         auto_tick: bool = True,
         tick_rate: float = 2.0,
         max_steps: int | None = None,
@@ -209,11 +209,25 @@ class WebGameSession:
             config.model_0_path or primary_model_path,
             config.model_1_path or primary_model_path,
         ]
-        model_catalog = list(config.model_catalog or [])
+        adaptive_model_ids = {
+            model_id
+            for model_id, enabled in (
+                (player_model_ids[0], config.adaptive_policy),
+                (player_model_ids[1], config.opponent_adaptive_policy),
+            )
+            if enabled and model_id is not None
+        }
+        model_catalog = [dict(model) for model in config.model_catalog or []]
         known_model_ids = {model["id"] for model in model_catalog}
+        for model in model_catalog:
+            if model["id"] in adaptive_model_ids:
+                model["runtime"] = "adaptive"
         for model_id in player_model_ids:
             if model_id is not None and model_id not in known_model_ids:
-                model_catalog.append({"id": model_id, "label": str(model_id).split("/")[-1], "path": model_id})
+                model_entry = {"id": model_id, "label": str(model_id).split("/")[-1], "path": model_id}
+                if model_id in adaptive_model_ids:
+                    model_entry["runtime"] = "adaptive"
+                model_catalog.append(model_entry)
                 known_model_ids.add(model_id)
 
         def agent_loader(player: int, model_id: str) -> WebAgent:
@@ -221,7 +235,12 @@ class WebGameSession:
             policy_input = config.model_0_policy_input if player == 0 else config.model_1_policy_input
             input_channels = config.model_0_input_channels if player == 0 else config.model_1_input_channels
             use_search = config.search_policy if player == 0 else config.opponent_search_policy
-            use_adaptive = config.adaptive_policy if player == 0 else config.opponent_adaptive_policy
+            model_entry = next((model for model in model_catalog if model["id"] == model_id), None)
+            model_runtime = None if model_entry is None else model_entry.get("runtime")
+            player_uses_adaptive = config.adaptive_policy if player == 0 else config.opponent_adaptive_policy
+            use_adaptive = player_uses_adaptive or model_runtime == "adaptive"
+            if use_adaptive:
+                use_search = False
             adaptive_config = (
                 AdaptiveRuntimeConfig(
                     pad_to=config.pad_to,
@@ -327,7 +346,7 @@ class WebGameSession:
         player_controls: tuple[str, str] | list[str] | None = None,
         active_human_player: int | None = None,
         player_model_ids: tuple[str | None, str | None] | list[str | None] | None = None,
-        model_catalog: list[dict[str, str]] | None = None,
+        model_catalog: list[dict[str, Any]] | None = None,
         agent_loader: Callable[[int, str], WebAgent] | None = None,
     ) -> "WebGameSession":
         colors = ["#dc3737", "#285adc"]
@@ -795,7 +814,7 @@ class WebGameSession:
             return None
         return self.active_human_player
 
-    def _catalog_entry(self, model_id: str) -> dict[str, str] | None:
+    def _catalog_entry(self, model_id: str) -> dict[str, Any] | None:
         for model in self.model_catalog:
             if model["id"] == model_id:
                 return model

@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 
 from generals.core import game
-from generals.web.session import WebGameSession
+from generals.web.session import WebGameSession, WebSessionConfig
 
 
 class FixedAgent:
@@ -169,6 +169,60 @@ def test_player_control_can_switch_between_human_takeover_and_model_hosting():
     assert reclaimed["active_human_player"] == 0
     assert reclaimed["players"][0]["control"] == "human"
     assert reclaimed["last_message"] == "Player 0 controlled by human"
+
+
+def test_player_control_uses_adaptive_runtime_for_adaptive_model_catalog_entries(monkeypatch):
+    from generals.agents import ppo_runtime
+
+    calls = []
+
+    def fake_make_policy_agent(
+        model_path,
+        grid_size,
+        policy_mode,
+        agent_id,
+        policy_input,
+        input_channels,
+        use_search_policy,
+        search_config,
+        adaptive_config=None,
+    ):
+        calls.append(
+            {
+                "model_path": model_path,
+                "agent_id": agent_id,
+                "use_search_policy": use_search_policy,
+                "adaptive_config": adaptive_config,
+            }
+        )
+        return FixedAgent([1, 0, 0, 0, 0])
+
+    monkeypatch.setattr(ppo_runtime, "make_policy_agent", fake_make_policy_agent)
+    session = WebGameSession.from_config(
+        WebSessionConfig(
+            model_path="adaptive.eqx",
+            model_0_path="adaptive.eqx",
+            grid_size=8,
+            map_generator="simple",
+            human_player=0,
+            opponent_adaptive_policy=True,
+            auto_tick=False,
+            ai_preview=False,
+            model_catalog=[
+                {"id": "adaptive.eqx", "label": "adaptive.eqx", "path": "adaptive.eqx"},
+                {"id": "fixed.eqx", "label": "fixed.eqx", "path": "fixed.eqx"},
+            ],
+        )
+    )
+    calls.clear()
+
+    hosted = session.submit_client_command({"type": "set_player_control", "player": 0, "control": "model"})
+
+    assert hosted["players"][0]["control"] == "model"
+    assert hosted["last_message"] == "Player 0 hosted by model"
+    assert calls[-1]["model_path"] == "adaptive.eqx"
+    assert calls[-1]["adaptive_config"] is not None
+    assert calls[-1]["use_search_policy"] is False
 
 
 def test_player_model_can_change_without_restarting_match():

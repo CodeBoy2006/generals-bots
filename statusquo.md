@@ -1609,3 +1609,9 @@
 - **Status:** Completed
 - **Next Steps:** Use the web service for human-vs-champion inspection. If exact machine-vs-machine replay is needed on 12/16 maps, run adaptive search without a fixed 8x8 opponent path so the heuristic rollout branch is used.
 - **Context:** TDD covered CLI config propagation, adaptive agent factory selection, padded adaptive maps, and agent reset on restart. Verification passed `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `247 passed in 138.61s`; `compileall` and `git diff --check` passed. Real checkpoint smoke loaded adaptive v4, static conversion adapter v1, and fixed-v5 opponent from local artifacts, built a `(16,16)` padded web state, and produced an `AdaptiveWebPolicyAgent` action.
+
+## [2026-06-21 16:33] Adaptive Web Control Switch Fix
+- **Changes:** Bound adaptive runtime selection to model catalog entries in `generals/web/session.py`, so a human-controlled player switched to model reuses the adaptive loader when the selected checkpoint is the adaptive champion. Added a regression test for the `human -> model` switch path.
+- **Status:** Completed
+- **Next Steps:** Restart the live web service after deploying this commit so the browser session uses the fixed runtime loader.
+- **Context:** Root cause was player-slot-only adaptive selection: `--opponent-adaptive-policy` marked player 1 adaptive, but switching player 0 to the same checkpoint loaded it as a fixed PPO model. Verification passed targeted web/session, CLI, protocol, ppo-runtime tests, `compileall`, `git diff --check`, and full `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `248 passed in 139.45s`.
