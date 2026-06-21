@@ -225,6 +225,30 @@ def test_player_control_uses_adaptive_runtime_for_adaptive_model_catalog_entries
     assert calls[-1]["use_search_policy"] is False
 
 
+def test_adaptive_web_session_displays_playable_grid_without_padding():
+    session = WebGameSession.from_config(
+        WebSessionConfig(
+            model_path="adaptive.eqx",
+            model_0_path="adaptive.eqx",
+            grid_size=8,
+            map_generator="simple",
+            opponent_adaptive_policy=True,
+            auto_tick=False,
+            ai_preview=False,
+        )
+    )
+
+    assert session.state.armies.shape == (16, 16)
+
+    snapshot = session.snapshot()
+
+    assert snapshot["grid"]["height"] == 8
+    assert snapshot["grid"]["width"] == 8
+    assert len(snapshot["grid"]["armies"]) == 8
+    assert all(len(row) == 8 for row in snapshot["grid"]["armies"])
+    assert not any(any(row) for row in snapshot["grid"]["mountains"])
+
+
 def test_player_model_can_change_without_restarting_match():
     session = _dynamic_session()
     session.submit_client_command({"type": "set_player_control", "player": 0, "control": "model"})

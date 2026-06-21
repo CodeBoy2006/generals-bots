@@ -136,6 +136,7 @@ class WebGameSession:
         max_steps: int | None = None,
         preview_top_k: int = 3,
         ai_preview: bool = False,
+        display_grid_size: int | None = None,
     ):
         if initial_grid is None and grid_factory is None:
             raise ValueError("initial_grid or grid_factory is required")
@@ -172,6 +173,7 @@ class WebGameSession:
         self.max_steps = max_steps
         self.preview_top_k = preview_top_k
         self.ai_preview = ai_preview
+        self.display_shape = None if display_grid_size is None else (display_grid_size, display_grid_size)
 
         self.selected_cell: tuple[int, int] | None = None
         self.move_queue: list[QueuedMove] = []
@@ -307,6 +309,7 @@ class WebGameSession:
                 max_steps=config.max_steps,
                 preview_top_k=config.preview_top_k,
                 ai_preview=config.ai_preview,
+                display_grid_size=config.grid_size,
             )
 
         player_controls = ["model", "model"]
@@ -329,6 +332,7 @@ class WebGameSession:
             max_steps=config.max_steps,
             preview_top_k=config.preview_top_k,
             ai_preview=config.ai_preview,
+            display_grid_size=config.grid_size,
         )
 
     @classmethod
@@ -451,6 +455,7 @@ class WebGameSession:
             player_model_ids=self.player_model_ids,
             model_catalog=self.model_catalog,
             active_human_player=self.active_human_player,
+            display_shape=self.display_shape,
         )
 
     def submit_client_command(self, command: dict[str, Any]) -> dict[str, Any]:

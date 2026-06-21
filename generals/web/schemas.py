@@ -12,12 +12,28 @@ from generals.core import game
 VisibilityMode = Literal["human-vs-model", "machine-vs-machine"]
 
 
-def _bool_grid(array: Any) -> list[list[bool]]:
-    return np.asarray(array, dtype=bool).tolist()
+def _display_shape(array_shape: tuple[int, ...], display_shape: tuple[int, int] | None) -> tuple[int, int]:
+    if display_shape is None:
+        return int(array_shape[0]), int(array_shape[1])
+    height = min(int(display_shape[0]), int(array_shape[0]))
+    width = min(int(display_shape[1]), int(array_shape[1]))
+    return height, width
 
 
-def _int_grid(array: Any) -> list[list[int]]:
-    return np.asarray(array, dtype=int).tolist()
+def _crop_grid(array: Any, display_shape: tuple[int, int] | None) -> np.ndarray:
+    values = np.asarray(array)
+    if display_shape is None:
+        return values
+    height, width = _display_shape(values.shape, display_shape)
+    return values[:height, :width]
+
+
+def _bool_grid(array: Any, display_shape: tuple[int, int] | None = None) -> list[list[bool]]:
+    return np.asarray(_crop_grid(array, display_shape), dtype=bool).tolist()
+
+
+def _int_grid(array: Any, display_shape: tuple[int, int] | None = None) -> list[list[int]]:
+    return np.asarray(_crop_grid(array, display_shape), dtype=int).tolist()
 
 
 def _cell_or_none(cell: tuple[int, int] | None) -> list[int] | None:
@@ -27,8 +43,16 @@ def _cell_or_none(cell: tuple[int, int] | None) -> list[int] | None:
     return [int(row), int(col)]
 
 
-def _cells(cells: list[tuple[int, int]] | tuple[tuple[int, int], ...]) -> list[list[int]]:
-    return [[int(row), int(col)] for row, col in cells]
+def _cells(
+    cells: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    display_shape: tuple[int, int] | None = None,
+) -> list[list[int]]:
+    serialized = []
+    for row, col in cells:
+        if display_shape is not None and not (0 <= row < display_shape[0] and 0 <= col < display_shape[1]):
+            continue
+        serialized.append([int(row), int(col)])
+    return serialized
 
 
 def _queued_moves(moves: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> list[dict[str, Any]]:
@@ -52,22 +76,27 @@ def _model_catalog(models: list[dict[str, Any]] | tuple[dict[str, Any], ...] | N
     ]
 
 
-def encode_ownership(state: game.GameState) -> list[list[int]]:
+def encode_ownership(state: game.GameState, display_shape: tuple[int, int] | None = None) -> list[list[int]]:
     """Return one ownership grid using -1 for neutral/unowned cells."""
-    ownership = np.full(np.asarray(state.armies).shape, -1, dtype=int)
-    p0 = np.asarray(state.ownership[0], dtype=bool)
-    p1 = np.asarray(state.ownership[1], dtype=bool)
+    p0 = np.asarray(_crop_grid(state.ownership[0], display_shape), dtype=bool)
+    p1 = np.asarray(_crop_grid(state.ownership[1], display_shape), dtype=bool)
+    ownership = np.full(p0.shape, -1, dtype=int)
     ownership[p0] = 0
     ownership[p1] = 1
     return ownership.tolist()
 
 
-def visibility_for_mode(state: game.GameState, visibility_player: int | None) -> list[list[bool]]:
+def visibility_for_mode(
+    state: game.GameState,
+    visibility_player: int | None,
+    display_shape: tuple[int, int] | None = None,
+) -> list[list[bool]]:
     """Return full visibility for watch mode or fogged visibility for one player."""
     if visibility_player is None:
-        return np.ones(np.asarray(state.armies).shape, dtype=bool).tolist()
+        shape = _display_shape(np.asarray(state.armies).shape, display_shape)
+        return np.ones(shape, dtype=bool).tolist()
     visibility = game.get_visibility(state.ownership[int(visibility_player)])
-    return _bool_grid(visibility)
+    return _bool_grid(visibility, display_shape)
 
 
 def serialize_policy_preview(preview: Any | None) -> dict[str, Any] | None:
@@ -121,9 +150,12 @@ def build_snapshot(
     player_model_ids: list[str | None] | tuple[str | None, ...] | None = None,
     model_catalog: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     active_human_player: int | None = None,
+    display_shape: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """Build one complete browser snapshot from authoritative game state."""
     armies = np.asarray(state.armies)
+    snapshot_shape = _display_shape(armies.shape, display_shape)
+    display_armies = _crop_grid(state.armies, snapshot_shape)
     winner = int(np.asarray(info.winner))
     game_done = bool(np.asarray(info.is_done)) or bool(reached_limit)
     army = np.asarray(info.army)
@@ -133,14 +165,14 @@ def build_snapshot(
         "type": "snapshot",
         "mode": mode,
         "grid": {
-            "height": int(armies.shape[0]),
-            "width": int(armies.shape[1]),
-            "armies": _int_grid(state.armies),
-            "ownership": encode_ownership(state),
-            "mountains": _bool_grid(state.mountains),
-            "cities": _bool_grid(state.cities),
-            "generals": _bool_grid(state.generals),
-            "visible": visibility_for_mode(state, visibility_player),
+            "height": int(display_armies.shape[0]),
+            "width": int(display_armies.shape[1]),
+            "armies": _int_grid(state.armies, snapshot_shape),
+            "ownership": encode_ownership(state, snapshot_shape),
+            "mountains": _bool_grid(state.mountains, snapshot_shape),
+            "cities": _bool_grid(state.cities, snapshot_shape),
+            "generals": _bool_grid(state.generals, snapshot_shape),
+            "visible": visibility_for_mode(state, visibility_player, snapshot_shape),
         },
         "players": [
             {
@@ -161,7 +193,7 @@ def build_snapshot(
         "winner": None if winner < 0 else winner,
         "game_done": game_done,
         "selected_cell": _cell_or_none(selected_cell),
-        "valid_targets": _cells(valid_targets),
+        "valid_targets": _cells(valid_targets, snapshot_shape),
         "queued_moves": _queued_moves(queued_moves),
         "active_human_player": None if active_human_player is None else int(active_human_player),
         "model_catalog": _model_catalog(model_catalog),

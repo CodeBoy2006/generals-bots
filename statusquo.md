@@ -1615,3 +1615,9 @@
 - **Status:** Completed
 - **Next Steps:** Restart the live web service after deploying this commit so the browser session uses the fixed runtime loader.
 - **Context:** Root cause was player-slot-only adaptive selection: `--opponent-adaptive-policy` marked player 1 adaptive, but switching player 0 to the same checkpoint loaded it as a fixed PPO model. Verification passed targeted web/session, CLI, protocol, ppo-runtime tests, `compileall`, `git diff --check`, and full `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `248 passed in 139.45s`.
+
+## [2026-06-21 16:46] Web Snapshot Padding Crop
+- **Changes:** Added display-shape cropping to `generals/web/schemas.py` and wired `WebGameSession.from_config` to expose only the playable `grid_size` area in browser snapshots while keeping padded state for adaptive model inference. Added a regression test for adaptive 8x8 sessions backed by 16x16 padded state.
+- **Status:** Completed
+- **Next Steps:** Restart the live web service so browser clients receive cropped 8x8 snapshots instead of the padded 16x16 model canvas.
+- **Context:** Root cause was the adaptive `pad_to=16` map padding using `-2`, which core game state correctly treats as impassable mountains; the web snapshot sent the full padded state to the renderer. Verification passed targeted web tests, `compileall`, `git diff --check`, and full `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `249 passed in 145.66s`.
