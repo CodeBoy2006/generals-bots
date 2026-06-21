@@ -287,6 +287,28 @@ class AdaptiveWebPolicyAgent:
                 self.opponent_network,
             )
         self.policy_adapter_mode_id = adaptive_eval.POLICY_ADAPTER_MODE_TO_ID[config.policy_adapter_mode]
+        self._adapter_policy_action_with_memory = eqx.filter_jit(
+            lambda network, policy_adapter_network, obs, action_key, previous_scoreboard, fog_memory: (
+                adaptive_eval.adapter_policy_action_with_memory(
+                    network,
+                    policy_adapter_network,
+                    obs,
+                    grid_size,
+                    action_key,
+                    self.policy_mode_id,
+                    config.pad_to,
+                    config.global_context or config.scoreboard_history,
+                    config.scoreboard_history,
+                    previous_scoreboard,
+                    config.fog_memory,
+                    fog_memory,
+                    config.policy_adapter_scale,
+                    self.policy_adapter_mode_id,
+                    config.policy_adapter_min_grid_size,
+                    config.policy_adapter_max_grid_size,
+                )
+            )
+        )
         self.reset()
 
     def reset(self) -> None:
@@ -330,23 +352,13 @@ class AdaptiveWebPolicyAgent:
     def act_for_state(self, state: game.GameState, player: int, key: jnp.ndarray) -> jnp.ndarray:
         effective_size = self._validate_grid_shape(state.armies.shape)
         obs = game.get_observation(state, player)
-        fallback_action, current_scoreboard, current_memory = self._adaptive_eval.adapter_policy_action_with_memory(
+        fallback_action, current_scoreboard, current_memory = self._adapter_policy_action_with_memory(
             self.network,
             self.policy_adapter_network,
             obs,
-            effective_size,
             key,
-            self.policy_mode_id,
-            self.config.pad_to,
-            self.config.global_context or self.config.scoreboard_history,
-            self.config.scoreboard_history,
             self.previous_scoreboard,
-            self.config.fog_memory,
             self.fog_memory,
-            self.config.policy_adapter_scale,
-            self.policy_adapter_mode_id,
-            self.config.policy_adapter_min_grid_size,
-            self.config.policy_adapter_max_grid_size,
         )
         action = fallback_action
         if self._online_search_allowed(state, player, effective_size):

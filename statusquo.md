@@ -1621,3 +1621,9 @@
 - **Status:** Completed
 - **Next Steps:** Restart the live web service so browser clients receive cropped 8x8 snapshots instead of the padded 16x16 model canvas.
 - **Context:** Root cause was the adaptive `pad_to=16` map padding using `-2`, which core game state correctly treats as impassable mountains; the web snapshot sent the full padded state to the renderer. Verification passed targeted web tests, `compileall`, `git diff --check`, and full `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `249 passed in 145.66s`.
+
+## [2026-06-21 17:02] Adaptive Web Tick JIT
+- **Changes:** Wrapped the adaptive web policy+adapter action hot path in `eqx.filter_jit` inside `AdaptiveWebPolicyAgent`, keeping the same adaptive memory inputs/outputs while avoiding repeated eager JAX dispatch on every browser tick.
+- **Status:** Completed
+- **Next Steps:** Restart the live web service so existing browser sessions use the compiled action path. Online search after turn 80/contact can still be much slower than the base policy because rollout search is intentionally expensive.
+- **Context:** Root cause of the apparent freeze was server-side synchronous action latency, not canvas rendering: live WebSocket ticks were arriving every `2.7-3.0s` despite `tick_rate=2`. Real checkpoint timing after the JIT change measured init `5.046s`, then ticks `1.510s`, `0.400s`, and hot-path ticks around `0.002s`. Verification passed targeted runtime/web tests, `compileall`, `git diff --check`, and full `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` with `249 passed in 139.27s`.
