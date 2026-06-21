@@ -1526,3 +1526,9 @@
 - **Status:** Completed
 - **Next Steps:** Keep the hook for diagnostics, but do not promote the existing rpa2 MLP scorer. The next controller should use richer model/state features or move inside the U-Net policy/conditional head rather than threshold-sweeping this scorer.
 - **Context:** `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` passed `218 passed in 138.64s`. Feature parity against saved rpa2 shards matched offline extraction to `1.19e-07`, so gameplay failure is not a feature-order bug. GPU probe `v4 + static conversion adapter v1 + rpa2-v1 scorer top4 turn>=80/contact` vs fixed-v5 max500 64 games/seat seed `200201` scored p0 `1.56%`, p1 `7.81%`, min `1.56%`; offline scorer gap calibration also worsened with threshold (`gap>=0.5` kept `7.6%` rows at `30.4%` top1).
+
+## [2026-06-21 11:20] RPA2 Prefix CE Probe
+- **Changes:** Collected a small strict executed-prefix rpa2 teacher shard under `runs/adaptive-online-search-prefix-max500-rpa2-v2-smoke/`, trained `runs/adaptive-online-search-prefix-policy-v3-rpa2-ce/` from v0+v1+rpa2 prefix rows with independent validation, and evaluated the best checkpoint against fixed-v5 max500.
+- **Status:** Completed
+- **Next Steps:** Do not add more raw primitive-action CE to this adapter family. Pivot to a structural controller: learn when to enter a short search/plan option, or deploy the proven online-search wrapper while compressing only a gate/option policy.
+- **Context:** The rpa2 shard kept `65/1024` strict rows, p0/p1 `36/29`, with `475` non-pass valid prefix actions and mean search continuation score delta `165.67`. Training kept `1971/2136` train prefix rows, selected epoch `4`, and reached only `33.21%` validation teacher-action accuracy. Gameplay with `v3-rpa2-ce.best.eqx` scored fixed-v5 max500 64 games/seat seed `200441`: p0 `32.81%`, p1 `39.06%`, min `32.81%`, so it is below both static-v1 and the runtime-search wrapper.
