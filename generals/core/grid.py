@@ -88,15 +88,10 @@ def generate_grid(
     mountain_available = (grid == 0)  # Any empty cell
     flat_available = mountain_available.reshape(-1)
     
-    # Use Gumbel-max + top_k for mountain placement
-    logits = jnp.where(flat_available, 0.0, -jnp.inf)
-    gumbel_noise = jax.random.gumbel(keys[8], shape=logits.shape)
-    scores = logits + gumbel_noise
-    
     # Get indices for mountains using the configured static upper bound and
     # mask dynamic extras. This lets larger maps use denser mountain settings.
     max_mountain_slots = max(1, max_mountains)
-    _, mountain_indices = jax.lax.top_k(scores, max_mountain_slots)
+    mountain_indices = sample_k_from_mask(mountain_available, max_mountain_slots, keys[8])
     
     # Create flat grid, place mountains only up to num_mountains
     flat_grid = grid.reshape(-1)
@@ -149,14 +144,10 @@ def generate_grid(
     city_available = (grid == 0)  # Any empty cell
     flat_city_available = city_available.reshape(-1)
     
-    city_logits = jnp.where(flat_city_available, 0.0, -jnp.inf)
-    city_gumbel = jax.random.gumbel(keys[9], shape=city_logits.shape)
-    city_scores = city_logits + city_gumbel
-    
     # Reserve static capacity from the configured range instead of the old
     # fixed cap, so larger generated maps can actually contain more cities.
     max_extra_cities = max(1, min(num_cities_range[1] - 2, flat_city_available.shape[0]))
-    _, city_indices = jax.lax.top_k(city_scores, max_extra_cities)
+    city_indices = sample_k_from_mask(city_available, max_extra_cities, keys[9])
     
     # Generate random city values
     city_values = jax.random.randint(keys[10], (max_extra_cities,), castle_val_range[0], castle_val_range[1])

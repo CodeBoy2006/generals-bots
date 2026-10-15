@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from generals.core.observation import Observation
 
 from .agent import Agent
-from ._expander_logic import expander_action
+from ._heuristic_logic import expander_action
 
 
 class ExpanderAgent(Agent):

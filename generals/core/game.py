@@ -15,6 +15,7 @@ import jax.numpy as jnp
 from jax import lax
 from typing import Tuple, NamedTuple, Protocol, Any
 
+from generals.core.action import DIRECTIONS
 from generals.core.observation import Observation
 
 
@@ -79,10 +80,6 @@ class GameInfo(NamedTuple):
     is_done: jnp.ndarray
     winner: jnp.ndarray
     time: jnp.ndarray
-
-
-# Direction offsets: UP, DOWN, LEFT, RIGHT
-DIRECTIONS = jnp.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=jnp.int32)
 
 
 def create_initial_state(grid: jnp.ndarray) -> GameState:

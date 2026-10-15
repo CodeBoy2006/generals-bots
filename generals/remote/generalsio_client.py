@@ -4,11 +4,9 @@ import numpy as np
 from socketio import SimpleClient  # type: ignore
 
 from generals.agents import Agent
-from generals.core.config import Direction
+from generals.core.config import DIRECTIONS
 from generals.core.observation import Observation
 from generals.remote.generalsio_state import GeneralsIOstate
-
-DIRECTIONS = [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT]
 
 PUBLIC_ENDPOINT = "https://ws.generals.io/"
 BOT_ENDPOINT = "https://botws.generals.io/"

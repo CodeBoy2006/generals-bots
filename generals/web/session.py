@@ -154,7 +154,7 @@ class WebGameSession:
         self.model_agents: list[WebAgent | None] = list(machine_agents) if machine_agents else [None, None]
         if model_agent is not None:
             self.model_agents[self.model_player] = model_agent
-        default_controls = ["model", "model"] if machine_vs_machine else ["model", "model"]
+        default_controls = ["model", "model"]
         if not machine_vs_machine:
             default_controls[human_player] = "human"
         self.player_controls = list(player_controls or default_controls)
@@ -683,15 +683,6 @@ class WebGameSession:
         if self.selected_cell is not None and (player is None or not self._is_valid_source(player, self.selected_cell)):
             self.selected_cell = None
 
-    def _advance_human_turn(self, human_action: jnp.ndarray, now: float | None = None) -> None:
-        if self.model_agent is None:
-            self.last_message = "No model agent"
-            return
-        self.key, action_key = jrandom.split(self.key)
-        model_action = self._choose_agent_action(self.model_agent, self.model_player, action_key)
-        actions = self._stack_human_and_model_actions(human_action, model_action)
-        self._advance(actions, now)
-
     def _advance(self, actions: jnp.ndarray, now: float | None) -> None:
         self.state, self.info = game.step(self.state, actions)
         self.step_count += 1
@@ -702,24 +693,6 @@ class WebGameSession:
         actions = [create_action(to_pass=True), create_action(to_pass=True)]
         actions[player] = action
         return jnp.stack(actions)
-
-    def _stack_human_and_model_actions(self, human_action: jnp.ndarray, model_action: jnp.ndarray) -> jnp.ndarray:
-        return (
-            jnp.stack((human_action, model_action))
-            if self.human_player == 0
-            else jnp.stack((model_action, human_action))
-        )
-
-    def _choose_machine_actions(self, key: jnp.ndarray) -> jnp.ndarray:
-        if self.machine_agents is None:
-            return jnp.stack([create_action(to_pass=True), create_action(to_pass=True)])
-        key_0, key_1 = jrandom.split(key)
-        return jnp.stack(
-            [
-                self._choose_agent_action(self.machine_agents[0], 0, key_0),
-                self._choose_agent_action(self.machine_agents[1], 1, key_1),
-            ]
-        )
 
     def _choose_agent_action(self, agent: WebAgent, player: int, key: jnp.ndarray) -> jnp.ndarray:
         if hasattr(agent, "act_for_state"):

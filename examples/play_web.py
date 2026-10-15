@@ -11,7 +11,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from generals.agents.ppo_policy_agent import POLICY_INPUT_CHOICES, policy_input_default_channels
+from generals.agents.ppo_policy_agent import POLICY_INPUT_CHOICES
 from generals.web.server import run_server
 from generals.web.session import WebSessionConfig
 
@@ -40,24 +40,6 @@ def build_model_catalog(explicit_paths: list[str | None], repo_root: Path = REPO
             add_model(path)
 
     return catalog
-
-
-def _resolve_alias(parser: argparse.ArgumentParser, primary_name: str, primary, alias_name: str, alias, default):
-    if primary is not None and alias is not None and primary != alias:
-        parser.error(f"pass either {primary_name} or {alias_name}, not both")
-    if primary is not None:
-        return primary
-    if alias is not None:
-        return alias
-    return default
-
-
-def _resolve_input_channels(policy_input: str, input_channels: int | None) -> int | None:
-    if input_channels is not None:
-        return input_channels
-    if policy_input == "auto":
-        return None
-    return policy_input_default_channels(policy_input)
 
 
 def parse_args() -> argparse.Namespace:
@@ -221,10 +203,12 @@ def parse_args() -> argparse.Namespace:
     if not (args.city_army_min < args.city_army_max):
         parser.error("city army range must satisfy min < max")
 
+    from generals.agents.ppo_runtime import resolve_alias, resolve_input_channels
+
     args.model_path = args.model_0_path or args.model_path
     if args.max_steps == 0:
         args.max_steps = None
-    args.model_0_policy_input = _resolve_alias(
+    args.model_0_policy_input = resolve_alias(
         parser,
         "--model-0-policy-input",
         args.model_0_policy_input,
@@ -233,11 +217,11 @@ def parse_args() -> argparse.Namespace:
         "auto",
     )
     args.model_1_policy_input = args.model_1_policy_input or "auto"
-    args.model_0_input_channels = _resolve_input_channels(
+    args.model_0_input_channels = resolve_input_channels(
         args.model_0_policy_input,
         args.model_0_input_channels or args.input_channels,
     )
-    args.model_1_input_channels = _resolve_input_channels(args.model_1_policy_input, args.model_1_input_channels)
+    args.model_1_input_channels = resolve_input_channels(args.model_1_policy_input, args.model_1_input_channels)
     return args
 
 

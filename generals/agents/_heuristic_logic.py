@@ -219,12 +219,6 @@ def _score_from_distance_map(
     return jnp.where(has_target, improvement * improvement_weight + closeness * closeness_weight, 0.0)
 
 
-def _distance_to_mask(mask: jnp.ndarray, row: jnp.ndarray, col: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Return whether a mask is nonempty and the distance from one cell to it."""
-    distance_map, has_target = _distance_map(mask)
-    return has_target, distance_map[row, col]
-
-
 def _expander_scores(observation):
     positions, num_valid, h, w, max_moves = _valid_positions(observation)
     scale = _map_scale(observation)
