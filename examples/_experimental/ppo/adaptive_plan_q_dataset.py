@@ -39,28 +39,28 @@ from adaptive_common import (
     empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
+    outcome_class_from_winner,
     parse_grid_size_weights,
     parse_grid_sizes,
     reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    split_mixed_env_counts,
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
-from adaptive_search_distill import adaptive_score_observation, outcome_class_from_winner
+from adaptive_search_distill import adaptive_score_observation
 from adaptive_teacher_imitation import policy_action_from_logits
 from common import (
     OPPONENT_NAMES,
     OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
     opponent_action,
-    policy_network_action,
     random_action,
     stack_learner_actions,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels, policy_network_action
 from generals.core import game
 from generals.core.action import DIRECTIONS
-from train_adaptive import split_mixed_env_counts
 from dataset_utils import save_shard
 
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}

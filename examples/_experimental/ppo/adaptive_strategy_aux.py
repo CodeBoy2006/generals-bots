@@ -6,6 +6,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from examples._experimental.ppo.adaptive_common import OUTCOME_WIN, active_cells_for_size
+
 STRATEGY_INTENT_EXPAND = 0
 STRATEGY_INTENT_GATHER = 1
 STRATEGY_INTENT_ATTACK = 2
@@ -15,8 +17,6 @@ STRATEGY_INTENT_PROBE = 5
 STRATEGY_INTENT_FINISH = 6
 STRATEGY_INTENT_ATTRITION = 7
 STRATEGY_INTENT_COUNT = 8
-
-OUTCOME_WIN = 2
 
 
 class StrategyAuxTargets(NamedTuple):
@@ -80,4 +80,60 @@ def strategy_aux_targets(
         intent=weak_intent_label(obs, state, learner_player, search_outcomes),
         finish=finish,
         enemy_general_heatmap=enemy_general_heatmap_from_state(state, learner_player, pad_size),
+    )
+
+
+def binary_cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray:
+    """Numerically stable binary cross-entropy."""
+    return jnp.maximum(logits, 0.0) - logits * targets + jnp.log1p(jnp.exp(-jnp.abs(logits)))
+
+
+def one_hot_cell(row: jnp.ndarray, col: jnp.ndarray, pad_size: int, active: jnp.ndarray) -> jnp.ndarray:
+    """Return a one-hot spatial map clipped to active board cells."""
+    rows = jnp.arange(pad_size)[:, None]
+    cols = jnp.arange(pad_size)[None, :]
+    return ((rows == row) & (cols == col) & active).astype(jnp.float32)
+
+
+def main_stack_heatmap(state, learner_player: int, active: jnp.ndarray) -> jnp.ndarray:
+    """Return one-hot map for the learner-owned cell with the largest army."""
+    own = state.ownership[learner_player] & active
+    scores = jnp.where(own, state.armies, -1)
+    flat_index = jnp.argmax(scores.reshape(-1))
+    row = flat_index // state.armies.shape[1]
+    col = flat_index % state.armies.shape[1]
+    return one_hot_cell(row, col, state.armies.shape[0], active)
+
+
+def full_state_strategy_labels(state, obs, learner_player: int, effective_size: int, pad_size: int):
+    """Build belief, target, source, and weak-intent labels from the privileged state."""
+    opponent = 1 - learner_player
+    active = active_cells_for_size(effective_size, pad_size)
+    enemy_general_row, enemy_general_col = state.general_positions[opponent]
+    enemy_general = one_hot_cell(enemy_general_row, enemy_general_col, pad_size, active)
+    enemy_owned = (state.ownership[opponent] & active).astype(jnp.float32)
+    hidden_enemy_owned = (state.ownership[opponent] & obs.fog_cells & active).astype(jnp.float32)
+    hidden_enemy_army = jnp.log1p(jnp.maximum(state.armies.astype(jnp.float32), 0.0)) * hidden_enemy_owned
+    city_map = (state.cities & active).astype(jnp.float32)
+    source = main_stack_heatmap(state, learner_player, active)
+    no_search_outcomes = jnp.full((1,), -1, dtype=jnp.int32)
+    intent = weak_intent_label(obs, state, learner_player, no_search_outcomes)
+    visible_enemy_count = jnp.sum(obs.opponent_cells.astype(jnp.float32) * active.astype(jnp.float32))
+    visible_enemy_density = visible_enemy_count / jnp.maximum(
+        jnp.sum(active.astype(jnp.float32)),
+        1.0,
+    )
+    contact = jnp.any(obs.opponent_cells & active).astype(jnp.float32)
+    return (
+        enemy_general,
+        enemy_owned,
+        hidden_enemy_owned,
+        hidden_enemy_army,
+        city_map,
+        source,
+        enemy_general,
+        intent,
+        visible_enemy_count,
+        visible_enemy_density,
+        contact,
     )

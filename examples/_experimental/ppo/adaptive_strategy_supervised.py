@@ -21,16 +21,12 @@ import jax.random as jrandom
 import numpy as np
 import optax
 
-from adaptive_common import parse_grid_sizes
+from adaptive_common import OUTCOME_DRAW, OUTCOME_LOSS, OUTCOME_WIN, parse_grid_sizes
 from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_network
-from adaptive_search_distill import binary_cross_entropy_with_logits
-from adaptive_strategy_aux import STRATEGY_INTENT_FINISH
+from adaptive_strategy_aux import STRATEGY_INTENT_FINISH, binary_cross_entropy_with_logits
 from generals.agents.ppo_policy_agent import parse_policy_channels
 from dataset_utils import expand_dataset_paths
 
-OUTCOME_LOSS = 0
-OUTCOME_DRAW = 1
-OUTCOME_WIN = 2
 DATASET_FORMAT_MODES = ("strategy", "plan-q-prefix", "online-search")
 ACTION_CE_WEIGHT_MODES = (
     "all",

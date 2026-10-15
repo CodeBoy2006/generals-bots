@@ -31,8 +31,7 @@ from common import (
     make_state_pool,
     random_action,
 )
-from train import load_or_create_network
-from generals.agents.ppo_policy_agent import obs_to_array
+from generals.agents.ppo_policy_agent import load_or_create_network, obs_to_array
 
 
 @eqx.filter_jit

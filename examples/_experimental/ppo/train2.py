@@ -29,6 +29,7 @@ from generals.core.rewards import composite_reward_fn
 
 from common import random_action
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array
+from examples._experimental.ppo.training_utils import compute_gae, ppo_loss
 
 
 def _rollout_step_inner(states, pool, env, network, key):
@@ -88,46 +89,6 @@ def make_collect_rollout(env, num_steps):
         return final_states, rollout_data, final_key
 
     return collect_rollout
-
-
-@jax.jit
-def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
-    """Compute GAE advantages and value returns."""
-    num_steps, num_envs = rewards.shape
-    values_with_bootstrap = jnp.concatenate([values, jnp.zeros((1, num_envs))], axis=0)
-
-    def gae_step(carry, inputs):
-        last_adv = carry
-        reward, value, next_value, done = inputs
-        nonterminal = 1.0 - done
-        delta = reward + gamma * next_value * nonterminal - value
-        advantage = delta + gamma * lam * nonterminal * last_adv
-        return advantage, advantage
-
-    inputs = (
-        rewards[::-1],
-        values[::-1],
-        values_with_bootstrap[1:][::-1],
-        dones[::-1],
-    )
-    _, advantages_rev = jax.lax.scan(gae_step, jnp.zeros(num_envs), inputs)
-    advantages = advantages_rev[::-1]
-    returns = advantages + values
-    return advantages, returns
-
-
-@jax.jit
-def ppo_loss(network, obs, mask, action, old_logprob, advantage, ret, clip=0.2):
-    """PPO loss for single sample."""
-    _, value, logprob, entropy = network(obs, mask, None, action)
-
-    ratio = jnp.exp(logprob - old_logprob)
-    clipped = jnp.clip(ratio, 1 - clip, 1 + clip) * advantage
-    policy_loss = -jnp.minimum(ratio * advantage, clipped)
-    value_loss = 0.5 * (value - ret) ** 2
-    entropy_loss = -0.01 * entropy
-
-    return policy_loss + value_loss + entropy_loss
 
 
 @eqx.filter_jit

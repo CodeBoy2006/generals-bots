@@ -28,8 +28,10 @@ import optax
 from generals.agents.ppo_policy_agent import (
     POLICY_INPUT_NAMES,
     POLICY_INPUT_NAME_TO_ID,
+    load_or_create_network,
     obs_to_array,
     parse_policy_channels,
+    policy_network_action,
 )
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
@@ -40,50 +42,17 @@ from common import (
     make_grids,
     policy_input_array_and_mask,
     policy_input_default_channels,
-    policy_network_action,
     policy_state_action,
     stack_learner_actions,
 )
-from search_policy import rollout_search_candidates
-from train import load_or_create_network
+from generals.agents._ppo_search import rollout_search_candidates
+from examples._experimental.ppo.training_utils import (
+    search_score_target_probs,
+    select_search_improvements,
+    weighted_topk_cross_entropy,
+)
 
 TARGET_MODE_NAMES = ("hard", "soft")
-
-
-def select_search_improvements(
-    candidate_indices,
-    search_scores,
-    min_margin: float,
-    margin_scale: float,
-    max_weight: float,
-):
-    """Select high-confidence search improvements over the base top-prior action."""
-    best_positions = jnp.argmax(search_scores, axis=-1)
-    target_indices = jnp.take_along_axis(candidate_indices, best_positions[..., None], axis=-1)[..., 0]
-    best_scores = jnp.take_along_axis(search_scores, best_positions[..., None], axis=-1)[..., 0]
-    base_indices = candidate_indices[..., 0]
-    base_scores = search_scores[..., 0]
-    margins = best_scores - base_scores
-
-    switched = target_indices != base_indices
-    scaled_weights = (margins - min_margin) / margin_scale
-    clipped_weights = jnp.clip(scaled_weights, 0.0, max_weight)
-    weights = jnp.where(switched & (margins >= min_margin), clipped_weights, 0.0)
-    return target_indices.astype(jnp.int32), weights.astype(jnp.float32), margins.astype(jnp.float32)
-
-
-def search_score_target_probs(search_scores, temperature: float):
-    """Convert top-k rollout-search scores into a stable soft target distribution."""
-    centered_scores = search_scores - jnp.max(search_scores, axis=-1, keepdims=True)
-    return jax.nn.softmax(centered_scores / temperature, axis=-1)
-
-
-def weighted_topk_cross_entropy(log_probs, candidate_indices, target_probs, weights):
-    """Return weighted CE over sparse top-k candidate targets."""
-    candidate_log_probs = jnp.take_along_axis(log_probs, candidate_indices, axis=1)
-    losses = -jnp.sum(target_probs * candidate_log_probs, axis=-1)
-    normalizer = jnp.maximum(jnp.sum(weights), 1.0)
-    return jnp.sum(losses * weights) / normalizer
 
 
 def compute_conservative_loss(

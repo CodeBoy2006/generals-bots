@@ -79,6 +79,8 @@ README 不再维护长实验命令。下面只列脚本入口，完整 recipe �
 - 教师数据与搜索：`examples/_experimental/ppo/adaptive_teacher_imitation.py`、`examples/_experimental/ppo/adaptive_strategy_supervised.py`、`examples/_experimental/ppo/adaptive_online_search_trace_dataset.py`
 - 搜索/蒸馏：`examples/_experimental/ppo/search_policy.py`、`examples/_experimental/ppo/conservative_search_distill.py`
 
+共享推理与训练工具的职责划分见 [实验代码说明](examples/_experimental/README.md)。交互运行时直接使用推理模块，训练和评测脚本负责各自的命令行流程。
+
 ## 开发校验
 
 常用回归检查：

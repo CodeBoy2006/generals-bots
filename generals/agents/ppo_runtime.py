@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import numpy as np
 
-from examples._experimental.ppo.search_policy import rollout_search_action, rollout_search_candidates
+from generals.agents._ppo_search import rollout_search_action, rollout_search_candidates
 from generals.agents.ppo_policy_agent import (
     POLICY_INPUT_CHOICES,
     PPOPolicyAgent,
@@ -205,7 +205,7 @@ class AdaptiveWebPolicyAgent:
         if config.online_search and search_config.top_k <= 0:
             raise ValueError("adaptive online search requires top_k > 0")
 
-        from examples._experimental.ppo import evaluate_adaptive_policy as adaptive_eval
+        from examples._experimental.ppo import adaptive_inference
         from examples._experimental.ppo.adaptive_common import (
             ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
             adaptive_input_channel_count,
@@ -214,12 +214,8 @@ class AdaptiveWebPolicyAgent:
             empty_adaptive_fog_memory,
         )
         from examples._experimental.ppo.adaptive_network import load_or_create_adaptive_network
-        from examples._experimental.ppo.common import (
-            OPPONENT_NAME_TO_ID,
-            opponent_action,
-            policy_network_action,
-            random_action,
-        )
+        from examples._experimental.ppo.common import OPPONENT_NAME_TO_ID, opponent_action, random_action
+        from generals.agents.ppo_policy_agent import policy_network_action
 
         self.id = agent_id
         self.grid_size = grid_size
@@ -227,7 +223,7 @@ class AdaptiveWebPolicyAgent:
         self.search_config = search_config
         self.policy_mode_id = POLICY_MODE_NAME_TO_ID[policy_mode]
         self.opponent_policy_mode_id = POLICY_MODE_NAME_TO_ID[config.online_search_opponent_policy_mode]
-        self._adaptive_eval = adaptive_eval
+        self._adaptive_inference = adaptive_inference
         self._adaptive_scoreboard_features = adaptive_scoreboard_features
         self._crop_observation = crop_observation
         self._empty_adaptive_fog_memory = empty_adaptive_fog_memory
@@ -292,10 +288,10 @@ class AdaptiveWebPolicyAgent:
                 config.online_search_opponent_path,
                 self.opponent_network,
             )
-        self.policy_adapter_mode_id = adaptive_eval.POLICY_ADAPTER_MODE_TO_ID[config.policy_adapter_mode]
+        self.policy_adapter_mode_id = adaptive_inference.POLICY_ADAPTER_MODE_TO_ID[config.policy_adapter_mode]
         self._adapter_policy_action_with_memory = eqx.filter_jit(
             lambda network, policy_adapter_network, obs, action_key, previous_scoreboard, fog_memory: (
-                adaptive_eval.adapter_policy_action_with_memory(
+                adaptive_inference.adapter_policy_action_with_memory(
                     network,
                     policy_adapter_network,
                     obs,
@@ -378,7 +374,7 @@ class AdaptiveWebPolicyAgent:
                     self._crop_observation(opponent_obs, effective_size),
                     self.opponent_policy_mode_id,
                 )
-                action = self._adaptive_eval.online_search_action_policy_opponent(
+                action = self._adaptive_inference.online_search_action_policy_opponent(
                     self.network,
                     self.policy_adapter_network,
                     None,
@@ -411,7 +407,7 @@ class AdaptiveWebPolicyAgent:
                     self.config.online_search_terminal_score,
                     self.config.online_search_min_score_gap,
                     -1.0,
-                    self._adaptive_eval.ONLINE_SEARCH_GATE_FEATURE_DIM,
+                    self._adaptive_inference.ONLINE_SEARCH_GATE_FEATURE_DIM,
                 )
             else:
                 opponent_first_action = self._opponent_action(
@@ -420,7 +416,7 @@ class AdaptiveWebPolicyAgent:
                     opponent_obs,
                     self._random_action,
                 )
-                action = self._adaptive_eval.online_search_action_heuristic_opponent(
+                action = self._adaptive_inference.online_search_action_heuristic_opponent(
                     self.network,
                     self.policy_adapter_network,
                     None,
@@ -452,7 +448,7 @@ class AdaptiveWebPolicyAgent:
                     self.config.online_search_terminal_score,
                     self.config.online_search_min_score_gap,
                     -1.0,
-                    self._adaptive_eval.ONLINE_SEARCH_GATE_FEATURE_DIM,
+                    self._adaptive_inference.ONLINE_SEARCH_GATE_FEATURE_DIM,
                 )
         self.previous_scoreboard = current_scoreboard
         self.fog_memory = current_memory

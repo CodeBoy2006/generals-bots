@@ -347,6 +347,16 @@ def sampled_policy_action(network: PolicyValueNetwork, obs: Observation, key: jn
     return normalize_action(action)
 
 
+def policy_network_action(network, key, obs, policy_mode):
+    """Dispatch a policy checkpoint action using greedy or sampled execution."""
+    return jax.lax.cond(
+        policy_mode == 0,
+        lambda _: greedy_policy_action(network, obs),
+        lambda _: sampled_policy_action(network, obs, key),
+        None,
+    )
+
+
 def policy_state_action(
     network: PolicyValueNetwork,
     key: jnp.ndarray,
@@ -375,6 +385,61 @@ def parse_policy_channels(channels: str | tuple[int, int, int, int] | list[int] 
     if any(part <= 0 for part in parts):
         raise ValueError("policy channels must be positive")
     return parts
+
+
+def load_or_create_network(key, grid_size, init_model_path=None, channels=None, input_channels=9, init_input_channels=None):
+    """Create a policy network and optionally restore its leaves from a checkpoint."""
+    parsed_channels = parse_policy_channels(channels)
+    network = PolicyValueNetwork(
+        key,
+        grid_size=grid_size,
+        channels=parsed_channels,
+        input_channels=input_channels,
+    )
+    if init_model_path is None:
+        return network
+
+    path = Path(init_model_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Warm-start checkpoint not found: {path}")
+    if init_input_channels is not None and init_input_channels != input_channels:
+        if init_input_channels > input_channels:
+            raise ValueError("init_input_channels cannot exceed input_channels")
+        source_network = PolicyValueNetwork(
+            key,
+            grid_size=grid_size,
+            channels=parsed_channels,
+            input_channels=init_input_channels,
+        )
+        source_network = eqx.tree_deserialise_leaves(path, source_network)
+        conv1_weight = jnp.zeros_like(network.conv1.weight)
+        conv1_weight = conv1_weight.at[:, :init_input_channels, :, :].set(source_network.conv1.weight)
+        network = eqx.tree_at(lambda net: net.conv1.weight, network, conv1_weight)
+        network = eqx.tree_at(
+            lambda net: (
+                net.conv1.bias,
+                net.conv2,
+                net.conv3,
+                net.conv4,
+                net.policy_conv,
+                net.value_conv,
+                net.value_linear1,
+                net.value_linear2,
+            ),
+            network,
+            (
+                source_network.conv1.bias,
+                source_network.conv2,
+                source_network.conv3,
+                source_network.conv4,
+                source_network.policy_conv,
+                source_network.value_conv,
+                source_network.value_linear1,
+                source_network.value_linear2,
+            ),
+        )
+        return network
+    return eqx.tree_deserialise_leaves(path, network)
 
 
 def load_policy_network(

@@ -21,12 +21,10 @@ import jax.random as jrandom
 import numpy as np
 import optax
 
-from adaptive_command_gate import CommandGateNetwork
-from adaptive_common import ADAPTIVE_MOVE_PLANES, parse_grid_sizes
+from adaptive_command_gate import CommandGateNetwork, POLICY_ADAPTER_GATE_FEATURE_NAMES, policy_adapter_gate_features
+from adaptive_common import ADAPTIVE_MOVE_PLANES, OUTCOME_WIN, parse_grid_sizes
 from adaptive_network import load_or_create_adaptive_network
-from evaluate_adaptive_policy import policy_adapter_gate_features
 from generals.agents.ppo_policy_agent import parse_policy_channels
-from train_adaptive import OUTCOME_WIN
 from gate_training import train_epoch
 from dataset_utils import balanced_binary_weights, expand_dataset_paths
 
@@ -40,26 +38,6 @@ ONLINE_POSITIVE_FIELDS = (
     "adapter_improves_continuation",
 )
 ONLINE_ACTION_FIELDS = ("search_action_index", "teacher_action_index", "adapter_action_index")
-POLICY_ADAPTER_GATE_FEATURE_NAMES = (
-    "adapter_delta_at_adapter_top",
-    "adapter_delta_at_policy_top",
-    "policy_support_for_adapter_top",
-    "adapter_top_margin",
-    "policy_top_margin",
-    "adapter_finish_probability",
-    "adapter_draw_probability",
-    "adapter_win_probability",
-    "visible_enemy_density",
-    "visible_enemy_army_log_density",
-    "owned_army_log_density",
-    "active_fraction",
-    "adapter_changes_action",
-    "seat",
-    "scoreboard_time",
-    "scoreboard_land_advantage",
-    "scoreboard_army_advantage",
-    "contact_binary",
-)
 
 
 def _compute_adapter_features(

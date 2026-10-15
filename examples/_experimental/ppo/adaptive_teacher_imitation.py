@@ -21,6 +21,9 @@ import optax
 
 from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
+    OUTCOME_DRAW,
+    OUTCOME_LOSS,
+    OUTCOME_WIN,
     adaptive_action_to_index,
     adaptive_index_to_action,
     adaptive_input_channel_count,
@@ -37,6 +40,10 @@ from adaptive_common import (
     parse_grid_sizes,
     reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    rollout_outcome_targets,
+    rollout_steps_to_next_done,
+    split_mixed_env_counts,
+    teacher_obs_from_student_obs,
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
@@ -45,22 +52,18 @@ from common import (
     OPPONENT_NAME_TO_ID,
     checkpoint_path_for_iteration,
     opponent_action,
-    policy_network_action,
     prune_old_checkpoints,
     random_action,
     stack_learner_actions,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array, parse_policy_channels
+from generals.agents.ppo_policy_agent import (
+    PolicyValueNetwork,
+    obs_to_array,
+    parse_policy_channels,
+    policy_network_action,
+)
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
-from train_adaptive import (
-    OUTCOME_DRAW,
-    OUTCOME_LOSS,
-    OUTCOME_WIN,
-    rollout_outcome_targets,
-    split_mixed_env_counts,
-    teacher_obs_from_student_obs,
-)
 
 POLICY_MODE_NAMES = ("sample", "greedy")
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
@@ -474,18 +477,6 @@ def outcome_sample_weights(
         weights = weights * jnp.clip(ramp, 0.0, 1.0)
     weights = weights * seat_weights
     return jnp.where(known > 0.0, weights, unknown_weight * seat_weights).astype(jnp.float32)
-
-
-def rollout_steps_to_next_done(dones: jnp.ndarray) -> jnp.ndarray:
-    """Return how many rollout steps remain before the next done marker."""
-    sentinel = jnp.full(dones.shape[1:], dones.shape[0] + 1, dtype=jnp.int32)
-
-    def scan_step(next_steps, done):
-        current_steps = jnp.where(done, 0, next_steps + 1)
-        return current_steps, current_steps
-
-    _, steps_rev = jax.lax.scan(scan_step, sentinel, dones[::-1])
-    return steps_rev[::-1]
 
 
 def outcome_auxiliary_targets(

@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import jax.random as jrandom
 
-from examples._experimental.ppo.search_policy import rollout_search_action, rollout_search_candidates, score_observation
+from generals.agents._ppo_search import rollout_search_action, rollout_search_candidates, score_observation
 from generals.agents.ppo_policy_agent import PolicyValueNetwork
 from generals.core import game
 from generals.core.game import GameInfo

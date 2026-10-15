@@ -915,7 +915,7 @@ def test_top_advantage_weights_selects_highest_fraction():
 
 
 def test_teacher_obs_from_student_obs_removes_fog_memory_before_history():
-    from examples._experimental.ppo.train_adaptive import teacher_obs_from_student_obs
+    from examples._experimental.ppo.adaptive_common import teacher_obs_from_student_obs
 
     obs = jnp.arange(35 * 2 * 2, dtype=jnp.float32).reshape(35, 2, 2)
     teacher_obs = teacher_obs_from_student_obs(obs, 30)
@@ -948,7 +948,7 @@ def test_update_ema_network_averages_trainable_arrays():
 def test_split_mixed_env_counts_preserves_total_and_balances_seats():
     import pytest
 
-    from examples._experimental.ppo.train_adaptive import split_mixed_env_counts
+    from examples._experimental.ppo.adaptive_common import split_mixed_env_counts
 
     assert split_mixed_env_counts(2) == (1, 1)
     assert split_mixed_env_counts(5) == (2, 3)
@@ -958,7 +958,7 @@ def test_split_mixed_env_counts_preserves_total_and_balances_seats():
 
 
 def test_rollout_outcome_targets_use_next_known_episode_result():
-    from examples._experimental.ppo.train_adaptive import (
+    from examples._experimental.ppo.adaptive_common import (
         OUTCOME_DRAW,
         OUTCOME_LOSS,
         OUTCOME_WIN,
@@ -1065,10 +1065,8 @@ def test_adaptive_expander_target_probs_has_single_pass_slot():
 def test_adaptive_soft_conservative_loss_is_finite_for_matching_networks():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
-    from examples._experimental.ppo.adaptive_search_distill import (
-        compute_adaptive_soft_conservative_loss,
-        search_score_target_probs,
-    )
+    from examples._experimental.ppo.adaptive_search_distill import compute_adaptive_soft_conservative_loss
+    from examples._experimental.ppo.training_utils import search_score_target_probs
 
     network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
     obs = jnp.zeros((2, ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
@@ -1193,12 +1191,8 @@ def test_search_q_value_metrics_uses_candidate_outcomes():
 def test_strategy_dataset_action_weights_can_use_search_best_wins(tmp_path):
     import numpy as np
 
-    from examples._experimental.ppo.adaptive_strategy_supervised import (
-        OUTCOME_DRAW,
-        OUTCOME_WIN,
-        balance_strategy_dataset,
-        load_strategy_dataset,
-    )
+    from examples._experimental.ppo.adaptive_strategy_supervised import balance_strategy_dataset, load_strategy_dataset
+    from examples._experimental.ppo.adaptive_common import OUTCOME_DRAW, OUTCOME_WIN
 
     path = tmp_path / "strategy.npz"
     samples = 4
@@ -1534,10 +1528,8 @@ def test_context_strategy_aux_grad_mask_preserves_pyramid_and_aux_only():
 def test_adaptive_soft_loss_can_add_extra_improvement_term():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
-    from examples._experimental.ppo.adaptive_search_distill import (
-        compute_adaptive_soft_conservative_loss,
-        search_score_target_probs,
-    )
+    from examples._experimental.ppo.adaptive_search_distill import compute_adaptive_soft_conservative_loss
+    from examples._experimental.ppo.training_utils import search_score_target_probs
 
     network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
     obs = jnp.zeros((2, ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
@@ -1612,10 +1604,8 @@ def test_adaptive_soft_loss_can_add_extra_improvement_term():
 def test_adaptive_soft_loss_can_add_search_value_target():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
-    from examples._experimental.ppo.adaptive_search_distill import (
-        compute_adaptive_soft_conservative_loss,
-        search_score_target_probs,
-    )
+    from examples._experimental.ppo.adaptive_search_distill import compute_adaptive_soft_conservative_loss
+    from examples._experimental.ppo.training_utils import search_score_target_probs
 
     network = AdaptivePolicyValueNetwork(jrandom.PRNGKey(0), pad_size=6, channels=(16, 16, 16, 8))
     obs = jnp.zeros((2, ADAPTIVE_INPUT_CHANNELS, 6, 6), dtype=jnp.float32)
@@ -1692,10 +1682,8 @@ def test_adaptive_soft_loss_can_add_search_value_target():
 def test_adaptive_soft_loss_can_add_search_outcome_target():
     from examples._experimental.ppo.adaptive_common import ADAPTIVE_INPUT_CHANNELS
     from examples._experimental.ppo.adaptive_network import AdaptivePolicyValueNetwork
-    from examples._experimental.ppo.adaptive_search_distill import (
-        compute_adaptive_soft_conservative_loss,
-        search_score_target_probs,
-    )
+    from examples._experimental.ppo.adaptive_search_distill import compute_adaptive_soft_conservative_loss
+    from examples._experimental.ppo.training_utils import search_score_target_probs
 
     network = AdaptivePolicyValueNetwork(
         jrandom.PRNGKey(0),
@@ -1775,7 +1763,7 @@ def test_adaptive_soft_loss_can_add_search_outcome_target():
 
 
 def test_strategy_aux_targets_include_finish_intent_and_enemy_general_belief():
-    from examples._experimental.ppo.adaptive_search_distill import OUTCOME_DRAW, OUTCOME_LOSS, OUTCOME_WIN
+    from examples._experimental.ppo.adaptive_common import OUTCOME_DRAW, OUTCOME_LOSS, OUTCOME_WIN
     from examples._experimental.ppo.adaptive_strategy_aux import (
         STRATEGY_INTENT_EXPAND,
         STRATEGY_INTENT_FINISH,
@@ -2197,11 +2185,8 @@ def test_mask_strategy_aux_grads_keeps_only_strategy_heads():
 
 def test_worker_bfs_label_moves_toward_general_target():
     from examples._experimental.ppo.adaptive_common import adaptive_index_to_action
-    from examples._experimental.ppo.adaptive_worker_pretrain import (
-        WORKER_INPUT_CHANNELS,
-        worker_bfs_action_index,
-        worker_obs_to_array,
-    )
+    from examples._experimental.ppo.adaptive_worker_pretrain import worker_bfs_action_index, worker_obs_to_array
+    from examples._experimental.ppo.adaptive_worker import WORKER_INPUT_CHANNELS
 
     pad_size = 6
     state = make_padded_state(size=4, pad_to=pad_size)
@@ -2234,7 +2219,7 @@ def test_worker_bfs_label_moves_toward_general_target():
 
 
 def test_worker_command_obs_to_array_uses_observation_command_channels():
-    from examples._experimental.ppo.adaptive_worker_pretrain import (
+    from examples._experimental.ppo.adaptive_worker import (
         WORKER_COMMAND_NAME_TO_ID,
         WORKER_INPUT_CHANNELS,
         worker_command_obs_to_array,
@@ -2261,7 +2246,7 @@ def test_worker_command_obs_to_array_uses_observation_command_channels():
 
 def test_worker_source_direction_targets_marginalize_full_move_planes():
     from examples._experimental.ppo.adaptive_common import adaptive_action_space_size
-    from examples._experimental.ppo.adaptive_worker_pretrain import worker_source_direction_targets
+    from examples._experimental.ppo.adaptive_worker import worker_source_direction_targets
 
     pad_size = 3
     targets = jnp.zeros((1, adaptive_action_space_size(pad_size)), dtype=jnp.float32)

@@ -36,12 +36,11 @@ from common import (
     stack_learner_actions,
 )
 from recurrent_network import RecurrentPolicyValueNetwork
-from train import (
+from examples._experimental.ppo.training_utils import (
     apply_general_target_rewards,
     apply_path_assignment_rewards,
     apply_terminal_reward,
     compute_gae,
-    load_or_create_network,
     select_learner_obs,
     select_opponent_obs,
 )
@@ -49,6 +48,7 @@ from generals.agents.ppo_policy_agent import (
     POLICY_INPUT_NAMES,
     POLICY_INPUT_NAME_TO_ID,
     PolicyValueNetwork,
+    load_or_create_network,
     parse_policy_channels,
 )
 from generals.core import game

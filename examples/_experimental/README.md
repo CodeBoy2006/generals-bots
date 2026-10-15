@@ -24,12 +24,18 @@ Experimental PPO (Proximal Policy Optimization) training implementation. Work in
 Shared code lives outside the executable trainers:
 
 - `ppo/common.py`: fixed-size maps, initial states, actions, checkpoint paths, and host-side evaluation summaries.
-- `ppo/adaptive_common.py`: adaptive observations, masks, fog memory, and scoreboard history.
+- `ppo/adaptive_common.py`: adaptive observations, masks, memory, rollout outcome labels, and seat splitting.
+- `ppo/adaptive_inference.py`: deployment policy adapters and online search, shared by the Web runtime and evaluator.
+- `ppo/adaptive_worker.py`: observation-only Worker commands and source/direction action marginals.
+- `ppo/adaptive_strategy_aux.py`: shared strategic labels and auxiliary loss helpers.
+- `ppo/adaptive_command_gate.py`: the gate network and its inference/training feature definitions.
+- `ppo/training_utils.py`: shared PPO rewards, GAE, fixed-size loss, and search-distillation targets.
 - `ppo/dataset_utils.py`: dataset path expansion, class weights, and NPZ/JSON shard writing.
 - `ppo/gate_training.py`: the weighted binary updates shared by command and adapter gates.
-- `generals.agents.ppo_policy_agent`: the fixed-size network and policy input encoders.
+- `generals.agents.ppo_policy_agent`: the fixed-size network, input encoders, action dispatch, and warm-start loading.
+- `generals.agents._ppo_search`: fixed-size rollout search used by interactive agents and evaluation.
 
-Import helpers from these modules directly. Keep algorithm-specific losses, rollout rules, and minibatch behavior in their existing trainers.
+Import helpers from these modules directly. Interactive inference does not import training or evaluation entrypoints. Keep algorithm-specific losses, rollout rules, and minibatch behavior in their existing trainers.
 
 The raw-game trainer is the primary path for quick experiments:
 

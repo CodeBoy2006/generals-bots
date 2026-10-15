@@ -20,11 +20,10 @@ import jax.random as jrandom
 import numpy as np
 import optax
 
-from adaptive_common import ADAPTIVE_MOVE_PLANES, adaptive_action_space_size
+from adaptive_common import ADAPTIVE_MOVE_PLANES, OUTCOME_WIN, adaptive_action_space_size
 from adaptive_network import load_or_create_adaptive_network
-from adaptive_worker_pretrain import worker_source_direction_logits, worker_source_direction_targets
+from examples._experimental.ppo.adaptive_worker import worker_source_direction_logits, worker_source_direction_targets
 from generals.agents.ppo_policy_agent import parse_policy_channels
-from train_adaptive import OUTCOME_WIN
 from dataset_utils import expand_dataset_paths
 
 PLAN_WORKER_EXTRA_CHANNELS = 3

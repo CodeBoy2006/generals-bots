@@ -12,11 +12,9 @@ from generals.agents._heuristic_logic import HEURISTIC_NAMES, heuristic_action
 from generals.agents.ppo_policy_agent import (
     augmented_full_state_to_array,
     full_state_to_array,
-    greedy_policy_action,
     index_to_action,
     normalize_action,
     obs_to_array,
-    sampled_policy_action,
 )
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
@@ -136,16 +134,6 @@ def opponent_action(opponent_id, key, obs, random_action_fn):
         opponent_id == 0,
         lambda _: random_action_fn(key, obs),
         lambda _: heuristic_action(opponent_id - 1, key, obs),
-        None,
-    )
-
-
-def policy_network_action(network, key, obs, policy_mode):
-    """Dispatch a policy checkpoint action using greedy or sampled execution."""
-    return jax.lax.cond(
-        policy_mode == 0,
-        lambda _: greedy_policy_action(network, obs),
-        lambda _: sampled_policy_action(network, obs, key),
         None,
     )
 

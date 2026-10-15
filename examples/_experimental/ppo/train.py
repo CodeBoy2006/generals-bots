@@ -18,11 +18,7 @@ import equinox as eqx
 import optax
 
 from generals.core import game
-from generals.core.rewards import (
-    composite_reward_fn,
-    general_target_reward_fn,
-    path_assignment_reward_fn,
-)
+from generals.core.rewards import composite_reward_fn
 
 from common import (
     OPPONENT_NAMES,
@@ -44,7 +40,17 @@ from generals.agents.ppo_policy_agent import (
     POLICY_INPUT_NAMES,
     POLICY_INPUT_NAME_TO_ID,
     PolicyValueNetwork,
+    load_or_create_network,
     parse_policy_channels,
+)
+from examples._experimental.ppo.training_utils import (
+    apply_general_target_rewards,
+    apply_path_assignment_rewards,
+    apply_terminal_reward,
+    compute_gae,
+    ppo_loss,
+    select_learner_obs,
+    select_opponent_obs,
 )
 
 
@@ -120,138 +126,6 @@ def resolve_opponent_source(opponent_policy_path, self_play_opponent, opponent_p
     if opponent_policy_path is not None:
         return "checkpoint"
     return "heuristic"
-
-
-def load_or_create_network(key, grid_size, init_model_path=None, channels=None, input_channels=9, init_input_channels=None):
-    """Create a policy network and optionally restore its leaves from a checkpoint."""
-    parsed_channels = parse_policy_channels(channels)
-    network = PolicyValueNetwork(
-        key,
-        grid_size=grid_size,
-        channels=parsed_channels,
-        input_channels=input_channels,
-    )
-    if init_model_path is None:
-        return network
-
-    path = Path(init_model_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Warm-start checkpoint not found: {path}")
-    if init_input_channels is not None and init_input_channels != input_channels:
-        if init_input_channels > input_channels:
-            raise ValueError("init_input_channels cannot exceed input_channels")
-        source_network = PolicyValueNetwork(
-            key,
-            grid_size=grid_size,
-            channels=parsed_channels,
-            input_channels=init_input_channels,
-        )
-        source_network = eqx.tree_deserialise_leaves(path, source_network)
-        conv1_weight = jnp.zeros_like(network.conv1.weight)
-        conv1_weight = conv1_weight.at[:, :init_input_channels, :, :].set(source_network.conv1.weight)
-        network = eqx.tree_at(lambda net: net.conv1.weight, network, conv1_weight)
-        network = eqx.tree_at(
-            lambda net: (
-                net.conv1.bias,
-                net.conv2,
-                net.conv3,
-                net.conv4,
-                net.policy_conv,
-                net.value_conv,
-                net.value_linear1,
-                net.value_linear2,
-            ),
-            network,
-            (
-                source_network.conv1.bias,
-                source_network.conv2,
-                source_network.conv3,
-                source_network.conv4,
-                source_network.policy_conv,
-                source_network.value_conv,
-                source_network.value_linear1,
-                source_network.value_linear2,
-            ),
-        )
-        return network
-    return eqx.tree_deserialise_leaves(path, network)
-
-
-def select_learner_obs(obs_p0, obs_p1, learner_player):
-    """Select observations from the learner player's perspective."""
-    return jax.lax.cond(learner_player == 0, lambda _: obs_p0, lambda _: obs_p1, None)
-
-
-def select_opponent_obs(obs_p0, obs_p1, learner_player):
-    """Select observations from the opponent player's perspective."""
-    return jax.lax.cond(learner_player == 0, lambda _: obs_p1, lambda _: obs_p0, None)
-
-
-def apply_terminal_reward(rewards, infos, learner_player, terminal_reward_scale):
-    """Add an optional zero-sum win/loss reward on decisive terminal transitions."""
-    opponent_player = 1 - learner_player
-    terminal_bonus = jnp.where(
-        infos.winner == learner_player,
-        terminal_reward_scale,
-        jnp.where(infos.winner == opponent_player, -terminal_reward_scale, 0.0),
-    )
-    terminal_bonus = jnp.where(infos.is_done & (infos.winner >= 0), terminal_bonus, 0.0)
-    return rewards + terminal_bonus
-
-
-def apply_general_target_rewards(
-    rewards,
-    prior_states,
-    states,
-    learner_player,
-    general_target_reward_scale,
-    general_target_max_distance,
-    general_target_min_army,
-):
-    """Add state-aware pressure shaping toward the opponent general."""
-    shaping = jax.vmap(
-        lambda prior_state, state: general_target_reward_fn(
-            prior_state,
-            state,
-            learner_player,
-            general_target_reward_scale,
-            general_target_max_distance,
-            general_target_min_army,
-        )
-    )(prior_states, states)
-    return rewards + shaping
-
-
-def apply_path_assignment_rewards(
-    rewards,
-    prior_states,
-    states,
-    learner_player,
-    path_assignment_reward_scale,
-    path_assignment_max_distance,
-    path_assignment_min_army,
-    path_assignment_general_weight,
-    path_assignment_city_weight,
-    path_assignment_frontier_weight,
-):
-    """Add shortest-path target-assignment shaping for transport progress."""
-    if path_assignment_reward_scale <= 0.0:
-        return rewards
-
-    shaping = jax.vmap(
-        lambda prior_state, state: path_assignment_reward_fn(
-            prior_state,
-            state,
-            learner_player,
-            path_assignment_reward_scale,
-            path_assignment_max_distance,
-            path_assignment_min_army,
-            path_assignment_general_weight,
-            path_assignment_city_weight,
-            path_assignment_frontier_weight,
-        )
-    )(prior_states, states)
-    return rewards + shaping
 
 
 @eqx.filter_jit
@@ -577,47 +451,6 @@ def rollout_step_policy_pool_opponent(
     )
 
     return final_states, (obs_arr, masks, learner_actions, logprobs, values, rewards, dones, infos), key
-
-
-@jax.jit
-def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
-    """Compute GAE advantages and value returns."""
-    num_steps, num_envs = rewards.shape
-    values_with_bootstrap = jnp.concatenate([values, jnp.zeros((1, num_envs))], axis=0)
-
-    def gae_step(carry, inputs):
-        last_adv = carry
-        reward, value, next_value, done = inputs
-        nonterminal = 1.0 - done
-        delta = reward + gamma * next_value * nonterminal - value
-        advantage = delta + gamma * lam * nonterminal * last_adv
-        return advantage, advantage
-
-    inputs = (
-        rewards[::-1],
-        values[::-1],
-        values_with_bootstrap[1:][::-1],
-        dones[::-1],
-    )
-    _, advantages_rev = jax.lax.scan(gae_step, jnp.zeros(num_envs), inputs)
-    advantages = advantages_rev[::-1]
-    returns = advantages + values
-    return advantages, returns
-
-
-@jax.jit
-def ppo_loss(network, obs, mask, action, old_logprob, advantage, ret, clip=0.2):
-    """PPO loss for single sample."""
-    _, value, logprob, entropy = network(obs, mask, None, action)
-    
-    ratio = jnp.exp(logprob - old_logprob)
-    clipped = jnp.clip(ratio, 1 - clip, 1 + clip) * advantage
-    policy_loss = -jnp.minimum(ratio * advantage, clipped)
-    
-    value_loss = 0.5 * (value - ret) ** 2
-    entropy_loss = -0.01 * entropy
-    
-    return policy_loss + value_loss + entropy_loss
 
 
 @eqx.filter_jit

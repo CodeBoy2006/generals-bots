@@ -40,7 +40,7 @@ from generals.agents.ppo_policy_agent import (
     parse_policy_channels,
 )
 from generals.core import game
-from search_policy import rollout_search_action
+from generals.agents._ppo_search import rollout_search_action
 
 REQUIRED_HEURISTIC_OPPONENTS = tuple(HEURISTIC_NAMES)
 

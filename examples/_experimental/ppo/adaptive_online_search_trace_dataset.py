@@ -27,6 +27,9 @@ import numpy as np
 
 from adaptive_common import (
     ADAPTIVE_MOVE_PLANES,
+    OUTCOME_DRAW,
+    OUTCOME_LOSS,
+    OUTCOME_WIN,
     adaptive_action_to_index,
     adaptive_index_to_action,
     adaptive_input_channel_count,
@@ -39,41 +42,37 @@ from adaptive_common import (
     empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
+    outcome_class_from_winner,
     parse_grid_size_weights,
     parse_grid_sizes,
     reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    split_mixed_env_counts,
     update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
-from adaptive_search_distill import outcome_class_from_winner
-from adaptive_strategy_dataset import full_state_strategy_labels
+from examples._experimental.ppo.adaptive_strategy_aux import full_state_strategy_labels
 from adaptive_teacher_imitation import policy_action_from_logits
 from common import (
     OPPONENT_NAMES,
     OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
     opponent_action,
-    policy_network_action,
     random_action,
     stack_learner_actions,
 )
-from evaluate_adaptive_policy import (
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels, policy_network_action
+from examples._experimental.ppo.adaptive_inference import (
     POLICY_ADAPTER_MODE_TO_ID,
     policy_adapter_blend_logits,
     policy_adapter_delta_logits,
     scalar_reset_fog_memory,
     search_score_observation,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from generals.core import game
-from train_adaptive import split_mixed_env_counts
 from dataset_utils import save_shard
 
 POLICY_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
-OUTCOME_LOSS = 0
-OUTCOME_DRAW = 1
-OUTCOME_WIN = 2
 
 
 def dynamic_adapter_logits(

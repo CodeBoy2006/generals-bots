@@ -41,14 +41,16 @@ from adaptive_common import (
     empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
+    outcome_class_from_winner,
     parse_grid_size_weights,
     parse_grid_sizes,
     reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    split_mixed_env_counts,
     update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
-from adaptive_strategy_aux import strategy_aux_targets
+from adaptive_strategy_aux import binary_cross_entropy_with_logits, strategy_aux_targets
 from common import (
     POLICY_MODE_NAMES,
     POLICY_MODE_NAME_TO_ID,
@@ -56,7 +58,7 @@ from common import (
     prune_old_checkpoints,
     stack_learner_actions,
 )
-from conservative_search_distill import (
+from examples._experimental.ppo.training_utils import (
     search_score_target_probs,
     select_search_improvements,
     weighted_topk_cross_entropy,
@@ -69,9 +71,6 @@ STRATEGY_Q_TARGET_NAMES = ("score", "outcome", "outcome-score")
 STRATEGY_Q_TARGET_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATEGY_Q_TARGET_NAMES)}
 STRATEGY_Q_WEIGHT_MODE_NAMES = ("active", "accepted")
 STRATEGY_Q_WEIGHT_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(STRATEGY_Q_WEIGHT_MODE_NAMES)}
-OUTCOME_LOSS = 0
-OUTCOME_DRAW = 1
-OUTCOME_WIN = 2
 SOFT_SEARCH_WEIGHT_INDEX = 8
 SOFT_IMPROVEMENT_EXTRA_WEIGHT_INDEX = 9
 SOFT_SEARCH_VALUE_WEIGHT_INDEX = 11
@@ -91,14 +90,6 @@ SOFT_REPLAY_ZERO_WEIGHT_INDICES = (
     SOFT_STRATEGY_FINISH_WEIGHT_INDEX,
     SOFT_STRATEGY_BELIEF_WEIGHT_INDEX,
 )
-
-
-def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
-    """Split total vectorized environments across both learner seats."""
-    if num_envs < 2:
-        raise ValueError("mixed learner mode requires at least two environments")
-    p0_envs = num_envs // 2
-    return p0_envs, num_envs - p0_envs
 
 
 def concatenate_flat_batches(*batches):
@@ -264,15 +255,6 @@ def strategy_q_sample_weights(
         lambda _: active_weights,
         None,
     )
-
-
-def outcome_class_from_winner(winner: jnp.ndarray, player: jnp.ndarray) -> jnp.ndarray:
-    """Map a winner id to loss/draw/win from one learner perspective."""
-    return jnp.where(
-        winner < 0,
-        OUTCOME_DRAW,
-        jnp.where(winner == player, OUTCOME_WIN, OUTCOME_LOSS),
-    ).astype(jnp.int32)
 
 
 def mask_legacy_distill_grads(grads, legacy_input_channels: int = ADAPTIVE_INPUT_CHANNELS):
@@ -531,11 +513,6 @@ def compute_adaptive_soft_conservative_loss(
         "target_entropy": jnp.sum(target_entropy * search_weights) / search_normalizer,
     }
     return loss, metrics
-
-
-def binary_cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray:
-    """Numerically stable binary cross-entropy."""
-    return jnp.maximum(logits, 0.0) - logits * targets + jnp.log1p(jnp.exp(-jnp.abs(logits)))
 
 
 def strategy_q_pairwise_rank_loss(

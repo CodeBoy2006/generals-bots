@@ -25,7 +25,6 @@ from common import (
     make_grids,
     opponent_action,
     policy_input_default_channels,
-    policy_network_action,
     policy_state_action,
     random_action,
     summarize_policy_results,
@@ -35,6 +34,7 @@ from generals.agents.ppo_policy_agent import (
     POLICY_INPUT_NAME_TO_ID,
     PolicyValueNetwork,
     parse_policy_channels,
+    policy_network_action,
 )
 
 

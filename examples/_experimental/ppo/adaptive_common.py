@@ -22,6 +22,10 @@ ADAPTIVE_HISTORY_INPUT_CHANNELS = ADAPTIVE_GLOBAL_INPUT_CHANNELS + ADAPTIVE_SCOR
 ADAPTIVE_FOG_MEMORY_CHANNELS = 5
 ADAPTIVE_MOVE_PLANES = 8
 
+OUTCOME_LOSS = 0
+OUTCOME_DRAW = 1
+OUTCOME_WIN = 2
+
 
 class AdaptiveStatePool(NamedTuple):
     states: game.GameState
@@ -442,3 +446,76 @@ def adaptive_expander_target_probs(obs, effective_size: int, pad_size: int) -> j
     target = target.at[: 4 * pad_size * pad_size].set(full_planes)
     target = target.at[-1].set(jnp.where(num_valid == 0, 1.0, 0.0))
     return target
+
+
+def outcome_class_from_winner(winner: jnp.ndarray, learner_player: jnp.ndarray) -> jnp.ndarray:
+    """Map a winner id to loss/draw/win from each learner perspective."""
+    return jnp.where(
+        winner < 0,
+        OUTCOME_DRAW,
+        jnp.where(winner == learner_player, OUTCOME_WIN, OUTCOME_LOSS),
+    ).astype(jnp.int32)
+
+
+def rollout_outcome_targets(
+    winners: jnp.ndarray,
+    dones: jnp.ndarray,
+    learner_players: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Assign each rollout sample the next known episode outcome within the rollout."""
+    learner_players = jnp.broadcast_to(learner_players, winners.shape[1:])
+    default_targets = jnp.full(winners.shape[1:], OUTCOME_LOSS, dtype=jnp.int32)
+    default_weights = jnp.zeros(winners.shape[1:], dtype=jnp.float32)
+
+    def scan_step(carry, inputs):
+        next_targets, next_weights = carry
+        done, winner = inputs
+        current_targets = outcome_class_from_winner(winner, learner_players)
+        targets = jnp.where(done, current_targets, next_targets)
+        weights = jnp.where(done, 1.0, next_weights)
+        return (targets, weights), (targets, weights)
+
+    _, (targets_rev, weights_rev) = jax.lax.scan(
+        scan_step,
+        (default_targets, default_weights),
+        (dones[::-1], winners[::-1]),
+    )
+    return targets_rev[::-1], weights_rev[::-1]
+
+
+def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
+    """Split total vectorized environments across learner seats for mixed PPO."""
+    if num_envs < 2:
+        raise ValueError("mixed learner mode requires at least two environments")
+    p0_envs = num_envs // 2
+    return p0_envs, num_envs - p0_envs
+
+
+def teacher_obs_from_student_obs(obs: jnp.ndarray, teacher_input_channels: int) -> jnp.ndarray:
+    """Drop student-only memory/history planes when querying a legacy teacher."""
+    if obs.shape[0] == teacher_input_channels:
+        return obs
+    if teacher_input_channels == ADAPTIVE_INPUT_CHANNELS:
+        return obs[:ADAPTIVE_INPUT_CHANNELS]
+    fog_end = ADAPTIVE_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS
+    if obs.shape[0] == ADAPTIVE_GLOBAL_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS:
+        if teacher_input_channels == ADAPTIVE_GLOBAL_INPUT_CHANNELS:
+            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 5]], axis=0)
+    if obs.shape[0] == ADAPTIVE_HISTORY_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS:
+        if teacher_input_channels == ADAPTIVE_GLOBAL_INPUT_CHANNELS:
+            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 5]], axis=0)
+        if teacher_input_channels == ADAPTIVE_HISTORY_INPUT_CHANNELS:
+            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 15]], axis=0)
+    return obs[:teacher_input_channels]
+
+
+def rollout_steps_to_next_done(dones: jnp.ndarray) -> jnp.ndarray:
+    """Return how many rollout steps remain before the next done marker."""
+    sentinel = jnp.full(dones.shape[1:], dones.shape[0] + 1, dtype=jnp.int32)
+
+    def scan_step(next_steps, done):
+        current_steps = jnp.where(done, 0, next_steps + 1)
+        return current_steps, current_steps
+
+    _, steps_rev = jax.lax.scan(scan_step, sentinel, dones[::-1])
+    return steps_rev[::-1]

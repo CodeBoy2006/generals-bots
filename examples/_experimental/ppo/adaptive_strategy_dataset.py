@@ -21,7 +21,8 @@ import numpy as np
 
 from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
-    active_cells_for_size,
+    OUTCOME_DRAW,
+    OUTCOME_WIN,
     adaptive_action_to_index,
     adaptive_expander_target_probs,
     adaptive_index_to_action,
@@ -35,10 +36,15 @@ from adaptive_common import (
     empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
+    outcome_class_from_winner,
     parse_grid_size_weights,
     parse_grid_sizes,
     reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    rollout_outcome_targets,
+    rollout_steps_to_next_done,
+    split_mixed_env_counts,
+    teacher_obs_from_student_obs,
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
@@ -46,90 +52,26 @@ from adaptive_search_distill import (
     adaptive_adapter_logits,
     adaptive_rollout_search_candidates,
     adaptive_score_observation,
-    outcome_class_from_winner,
 )
-from adaptive_strategy_aux import weak_intent_label
-from adaptive_teacher_imitation import (
-    fixed_policy_teacher_logits,
-    policy_action_from_logits,
-    rollout_steps_to_next_done,
-)
+from adaptive_teacher_imitation import fixed_policy_teacher_logits, policy_action_from_logits
 from common import (
     OPPONENT_NAMES,
     OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
     opponent_action,
-    policy_network_action,
     random_action,
     stack_learner_actions,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels, policy_network_action
 from generals.core import game
-from train_adaptive import (
-    OUTCOME_DRAW,
-    OUTCOME_WIN,
-    rollout_outcome_targets,
-    split_mixed_env_counts,
-    teacher_obs_from_student_obs,
-)
 from dataset_utils import save_shard
+from examples._experimental.ppo.adaptive_strategy_aux import full_state_strategy_labels
 
 TEACHER_KINDS = ("adaptive", "fixed", "expander", "search", "fixed-search")
 TEACHER_KIND_TO_ID = {name: index for index, name in enumerate(TEACHER_KINDS)}
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
 POLICY_ADAPTER_MODES = ("delta", "blend", "replace")
 POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODES)}
-
-
-def one_hot_cell(row: jnp.ndarray, col: jnp.ndarray, pad_size: int, active: jnp.ndarray) -> jnp.ndarray:
-    """Return a one-hot spatial map clipped to active board cells."""
-    rows = jnp.arange(pad_size)[:, None]
-    cols = jnp.arange(pad_size)[None, :]
-    return ((rows == row) & (cols == col) & active).astype(jnp.float32)
-
-
-def main_stack_heatmap(state, learner_player: int, active: jnp.ndarray) -> jnp.ndarray:
-    """Return one-hot map for the learner-owned cell with the largest army."""
-    own = state.ownership[learner_player] & active
-    scores = jnp.where(own, state.armies, -1)
-    flat_index = jnp.argmax(scores.reshape(-1))
-    row = flat_index // state.armies.shape[1]
-    col = flat_index % state.armies.shape[1]
-    return one_hot_cell(row, col, state.armies.shape[0], active)
-
-
-def full_state_strategy_labels(state, obs, learner_player: int, effective_size: int, pad_size: int):
-    """Build belief, target, source, and weak-intent labels from the privileged state."""
-    opponent = 1 - learner_player
-    active = active_cells_for_size(effective_size, pad_size)
-    enemy_general_row, enemy_general_col = state.general_positions[opponent]
-    enemy_general = one_hot_cell(enemy_general_row, enemy_general_col, pad_size, active)
-    enemy_owned = (state.ownership[opponent] & active).astype(jnp.float32)
-    hidden_enemy_owned = (state.ownership[opponent] & obs.fog_cells & active).astype(jnp.float32)
-    hidden_enemy_army = jnp.log1p(jnp.maximum(state.armies.astype(jnp.float32), 0.0)) * hidden_enemy_owned
-    city_map = (state.cities & active).astype(jnp.float32)
-    source = main_stack_heatmap(state, learner_player, active)
-    no_search_outcomes = jnp.full((1,), -1, dtype=jnp.int32)
-    intent = weak_intent_label(obs, state, learner_player, no_search_outcomes)
-    visible_enemy_count = jnp.sum(obs.opponent_cells.astype(jnp.float32) * active.astype(jnp.float32))
-    visible_enemy_density = visible_enemy_count / jnp.maximum(
-        jnp.sum(active.astype(jnp.float32)),
-        1.0,
-    )
-    contact = jnp.any(obs.opponent_cells & active).astype(jnp.float32)
-    return (
-        enemy_general,
-        enemy_owned,
-        hidden_enemy_owned,
-        hidden_enemy_army,
-        city_map,
-        source,
-        enemy_general,
-        intent,
-        visible_enemy_count,
-        visible_enemy_density,
-        contact,
-    )
 
 
 def teacher_logits_for_batch(

@@ -21,7 +21,6 @@ import jax.random as jrandom
 import optax
 
 from adaptive_common import (
-    ADAPTIVE_FOG_MEMORY_CHANNELS,
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
@@ -40,6 +39,9 @@ from adaptive_common import (
     parse_grid_sizes,
     reset_adaptive_fog_memory,
     reset_adaptive_scoreboard_history,
+    rollout_outcome_targets,
+    split_mixed_env_counts,
+    teacher_obs_from_student_obs,
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, hl_gauss_value_loss, load_or_create_adaptive_network
@@ -49,21 +51,17 @@ from common import (
     POLICY_MODE_NAMES,
     checkpoint_path_for_iteration,
     opponent_action,
-    policy_network_action,
     prune_old_checkpoints,
     random_action,
     stack_learner_actions,
 )
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels, policy_network_action
 from generals.core import game
 from generals.core.rewards import composite_reward_fn
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
-from train import apply_terminal_reward, compute_gae
+from examples._experimental.ppo.training_utils import apply_terminal_reward, compute_gae
 
 REWARD_MODE_NAMES = ("composite", "terminal")
 REWARD_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(REWARD_MODE_NAMES)}
-OUTCOME_LOSS = 0
-OUTCOME_DRAW = 1
-OUTCOME_WIN = 2
 
 
 def apply_truncation_reward(rewards, truncated, scale):
@@ -126,41 +124,6 @@ def stratified_top_advantage_weights(
     return jnp.minimum(weights, 1.0)
 
 
-def outcome_class_from_winner(winner: jnp.ndarray, learner_player: jnp.ndarray) -> jnp.ndarray:
-    """Map a winner id to loss/draw/win from each learner perspective."""
-    return jnp.where(
-        winner < 0,
-        OUTCOME_DRAW,
-        jnp.where(winner == learner_player, OUTCOME_WIN, OUTCOME_LOSS),
-    ).astype(jnp.int32)
-
-
-def rollout_outcome_targets(
-    winners: jnp.ndarray,
-    dones: jnp.ndarray,
-    learner_players: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Assign each rollout sample the next known episode outcome within the rollout."""
-    learner_players = jnp.broadcast_to(learner_players, winners.shape[1:])
-    default_targets = jnp.full(winners.shape[1:], OUTCOME_LOSS, dtype=jnp.int32)
-    default_weights = jnp.zeros(winners.shape[1:], dtype=jnp.float32)
-
-    def scan_step(carry, inputs):
-        next_targets, next_weights = carry
-        done, winner = inputs
-        current_targets = outcome_class_from_winner(winner, learner_players)
-        targets = jnp.where(done, current_targets, next_targets)
-        weights = jnp.where(done, 1.0, next_weights)
-        return (targets, weights), (targets, weights)
-
-    _, (targets_rev, weights_rev) = jax.lax.scan(
-        scan_step,
-        (default_targets, default_weights),
-        (dones[::-1], winners[::-1]),
-    )
-    return targets_rev[::-1], weights_rev[::-1]
-
-
 def update_ema_network(ema_network, network, decay: float):
     """Return an exponential moving average over trainable floating-point leaves."""
 
@@ -201,14 +164,6 @@ def resolve_learner_player(value: str, iteration: int) -> int:
     if value == "mixed":
         raise ValueError("mixed learner mode is resolved by collect_mixed_rollout")
     return int(value)
-
-
-def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
-    """Split total vectorized environments across learner seats for mixed PPO."""
-    if num_envs < 2:
-        raise ValueError("mixed learner mode requires at least two environments")
-    p0_envs = num_envs // 2
-    return p0_envs, num_envs - p0_envs
 
 
 def policy_sized_observation(obs, effective_size: jnp.ndarray, policy_grid_size: int):
@@ -690,24 +645,6 @@ def ppo_loss(network, obs, mask, active, action, old_logprob, advantage, ret, cl
     """PPO loss for one adaptive sample."""
     policy_loss, value_loss, entropy = ppo_loss_terms(network, obs, mask, active, action, old_logprob, advantage, ret, clip)
     return policy_loss + value_loss - 0.01 * entropy
-
-
-def teacher_obs_from_student_obs(obs: jnp.ndarray, teacher_input_channels: int) -> jnp.ndarray:
-    """Drop student-only memory/history planes when querying a legacy teacher."""
-    if obs.shape[0] == teacher_input_channels:
-        return obs
-    if teacher_input_channels == ADAPTIVE_INPUT_CHANNELS:
-        return obs[:ADAPTIVE_INPUT_CHANNELS]
-    fog_end = ADAPTIVE_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS
-    if obs.shape[0] == ADAPTIVE_GLOBAL_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS:
-        if teacher_input_channels == ADAPTIVE_GLOBAL_INPUT_CHANNELS:
-            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 5]], axis=0)
-    if obs.shape[0] == ADAPTIVE_HISTORY_INPUT_CHANNELS + ADAPTIVE_FOG_MEMORY_CHANNELS:
-        if teacher_input_channels == ADAPTIVE_GLOBAL_INPUT_CHANNELS:
-            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 5]], axis=0)
-        if teacher_input_channels == ADAPTIVE_HISTORY_INPUT_CHANNELS:
-            return jnp.concatenate([obs[:ADAPTIVE_INPUT_CHANNELS], obs[fog_end : fog_end + 15]], axis=0)
-    return obs[:teacher_input_channels]
 
 
 def teacher_policy_kl(network, teacher_network, obs, mask, active, teacher_input_channels: int) -> jnp.ndarray:

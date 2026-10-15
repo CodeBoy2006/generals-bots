@@ -35,9 +35,9 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
-from adaptive_worker_pretrain import (
-    WORKER_COMMAND_NAME_TO_ID,
+from examples._experimental.ppo.adaptive_worker import (
     WORKER_COMMAND_NAMES,
+    WORKER_COMMAND_NAME_TO_ID,
     WORKER_INPUT_CHANNELS,
     worker_command_obs_to_array,
 )

@@ -21,17 +21,20 @@ import jax.random as jrandom
 import numpy as np
 import optax
 
-from adaptive_command_gate import COMMAND_GATE_FEATURE_DIM, COMMAND_GATE_FEATURE_NAMES, CommandGateNetwork
-from adaptive_common import ADAPTIVE_MOVE_PLANES, parse_grid_sizes
+from adaptive_command_gate import (
+    COMMAND_GATE_FEATURE_DIM,
+    COMMAND_GATE_FEATURE_NAMES,
+    CommandGateNetwork,
+    command_gate_features,
+)
+from adaptive_common import ADAPTIVE_MOVE_PLANES, OUTCOME_WIN, parse_grid_sizes
 from adaptive_network import load_or_create_adaptive_network
-from evaluate_adaptive_policy import (
+from examples._experimental.ppo.adaptive_worker import (
     PLAN_WORKER_COMMAND_SOURCE_NAMES,
     PLAN_WORKER_COMMAND_SOURCE_TO_ID,
-    command_gate_features,
     strategy_plan_worker_obs,
 )
 from generals.agents.ppo_policy_agent import parse_policy_channels
-from train_adaptive import OUTCOME_WIN
 from gate_training import train_epoch
 from dataset_utils import expand_dataset_paths
 

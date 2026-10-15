@@ -20,13 +20,12 @@ import jax.random as jrandom
 import optax
 
 from adaptive_common import (
-    ADAPTIVE_INPUT_CHANNELS,
+    active_cells_for_size,
     adaptive_action_space_size,
     adaptive_action_to_index,
     adaptive_expander_target_probs,
     adaptive_index_to_action,
     adaptive_obs_to_array,
-    active_cells_for_size,
     compute_adaptive_valid_move_mask,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
@@ -38,18 +37,15 @@ from generals.core import game
 from generals.core.action import DIRECTIONS
 from generals.core.rewards import shortest_path_distance_map
 from common import checkpoint_path_for_iteration, prune_old_checkpoints
+from examples._experimental.ppo.adaptive_worker import (
+    WORKER_INPUT_CHANNELS,
+    worker_source_direction_logits,
+    worker_source_direction_targets,
+)
 
-WORKER_EXTRA_CHANNELS = 3
-WORKER_INPUT_CHANNELS = ADAPTIVE_INPUT_CHANNELS + WORKER_EXTRA_CHANNELS
 WORKER_TARGET_NAMES = ("general", "city", "frontier", "random")
 WORKER_TARGET_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_TARGET_NAMES)}
 WORKER_TARGET_RANDOM = WORKER_TARGET_NAME_TO_ID["random"]
-WORKER_COMMAND_NAMES = ("auto", "visible-general", "city", "frontier")
-WORKER_COMMAND_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_COMMAND_NAMES)}
-WORKER_COMMAND_AUTO = WORKER_COMMAND_NAME_TO_ID["auto"]
-WORKER_COMMAND_VISIBLE_GENERAL = WORKER_COMMAND_NAME_TO_ID["visible-general"]
-WORKER_COMMAND_CITY = WORKER_COMMAND_NAME_TO_ID["city"]
-WORKER_COMMAND_FRONTIER = WORKER_COMMAND_NAME_TO_ID["frontier"]
 
 
 def worker_target_mask(state, player: int, effective_size: int, pad_size: int, target_family: int) -> jnp.ndarray:
@@ -103,49 +99,6 @@ def worker_obs_to_array(
     extra = jnp.stack(
         [
             target_mask.astype(jnp.float32) * active_f,
-            source_heatmap,
-            route_potential,
-        ],
-        axis=0,
-    )
-    return jnp.concatenate([base, extra], axis=0), active
-
-
-def worker_command_target_mask(obs, effective_size: int, pad_size: int, command_mode: int) -> jnp.ndarray:
-    """Build a command target mask from fogged observation only."""
-    active = active_cells_for_size(effective_size, pad_size)
-    visible_general = obs.generals & obs.opponent_cells & active
-    city_targets = ((obs.cities & ~obs.owned_cells) | obs.structures_in_fog) & active
-    frontier_targets = (obs.opponent_cells | obs.neutral_cells | obs.fog_cells | obs.structures_in_fog) & active
-    fallback = jnp.where(jnp.any(frontier_targets), frontier_targets, active & ~obs.owned_cells)
-    general_or_frontier = jnp.where(jnp.any(visible_general), visible_general, fallback)
-    city_or_frontier = jnp.where(jnp.any(city_targets), city_targets, fallback)
-    auto_targets = jnp.where(jnp.any(visible_general), visible_general, city_or_frontier)
-    options = jnp.stack([auto_targets, general_or_frontier, city_or_frontier, fallback], axis=0)
-    return options[command_mode]
-
-
-def worker_command_obs_to_array(
-    obs,
-    effective_size: int,
-    pad_size: int,
-    command_mode: int,
-    min_army: int,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Append observation-only Worker command channels for policy execution."""
-    base, active = adaptive_obs_to_array(obs, effective_size, pad_size)
-    target_mask = worker_command_target_mask(obs, effective_size, pad_size, command_mode)
-    passable = active & ~obs.mountains
-    distance = shortest_path_distance_map(passable, target_mask)
-    eligible = obs.owned_cells & active & (obs.armies >= min_army)
-    army_scale = jnp.maximum(jnp.log1p(jnp.max(obs.armies.astype(jnp.float32))), 1.0)
-    source_heatmap = jnp.where(eligible, jnp.log1p(obs.armies.astype(jnp.float32)) / army_scale, 0.0)
-    max_distance = jnp.maximum(jnp.asarray(effective_size * effective_size, dtype=jnp.float32), 1.0)
-    route_potential = 1.0 - jnp.minimum(distance.astype(jnp.float32), max_distance) / max_distance
-    route_potential = jnp.where(active, route_potential, 0.0)
-    extra = jnp.stack(
-        [
-            target_mask.astype(jnp.float32) * active.astype(jnp.float32),
             source_heatmap,
             route_potential,
         ],
@@ -232,29 +185,6 @@ def worker_bfs_target_probs(
     probs = jnp.where(has_label, jax.nn.softmax(logits, axis=0), fallback)
     label = jnp.argmax(probs).astype(jnp.int32)
     return probs, label, has_label.astype(jnp.float32)
-
-
-def worker_source_direction_targets(targets: jnp.ndarray, pad_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Marginalize adaptive action targets into source-cell and direction targets."""
-    leading_shape = targets.shape[:-1]
-    move_planes = targets[..., : 8 * pad_size * pad_size].reshape(*leading_shape, 8, pad_size, pad_size)
-    source_targets = jnp.sum(move_planes, axis=-3).reshape(*leading_shape, pad_size * pad_size)
-    full_direction_targets = jnp.sum(move_planes[..., :4, :, :], axis=(-1, -2))
-    half_direction_targets = jnp.sum(move_planes[..., 4:8, :, :], axis=(-1, -2))
-    direction_targets = full_direction_targets + half_direction_targets
-    return source_targets, direction_targets
-
-
-def worker_source_direction_logits(logits: jnp.ndarray, pad_size: int) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Convert flat adaptive logits into source-cell and direction logits."""
-    leading_shape = logits.shape[:-1]
-    move_logits = logits[..., : 8 * pad_size * pad_size].reshape(*leading_shape, 8, pad_size, pad_size)
-    source_logits = jax.nn.logsumexp(move_logits, axis=-3).reshape(*leading_shape, pad_size * pad_size)
-    direction_logits = jax.nn.logsumexp(
-        jnp.stack([move_logits[..., :4, :, :], move_logits[..., 4:8, :, :]], axis=-1),
-        axis=(-1, -2, -3),
-    )
-    return source_logits, direction_logits
 
 
 def target_families_for_mode(key, num_envs: int, target_mode: int) -> jnp.ndarray:

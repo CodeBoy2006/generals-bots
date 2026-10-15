@@ -4,6 +4,8 @@ import jax.random as jrandom
 from examples._experimental.ppo.conservative_search_distill import (
     compute_conservative_loss,
     compute_soft_conservative_loss,
+)
+from examples._experimental.ppo.training_utils import (
     search_score_target_probs,
     select_search_improvements,
     weighted_topk_cross_entropy,
