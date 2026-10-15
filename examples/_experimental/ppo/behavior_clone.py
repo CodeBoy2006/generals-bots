@@ -21,16 +21,18 @@ from generals.core import game
 from generals.core.action import compute_valid_move_mask
 
 from common import (
-    TEACHER_NAME_TO_ID,
     TEACHER_NAMES,
+    TEACHER_NAME_TO_ID,
     action_to_index,
     action_to_target_probs,
     expander_target_probs,
     heuristic_action,
+    make_initial_states,
     make_state_pool,
+    random_action,
 )
-from network import obs_to_array
-from train import load_or_create_network, random_action
+from train import load_or_create_network
+from generals.agents.ppo_policy_agent import obs_to_array
 
 
 @eqx.filter_jit
@@ -127,14 +129,6 @@ def train_bc_step(network, opt_state, obs, masks, targets, teacher_indices, opti
     updates, opt_state = optimizer.update(grads, opt_state, params)
     network = eqx.apply_updates(network, updates)
     return network, opt_state, loss, accuracy
-
-
-def make_initial_states(pool, num_envs):
-    """Take initial states from the pool and spread future reset indices."""
-    states = jax.tree.map(lambda x: x[:num_envs], pool)
-    pool_size = pool.armies.shape[0]
-    pool_idx = (jnp.arange(num_envs, dtype=jnp.int32) + num_envs) % pool_size
-    return states._replace(pool_idx=pool_idx)
 
 
 def parse_args():

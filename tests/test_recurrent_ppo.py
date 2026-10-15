@@ -8,9 +8,8 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import optax
 
-from examples._experimental.ppo.common import POLICY_INPUT_NAME_TO_ID
+from examples._experimental.ppo.common import checkpoint_path_for_iteration
 from examples._experimental.ppo.train_recurrent import (
-    checkpoint_path_for_iteration,
     load_or_create_recurrent_network,
     rollout_step_recurrent_heuristic_opponent,
     rollout_step_recurrent_policy_opponent,
@@ -18,7 +17,7 @@ from examples._experimental.ppo.train_recurrent import (
 )
 from examples._experimental.ppo.evaluate_recurrent_policy import evaluate_recurrent_batch
 from examples._experimental.ppo.recurrent_network import RecurrentPolicyValueNetwork
-from generals.agents.ppo_policy_agent import PolicyValueNetwork
+from generals.agents.ppo_policy_agent import POLICY_INPUT_NAME_TO_ID, PolicyValueNetwork
 from generals.core import game
 
 

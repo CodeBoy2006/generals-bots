@@ -19,20 +19,23 @@ import jax.random as jrandom
 from generals.core import game
 
 from common import (
-    OPPONENT_NAME_TO_ID,
     OPPONENT_NAMES,
-    POLICY_INPUT_NAME_TO_ID,
-    POLICY_INPUT_NAMES,
+    OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
     make_grids,
     opponent_action,
     policy_input_default_channels,
     policy_network_action,
     policy_state_action,
+    random_action,
+    summarize_policy_results,
 )
-from network import PolicyValueNetwork
-from train import random_action
-from generals.agents.ppo_policy_agent import parse_policy_channels
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    PolicyValueNetwork,
+    parse_policy_channels,
+)
 
 
 @eqx.filter_jit
@@ -137,24 +140,6 @@ def evaluate_policy_opponent_batch(
     (states, key), _ = jax.lax.scan(body, (states, key), None, length=max_steps)
     info = jax.vmap(game.get_info)(states)
     return info
-
-
-def summarize_policy_results(info, policy_player, num_games):
-    """Return scalar outcome metrics from the policy player's perspective."""
-    opponent_player = 1 - policy_player
-    wins = int(jnp.sum(info.winner == policy_player))
-    losses = int(jnp.sum(info.winner == opponent_player))
-    draws = int(jnp.sum(info.winner < 0))
-    decisive = wins + losses
-    return {
-        "wins": wins,
-        "losses": losses,
-        "draws": draws,
-        "win_rate": wins / num_games,
-        "decisive_win_rate": wins / max(decisive, 1),
-        "draw_rate": draws / num_games,
-        "mean_time": float(jnp.mean(info.time)),
-    }
 
 
 def parse_args():

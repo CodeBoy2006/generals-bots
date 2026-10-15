@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import glob
 import json
 import sys
 import time
@@ -28,19 +27,7 @@ from adaptive_network import load_or_create_adaptive_network
 from adaptive_plan_pair_scorer import PlanPairScorerNetwork, plan_pair_feature_names
 from adaptive_plan_q_supervised import plan_value_targets
 from generals.agents.ppo_policy_agent import parse_policy_channels
-
-
-def expand_dataset_paths(patterns: list[str]) -> list[Path]:
-    """Expand explicit paths and glob patterns into a stable shard list."""
-    paths: list[Path] = []
-    for pattern in patterns:
-        matches = [Path(path) for path in glob.glob(pattern)]
-        paths.extend(matches if matches else [Path(pattern)])
-    unique = sorted(dict.fromkeys(paths))
-    missing = [path for path in unique if not path.exists()]
-    if missing:
-        raise FileNotFoundError(f"Dataset shard not found: {missing[0]}")
-    return unique
+from dataset_utils import expand_dataset_paths
 
 
 def _compute_network_outputs(network, obs: np.ndarray, legal_mask: np.ndarray, active: np.ndarray, batch_size: int):

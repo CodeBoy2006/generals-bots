@@ -9,7 +9,6 @@ distill the action choice, score margin, and search value into the policy.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -28,7 +27,6 @@ import numpy as np
 
 from adaptive_common import (
     ADAPTIVE_MOVE_PLANES,
-    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
     adaptive_index_to_action,
     adaptive_input_channel_count,
@@ -36,7 +34,9 @@ from adaptive_common import (
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    crop_observation,
     empty_adaptive_fog_memory,
+    empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
@@ -49,7 +49,15 @@ from adaptive_network import load_or_create_adaptive_network
 from adaptive_search_distill import outcome_class_from_winner
 from adaptive_strategy_dataset import full_state_strategy_labels
 from adaptive_teacher_imitation import policy_action_from_logits
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
+from common import (
+    OPPONENT_NAMES,
+    OPPONENT_NAME_TO_ID,
+    POLICY_MODE_NAMES,
+    opponent_action,
+    policy_network_action,
+    random_action,
+    stack_learner_actions,
+)
 from evaluate_adaptive_policy import (
     POLICY_ADAPTER_MODE_TO_ID,
     policy_adapter_blend_logits,
@@ -59,18 +67,13 @@ from evaluate_adaptive_policy import (
 )
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from generals.core import game
-from train import random_action, stack_learner_actions
-from train_adaptive import crop_observation, split_mixed_env_counts
+from train_adaptive import split_mixed_env_counts
+from dataset_utils import save_shard
 
 POLICY_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
 OUTCOME_WIN = 2
-
-
-def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
-    """Return empty previous-scoreboard features for vectorized collection."""
-    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
 def dynamic_adapter_logits(
@@ -1608,13 +1611,6 @@ def filter_arrays(
     if min_continuation_score_delta > 0.0:
         keep &= arrays["search_continuation_score_delta"].astype(np.float32) >= min_continuation_score_delta
     return {name: value[keep] for name, value in arrays.items()}, original, int(np.sum(keep))
-
-
-def save_shard(path: Path, arrays: dict[str, np.ndarray], metadata: dict) -> None:
-    """Write one compressed NPZ shard and JSON metadata."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **arrays)
-    path.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def parse_args():

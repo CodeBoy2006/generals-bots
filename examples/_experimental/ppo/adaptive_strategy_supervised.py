@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import sys
 import time
@@ -27,6 +26,7 @@ from adaptive_network import hl_gauss_value_loss, load_or_create_adaptive_networ
 from adaptive_search_distill import binary_cross_entropy_with_logits
 from adaptive_strategy_aux import STRATEGY_INTENT_FINISH
 from generals.agents.ppo_policy_agent import parse_policy_channels
+from dataset_utils import expand_dataset_paths
 
 OUTCOME_LOSS = 0
 OUTCOME_DRAW = 1
@@ -74,22 +74,6 @@ SELECTION_METRICS = (
     "finish_accuracy",
     "outcome_accuracy",
 )
-
-
-def expand_dataset_paths(patterns: list[str]) -> list[Path]:
-    """Expand explicit paths or glob patterns into a stable shard list."""
-    paths: list[Path] = []
-    for pattern in patterns:
-        matches = [Path(path) for path in glob.glob(pattern)]
-        if matches:
-            paths.extend(matches)
-        else:
-            paths.append(Path(pattern))
-    unique = sorted(dict.fromkeys(paths))
-    missing = [path for path in unique if not path.exists()]
-    if missing:
-        raise FileNotFoundError(f"Dataset shard not found: {missing[0]}")
-    return unique
 
 
 def dataset_domain_name(path: Path) -> str:

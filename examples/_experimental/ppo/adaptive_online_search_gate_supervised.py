@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import sys
 from pathlib import Path
@@ -22,6 +21,7 @@ import numpy as np
 import optax
 
 from adaptive_command_gate import CommandGateNetwork
+from dataset_utils import balanced_binary_weights, expand_dataset_paths
 
 SEARCH_GATE_FEATURE_NAMES = (
     "best_score",
@@ -47,19 +47,6 @@ POSITIVE_FIELDS = (
     "search_converts_draw_to_win",
     "search_improves_continuation",
 )
-
-
-def expand_dataset_paths(patterns: list[str]) -> list[Path]:
-    """Expand explicit paths and glob patterns into a stable shard list."""
-    paths: list[Path] = []
-    for pattern in patterns:
-        matches = [Path(path) for path in glob.glob(pattern)]
-        paths.extend(matches if matches else [Path(pattern)])
-    unique = sorted(dict.fromkeys(paths))
-    missing = [path for path in unique if not path.exists()]
-    if missing:
-        raise FileNotFoundError(f"Dataset shard not found: {missing[0]}")
-    return unique
 
 
 def _safe_take_logits(logits: np.ndarray, indices: np.ndarray) -> np.ndarray:
@@ -113,14 +100,6 @@ def build_features_from_shard(shard: np.lib.npyio.NpzFile, max_steps: int) -> np
         axis=1,
     )
     return np.nan_to_num(features.astype(np.float32), nan=0.0, posinf=1.0e4, neginf=-1.0e4)
-
-
-def balanced_binary_weights(labels: np.ndarray) -> np.ndarray:
-    """Weight positive and negative classes equally."""
-    positive = labels > 0.5
-    pos_count = max(int(np.sum(positive)), 1)
-    neg_count = max(int(np.sum(~positive)), 1)
-    return (np.where(positive, 0.5 / pos_count, 0.5 / neg_count).astype(np.float32) * labels.shape[0])
 
 
 def load_dataset(

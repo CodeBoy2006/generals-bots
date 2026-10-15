@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import sys
 from pathlib import Path
@@ -23,6 +22,7 @@ import optax
 
 from adaptive_common import ADAPTIVE_MOVE_PLANES
 from adaptive_network import load_or_create_adaptive_network
+from dataset_utils import expand_dataset_paths
 
 DIRECTIONS = np.asarray([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=np.int32)
 POSITIVE_FIELDS = (
@@ -141,19 +141,6 @@ class OnlineSearchCandidateScorer(eqx.Module):
         x = jax.nn.relu(self.linear1(x))
         x = jax.nn.relu(self.linear2(x))
         return self.linear3(x)[0]
-
-
-def expand_dataset_paths(patterns: list[str]) -> list[Path]:
-    """Expand explicit paths and glob patterns into a stable shard list."""
-    paths: list[Path] = []
-    for pattern in patterns:
-        matches = [Path(path) for path in glob.glob(pattern)]
-        paths.extend(matches if matches else [Path(pattern)])
-    unique = sorted(dict.fromkeys(paths))
-    missing = [path for path in unique if not path.exists()]
-    if missing:
-        raise FileNotFoundError(f"Dataset shard not found: {missing[0]}")
-    return unique
 
 
 def _take2d(values: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:

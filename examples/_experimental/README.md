@@ -21,6 +21,16 @@ Outputs throughput statistics (steps/s) and helps identify performance bottlenec
 ### `ppo/`
 Experimental PPO (Proximal Policy Optimization) training implementation. Work in progress.
 
+Shared code lives outside the executable trainers:
+
+- `ppo/common.py`: fixed-size maps, initial states, actions, checkpoint paths, and host-side evaluation summaries.
+- `ppo/adaptive_common.py`: adaptive observations, masks, fog memory, and scoreboard history.
+- `ppo/dataset_utils.py`: dataset path expansion, class weights, and NPZ/JSON shard writing.
+- `ppo/gate_training.py`: the weighted binary updates shared by command and adapter gates.
+- `generals.agents.ppo_policy_agent`: the fixed-size network and policy input encoders.
+
+Import helpers from these modules directly. Keep algorithm-specific losses, rollout rules, and minibatch behavior in their existing trainers.
+
 The raw-game trainer is the primary path for quick experiments:
 
 ```bash

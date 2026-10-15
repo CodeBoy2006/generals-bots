@@ -41,9 +41,8 @@ from adaptive_worker_pretrain import (
     WORKER_INPUT_CHANNELS,
     worker_command_obs_to_array,
 )
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action
+from common import OPPONENT_NAMES, OPPONENT_NAME_TO_ID, opponent_action, random_action, stack_learner_actions
 from generals.core import game
-from train import random_action, stack_learner_actions
 
 WORKER_TRIGGER_NAMES = ("always", "visible-general", "contact", "turn")
 WORKER_TRIGGER_NAME_TO_ID = {name: index for index, name in enumerate(WORKER_TRIGGER_NAMES)}
@@ -84,18 +83,6 @@ class WorkerEvalRow:
 
 @eqx.filter_jit
 def _worker_action(network, obs_arr, mask, active, key, policy_mode):
-    logits, _ = network.logits_value(obs_arr, mask, active)
-    index = jax.lax.cond(
-        policy_mode == 0,
-        lambda _: jnp.argmax(logits),
-        lambda _: jrandom.categorical(key, logits),
-        None,
-    )
-    return adaptive_index_to_action(index, network.pad_size)
-
-
-@eqx.filter_jit
-def _fallback_action(network, obs_arr, mask, active, key, policy_mode):
     logits, _ = network.logits_value(obs_arr, mask, active)
     index = jax.lax.cond(
         policy_mode == 0,

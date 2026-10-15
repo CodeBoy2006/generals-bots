@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
 from generals.agents._heuristic_logic import HEURISTIC_NAMES, heuristic_action
 from generals.agents.ppo_policy_agent import (
+    augmented_full_state_to_array,
+    full_state_to_array,
     greedy_policy_action,
     index_to_action,
     normalize_action,
@@ -24,8 +28,6 @@ OPPONENT_NAMES = ("random",) + HEURISTIC_NAMES
 OPPONENT_NAME_TO_ID = {name: idx for idx, name in enumerate(OPPONENT_NAMES)}
 POLICY_MODE_NAMES = ("greedy", "sample")
 POLICY_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(POLICY_MODE_NAMES)}
-POLICY_INPUT_NAMES = ("observation", "full-state", "augmented-full-state")
-POLICY_INPUT_NAME_TO_ID = {name: idx for idx, name in enumerate(POLICY_INPUT_NAMES)}
 
 
 def policy_input_default_channels(policy_input_name: str) -> int:
@@ -112,30 +114,6 @@ def action_to_target_probs(action, grid_size):
     grid_cells = grid_size * grid_size
     index = action_to_index(action, grid_size)
     return jax.nn.one_hot(index, 9 * grid_cells, dtype=jnp.float32)
-
-
-def full_state_to_array(state, player):
-    """Encode privileged full-state features using the policy network's 9 channels."""
-    opponent = 1 - player
-    return jnp.stack(
-        [
-            state.armies,
-            state.generals,
-            state.cities,
-            state.mountains,
-            state.ownership_neutral,
-            state.ownership[player],
-            state.ownership[opponent],
-            jnp.zeros_like(state.armies, dtype=bool),
-            state.mountains | state.cities,
-        ],
-        axis=0,
-    ).astype(jnp.float32)
-
-
-def augmented_full_state_to_array(state, obs, player):
-    """Append privileged full-state channels after the standard observation channels."""
-    return jnp.concatenate([obs_to_array(obs), full_state_to_array(state, player)], axis=0)
 
 
 def policy_input_array_and_mask(state, obs, player, policy_input):
@@ -230,3 +208,72 @@ def expander_target_probs(obs):
     target = target.at[: 4 * grid_cells].set(flat_move_probs)
     target = target.at[8 * grid_cells].set(jnp.where(num_valid == 0, 1.0, 0.0))
     return target
+
+
+def random_action(key, obs):
+    """Random valid action."""
+    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
+    valid = jnp.argwhere(mask, size=mask.size, fill_value=-1)
+    num_valid = jnp.sum(jnp.all(valid >= 0, axis=-1))
+
+    k1, k2 = jrandom.split(key)
+
+    idx = jrandom.randint(k1, (), 0, jnp.maximum(num_valid, 1))
+    move = jnp.where(
+        num_valid > 0,
+        valid[idx],
+        jnp.array([0, 0, 0], dtype=jnp.int32),
+    )
+    should_pass = num_valid == 0
+    is_half = jrandom.randint(k2, (), 0, 2)
+
+    return jnp.array([should_pass, move[0], move[1], move[2], is_half], dtype=jnp.int32)
+
+
+def make_initial_states(pool, num_envs):
+    """Take initial states from the pool and spread future reset indices."""
+    states = jax.tree.map(lambda x: x[:num_envs], pool)
+    pool_size = pool.armies.shape[0]
+    pool_idx = (jnp.arange(num_envs, dtype=jnp.int32) + num_envs) % pool_size
+    return states._replace(pool_idx=pool_idx)
+
+
+def checkpoint_path_for_iteration(checkpoint_dir, model_stem, iteration):
+    """Return the periodic checkpoint path for one training iteration."""
+    return Path(checkpoint_dir) / f"{model_stem}-iter-{iteration:06d}.eqx"
+
+
+def prune_old_checkpoints(paths, keep):
+    """Delete older periodic checkpoints when a positive keep limit is configured."""
+    if keep is None or keep <= 0:
+        return
+    for path in list(paths)[:-keep]:
+        Path(path).unlink(missing_ok=True)
+
+
+def stack_learner_actions(learner_actions, opponent_actions, learner_player):
+    """Place learner/opponent actions into the environment's player slots."""
+    return jax.lax.cond(
+        learner_player == 0,
+        lambda _: jnp.stack([learner_actions, opponent_actions], axis=1),
+        lambda _: jnp.stack([opponent_actions, learner_actions], axis=1),
+        None,
+    )
+
+
+def summarize_policy_results(info, policy_player, num_games):
+    """Return scalar outcome metrics from the policy player's perspective."""
+    opponent_player = 1 - policy_player
+    wins = int(jnp.sum(info.winner == policy_player))
+    losses = int(jnp.sum(info.winner == opponent_player))
+    draws = int(jnp.sum(info.winner < 0))
+    decisive = wins + losses
+    return {
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "win_rate": wins / num_games,
+        "decisive_win_rate": wins / max(decisive, 1),
+        "draw_rate": draws / num_games,
+        "mean_time": float(jnp.mean(info.time)),
+    }

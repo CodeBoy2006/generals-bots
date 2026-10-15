@@ -210,11 +210,16 @@ class AdaptiveWebPolicyAgent:
             ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
             adaptive_input_channel_count,
             adaptive_scoreboard_features,
+            crop_observation,
             empty_adaptive_fog_memory,
         )
         from examples._experimental.ppo.adaptive_network import load_or_create_adaptive_network
-        from examples._experimental.ppo.common import OPPONENT_NAME_TO_ID, opponent_action, policy_network_action
-        from examples._experimental.ppo.train import random_action
+        from examples._experimental.ppo.common import (
+            OPPONENT_NAME_TO_ID,
+            opponent_action,
+            policy_network_action,
+            random_action,
+        )
 
         self.id = agent_id
         self.grid_size = grid_size
@@ -224,6 +229,7 @@ class AdaptiveWebPolicyAgent:
         self.opponent_policy_mode_id = POLICY_MODE_NAME_TO_ID[config.online_search_opponent_policy_mode]
         self._adaptive_eval = adaptive_eval
         self._adaptive_scoreboard_features = adaptive_scoreboard_features
+        self._crop_observation = crop_observation
         self._empty_adaptive_fog_memory = empty_adaptive_fog_memory
         self._opponent_action = opponent_action
         self._policy_network_action = policy_network_action
@@ -369,7 +375,7 @@ class AdaptiveWebPolicyAgent:
                 opponent_first_action = self._policy_network_action(
                     self.opponent_network,
                     opponent_key,
-                    self._adaptive_eval.crop_observation(opponent_obs, effective_size),
+                    self._crop_observation(opponent_obs, effective_size),
                     self.opponent_policy_mode_id,
                 )
                 action = self._adaptive_eval.online_search_action_policy_opponent(

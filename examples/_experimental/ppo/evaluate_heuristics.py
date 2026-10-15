@@ -19,8 +19,7 @@ import jax.random as jrandom
 from generals.agents._heuristic_logic import HEURISTIC_NAME_TO_ID, HEURISTIC_NAMES, heuristic_action
 from generals.core import game
 
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, make_grids, opponent_action
-from train import random_action
+from common import OPPONENT_NAMES, OPPONENT_NAME_TO_ID, make_grids, opponent_action, random_action
 
 
 @eqx.filter_jit

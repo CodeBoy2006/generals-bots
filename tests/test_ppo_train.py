@@ -7,22 +7,25 @@ import jax
 import jax.numpy as jnp
 import jax.random as jrandom
 
-from examples._experimental.ppo.common import POLICY_INPUT_NAME_TO_ID, policy_network_action
-from examples._experimental.ppo.evaluate_policy import evaluate_policy_opponent_batch, summarize_policy_results
+from examples._experimental.ppo.common import (
+    checkpoint_path_for_iteration,
+    policy_network_action,
+    prune_old_checkpoints,
+    stack_learner_actions,
+    summarize_policy_results,
+)
+from examples._experimental.ppo.evaluate_policy import evaluate_policy_opponent_batch
 from examples._experimental.ppo.train import (
     apply_general_target_rewards,
     apply_path_assignment_rewards,
     apply_terminal_reward,
-    checkpoint_path_for_iteration,
     load_opponent_policy_pool,
     load_or_create_network,
     parse_opponent_policy_pool,
-    prune_old_checkpoints,
     resolve_opponent_source,
     rollout_step_policy_opponent,
-    stack_learner_actions,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, greedy_policy_action
+from generals.agents.ppo_policy_agent import POLICY_INPUT_NAME_TO_ID, PolicyValueNetwork, greedy_policy_action
 from generals.core import game
 from generals.core.game import GameInfo
 

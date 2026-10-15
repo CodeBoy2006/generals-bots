@@ -29,12 +29,13 @@ from adaptive_common import (
     ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     ADAPTIVE_SCOREBOARD_HISTORY_CHANNELS,
     adaptive_action_to_index,
-    adaptive_input_channel_count,
     adaptive_index_to_action,
+    adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    crop_observation,
     empty_adaptive_fog_memory,
     make_adaptive_state_pool,
     parse_grid_sizes,
@@ -42,11 +43,18 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import load_or_create_adaptive_network
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
+from common import (
+    OPPONENT_NAMES,
+    OPPONENT_NAME_TO_ID,
+    POLICY_MODE_NAMES,
+    opponent_action,
+    policy_network_action,
+    random_action,
+    stack_learner_actions,
+)
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from generals.core.action import DIRECTIONS
 from generals.core import game
-from train import random_action, stack_learner_actions
 
 PLAN_WORKER_COMMAND_SOURCE_NAMES = ("spatial", "belief-main-stack", "main-stack-heuristic")
 PLAN_WORKER_COMMAND_SOURCE_TO_ID = {name: index for index, name in enumerate(PLAN_WORKER_COMMAND_SOURCE_NAMES)}
@@ -1703,21 +1711,6 @@ def strategy_spatial_rerank_logits(
     legal_mean = jnp.sum(jnp.where(legal, action_bias, 0.0), axis=-1, keepdims=True) / legal_count
     centered_bias = jnp.where(legal, action_bias - legal_mean, 0.0)
     return policy_logits + scale * centered_bias
-
-
-def crop_observation(obs, size: int):
-    """Crop padded adaptive observations before feeding a fixed-size policy."""
-    return obs._replace(
-        armies=obs.armies[:size, :size],
-        generals=obs.generals[:size, :size],
-        cities=obs.cities[:size, :size],
-        mountains=obs.mountains[:size, :size],
-        neutral_cells=obs.neutral_cells[:size, :size],
-        owned_cells=obs.owned_cells[:size, :size],
-        opponent_cells=obs.opponent_cells[:size, :size],
-        fog_cells=obs.fog_cells[:size, :size],
-        structures_in_fog=obs.structures_in_fog[:size, :size],
-    )
 
 
 def summarize_row(info, grid_size: int, policy_player: int, num_games: int, adapter_stats=None) -> AdaptiveEvalRow:

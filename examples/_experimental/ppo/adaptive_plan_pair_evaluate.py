@@ -21,8 +21,9 @@ import jax.random as jrandom
 from adaptive_common import parse_grid_sizes
 from adaptive_network import load_or_create_adaptive_network
 from adaptive_plan_pair_scorer import PlanPairScorerNetwork
-from adaptive_plan_pair_supervised import build_pair_dataset, expand_dataset_paths, evaluate_model, pair_rank_metrics
+from adaptive_plan_pair_supervised import build_pair_dataset, evaluate_model, pair_rank_metrics
 from generals.agents.ppo_policy_agent import parse_policy_channels
+from dataset_utils import expand_dataset_paths
 
 
 def parse_args():

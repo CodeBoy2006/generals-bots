@@ -27,26 +27,8 @@ from generals.core.action import compute_valid_move_mask
 from generals.core.env import GeneralsEnv
 from generals.core.rewards import composite_reward_fn
 
-from network import PolicyValueNetwork, obs_to_array
-
-
-def random_action(key, obs):
-    """Random valid action."""
-    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
-    valid = jnp.argwhere(mask, size=mask.size, fill_value=-1)
-    num_valid = jnp.sum(jnp.all(valid >= 0, axis=-1))
-
-    k1, k2 = jrandom.split(key)
-    idx = jrandom.randint(k1, (), 0, jnp.maximum(num_valid, 1))
-    move = jnp.where(
-        num_valid > 0,
-        valid[idx],
-        jnp.array([0, 0, 0], dtype=jnp.int32),
-    )
-    should_pass = num_valid == 0
-    is_half = jrandom.randint(k2, (), 0, 2)
-
-    return jnp.array([should_pass, move[0], move[1], move[2], is_half], dtype=jnp.int32)
+from common import random_action
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array
 
 
 def _rollout_step_inner(states, pool, env, network, key):

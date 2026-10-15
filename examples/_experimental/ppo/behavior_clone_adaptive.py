@@ -32,9 +32,15 @@ from adaptive_common import (
     parse_grid_sizes,
 )
 from adaptive_network import load_or_create_adaptive_network
-from common import TEACHER_NAME_TO_ID, TEACHER_NAMES, heuristic_action
+from common import (
+    TEACHER_NAMES,
+    TEACHER_NAME_TO_ID,
+    checkpoint_path_for_iteration,
+    heuristic_action,
+    prune_old_checkpoints,
+    random_action,
+)
 from generals.core import game
-from train import checkpoint_path_for_iteration, prune_old_checkpoints, random_action
 
 
 @eqx.filter_jit

@@ -20,34 +20,37 @@ import jax.random as jrandom
 import optax
 
 from common import (
-    OPPONENT_NAME_TO_ID,
     OPPONENT_NAMES,
-    POLICY_INPUT_NAME_TO_ID,
-    POLICY_INPUT_NAMES,
-    POLICY_MODE_NAME_TO_ID,
+    OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
+    checkpoint_path_for_iteration,
+    make_initial_states,
+    make_state_pool,
     opponent_action,
     policy_input_array_and_mask,
     policy_input_default_channels,
     policy_state_action,
+    prune_old_checkpoints,
+    random_action,
+    stack_learner_actions,
 )
 from recurrent_network import RecurrentPolicyValueNetwork
 from train import (
     apply_general_target_rewards,
     apply_path_assignment_rewards,
     apply_terminal_reward,
-    checkpoint_path_for_iteration,
     compute_gae,
     load_or_create_network,
-    make_initial_states,
-    make_state_pool,
-    prune_old_checkpoints,
-    random_action,
     select_learner_obs,
     select_opponent_obs,
-    stack_learner_actions,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    PolicyValueNetwork,
+    parse_policy_channels,
+)
 from generals.core import game
 from generals.core.rewards import composite_reward_fn
 

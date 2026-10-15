@@ -25,24 +25,27 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import optax
 
-from generals.agents.ppo_policy_agent import parse_policy_channels
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    obs_to_array,
+    parse_policy_channels,
+)
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
 
 from common import (
-    POLICY_INPUT_NAME_TO_ID,
-    POLICY_INPUT_NAMES,
-    POLICY_MODE_NAME_TO_ID,
     POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
     make_grids,
     policy_input_array_and_mask,
     policy_input_default_channels,
     policy_network_action,
     policy_state_action,
+    stack_learner_actions,
 )
-from network import obs_to_array
 from search_policy import rollout_search_candidates
-from train import load_or_create_network, stack_learner_actions
+from train import load_or_create_network
 
 TARGET_MODE_NAMES = ("hard", "soft")
 

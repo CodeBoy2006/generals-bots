@@ -21,18 +21,19 @@ import jax.random as jrandom
 import optax
 
 from adaptive_common import (
+    ADAPTIVE_FOG_MEMORY_CHANNELS,
     ADAPTIVE_GLOBAL_INPUT_CHANNELS,
     ADAPTIVE_HISTORY_INPUT_CHANNELS,
-    ADAPTIVE_FOG_MEMORY_CHANNELS,
     ADAPTIVE_INPUT_CHANNELS,
-    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
     adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    crop_observation,
     empty_adaptive_fog_memory,
+    empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
@@ -42,18 +43,21 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, hl_gauss_value_loss, load_or_create_adaptive_network
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
-from generals.core import game
-from generals.core.rewards import composite_reward_fn
-from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
-from train import (
-    apply_terminal_reward,
+from common import (
+    OPPONENT_NAMES,
+    OPPONENT_NAME_TO_ID,
+    POLICY_MODE_NAMES,
     checkpoint_path_for_iteration,
-    compute_gae,
+    opponent_action,
+    policy_network_action,
     prune_old_checkpoints,
     random_action,
     stack_learner_actions,
 )
+from generals.core import game
+from generals.core.rewards import composite_reward_fn
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
+from train import apply_terminal_reward, compute_gae
 
 REWARD_MODE_NAMES = ("composite", "terminal")
 REWARD_MODE_NAME_TO_ID = {name: idx for idx, name in enumerate(REWARD_MODE_NAMES)}
@@ -205,26 +209,6 @@ def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:
         raise ValueError("mixed learner mode requires at least two environments")
     p0_envs = num_envs // 2
     return p0_envs, num_envs - p0_envs
-
-
-def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
-    """Return empty previous-scoreboard features for vectorized rollouts."""
-    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
-
-
-def crop_observation(obs, size: int):
-    """Crop padded adaptive observations before feeding a fixed-size policy."""
-    return obs._replace(
-        armies=obs.armies[:size, :size],
-        generals=obs.generals[:size, :size],
-        cities=obs.cities[:size, :size],
-        mountains=obs.mountains[:size, :size],
-        neutral_cells=obs.neutral_cells[:size, :size],
-        owned_cells=obs.owned_cells[:size, :size],
-        opponent_cells=obs.opponent_cells[:size, :size],
-        fog_cells=obs.fog_cells[:size, :size],
-        structures_in_fog=obs.structures_in_fog[:size, :size],
-    )
 
 
 def policy_sized_observation(obs, effective_size: jnp.ndarray, policy_grid_size: int):

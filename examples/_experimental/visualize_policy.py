@@ -25,26 +25,8 @@ from generals.gui import GUI
 from generals.gui.properties import GuiMode
 from generals.core.rendering import JaxGameAdapter
 
-from network import PolicyValueNetwork, obs_to_array
-
-
-def random_action(key, obs):
-    """Random valid action."""
-    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
-    valid = jnp.argwhere(mask, size=mask.size, fill_value=-1)
-    num_valid = jnp.sum(jnp.all(valid >= 0, axis=-1))
-
-    k1, k2 = jrandom.split(key)
-    idx = jrandom.randint(k1, (), 0, jnp.maximum(num_valid, 1))
-    move = jnp.where(
-        num_valid > 0,
-        valid[idx],
-        jnp.array([0, 0, 0], dtype=jnp.int32),
-    )
-    should_pass = num_valid == 0
-    is_half = jrandom.randint(k2, (), 0, 2)
-
-    return jnp.array([should_pass, move[0], move[1], move[2], is_half], dtype=jnp.int32)
+from common import make_simple_general_grid, random_action
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array
 
 
 def load_model(model_path: str, grid_size: int = 4):
@@ -62,15 +44,6 @@ def load_model(model_path: str, grid_size: int = 4):
     network = eqx.tree_deserialise_leaves(model_path, network)
     print(f"Loaded model from {model_path}")
     return network
-
-
-def make_simple_general_grid(key, grid_size):
-    """Create an empty square grid with two random generals."""
-    grid = jnp.zeros((grid_size, grid_size), dtype=jnp.int32)
-    idx = jrandom.choice(key, grid_size * grid_size, shape=(2,), replace=False)
-    pos_a = (idx[0] // grid_size, idx[0] % grid_size)
-    pos_b = (idx[1] // grid_size, idx[1] % grid_size)
-    return grid.at[pos_a].set(1).at[pos_b].set(2)
 
 
 def make_grid(

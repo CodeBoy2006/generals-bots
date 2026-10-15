@@ -38,6 +38,26 @@ class AdaptiveFogMemory(NamedTuple):
     seen_general: jnp.ndarray
 
 
+def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
+    """Return empty previous-scoreboard features for vectorized rollouts."""
+    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
+
+
+def crop_observation(obs, size: int):
+    """Crop padded adaptive observations before feeding a fixed-size policy."""
+    return obs._replace(
+        armies=obs.armies[:size, :size],
+        generals=obs.generals[:size, :size],
+        cities=obs.cities[:size, :size],
+        mountains=obs.mountains[:size, :size],
+        neutral_cells=obs.neutral_cells[:size, :size],
+        owned_cells=obs.owned_cells[:size, :size],
+        opponent_cells=obs.opponent_cells[:size, :size],
+        fog_cells=obs.fog_cells[:size, :size],
+        structures_in_fog=obs.structures_in_fog[:size, :size],
+    )
+
+
 def parse_grid_sizes(value: str) -> tuple[int, ...]:
     """Parse comma-separated effective board sizes for adaptive training."""
     sizes = tuple(int(part.strip()) for part in value.split(",") if part.strip())

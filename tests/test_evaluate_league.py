@@ -12,7 +12,7 @@ from examples._experimental.ppo.evaluate_league import (
     compute_league_summary,
     parse_checkpoint_specs,
 )
-from examples._experimental.ppo.network import PolicyValueNetwork
+from generals.agents.ppo_policy_agent import PolicyValueNetwork
 
 
 def test_parse_checkpoint_specs_accepts_name_path_mode():

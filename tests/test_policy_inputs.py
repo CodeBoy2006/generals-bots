@@ -1,14 +1,14 @@
 import jax.numpy as jnp
 import jax.random as jrandom
 
-from examples._experimental.ppo.common import (
+from examples._experimental.ppo.common import policy_state_action
+from generals.agents.ppo_policy_agent import (
     POLICY_INPUT_NAME_TO_ID,
+    PolicyValueNetwork,
     augmented_full_state_to_array,
     full_state_to_array,
     obs_to_array,
-    policy_state_action,
 )
-from generals.agents.ppo_policy_agent import PolicyValueNetwork
 from generals.core import game
 
 

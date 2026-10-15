@@ -19,23 +19,26 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from common import (
-    OPPONENT_NAME_TO_ID,
     OPPONENT_NAMES,
-    POLICY_INPUT_NAME_TO_ID,
-    POLICY_INPUT_NAMES,
-    POLICY_MODE_NAME_TO_ID,
+    OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
     make_grids,
     opponent_action,
     policy_input_array_and_mask,
     policy_input_default_channels,
     policy_state_action,
+    random_action,
+    stack_learner_actions,
+    summarize_policy_results,
 )
-from evaluate_policy import summarize_policy_results
-from network import PolicyValueNetwork
 from recurrent_network import RecurrentPolicyValueNetwork
-from train import random_action, stack_learner_actions
-from generals.agents.ppo_policy_agent import parse_policy_channels
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    PolicyValueNetwork,
+    parse_policy_channels,
+)
 from generals.core import game
 
 

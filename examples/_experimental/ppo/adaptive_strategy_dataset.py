@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -22,7 +21,7 @@ import numpy as np
 
 from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
-    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
+    active_cells_for_size,
     adaptive_action_to_index,
     adaptive_expander_target_probs,
     adaptive_index_to_action,
@@ -30,9 +29,10 @@ from adaptive_common import (
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
-    active_cells_for_size,
     compute_adaptive_valid_move_mask,
+    crop_observation,
     empty_adaptive_fog_memory,
+    empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
@@ -54,29 +54,31 @@ from adaptive_teacher_imitation import (
     policy_action_from_logits,
     rollout_steps_to_next_done,
 )
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
+from common import (
+    OPPONENT_NAMES,
+    OPPONENT_NAME_TO_ID,
+    POLICY_MODE_NAMES,
+    opponent_action,
+    policy_network_action,
+    random_action,
+    stack_learner_actions,
+)
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from generals.core import game
-from train import random_action, stack_learner_actions
 from train_adaptive import (
     OUTCOME_DRAW,
     OUTCOME_WIN,
-    crop_observation,
     rollout_outcome_targets,
     split_mixed_env_counts,
     teacher_obs_from_student_obs,
 )
+from dataset_utils import save_shard
 
 TEACHER_KINDS = ("adaptive", "fixed", "expander", "search", "fixed-search")
 TEACHER_KIND_TO_ID = {name: index for index, name in enumerate(TEACHER_KINDS)}
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
 POLICY_ADAPTER_MODES = ("delta", "blend", "replace")
 POLICY_ADAPTER_MODE_TO_ID = {name: index for index, name in enumerate(POLICY_ADAPTER_MODES)}
-
-
-def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
-    """Return empty previous-scoreboard features for vectorized dataset rollouts."""
-    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
 def one_hot_cell(row: jnp.ndarray, col: jnp.ndarray, pad_size: int, active: jnp.ndarray) -> jnp.ndarray:
@@ -1088,13 +1090,6 @@ def apply_save_filters(arrays: dict[str, np.ndarray], args) -> tuple[dict[str, n
         "filters": filter_stats,
     }
     return filtered, stats
-
-
-def save_shard(path: Path, arrays: dict[str, np.ndarray], metadata: dict) -> None:
-    """Write one compressed NPZ shard and a small sidecar metadata JSON."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **arrays)
-    path.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 
 
 def parse_args():

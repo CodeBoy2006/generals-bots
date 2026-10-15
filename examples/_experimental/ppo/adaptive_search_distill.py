@@ -38,6 +38,7 @@ from adaptive_common import (
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
     empty_adaptive_fog_memory,
+    empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
@@ -48,13 +49,18 @@ from adaptive_common import (
 )
 from adaptive_network import load_or_create_adaptive_network
 from adaptive_strategy_aux import strategy_aux_targets
-from common import POLICY_MODE_NAME_TO_ID, POLICY_MODE_NAMES
+from common import (
+    POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
+    checkpoint_path_for_iteration,
+    prune_old_checkpoints,
+    stack_learner_actions,
+)
 from conservative_search_distill import (
     search_score_target_probs,
     select_search_improvements,
     weighted_topk_cross_entropy,
 )
-from train import checkpoint_path_for_iteration, prune_old_checkpoints, stack_learner_actions
 
 TARGET_MODE_NAMES = ("hard", "soft")
 SOFT_WEIGHT_MODE_NAMES = ("active", "improvement", "accepted")
@@ -85,11 +91,6 @@ SOFT_REPLAY_ZERO_WEIGHT_INDICES = (
     SOFT_STRATEGY_FINISH_WEIGHT_INDEX,
     SOFT_STRATEGY_BELIEF_WEIGHT_INDEX,
 )
-
-
-def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
-    """Return empty previous-scoreboard features for vectorized distillation rollouts."""
-    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
 def split_mixed_env_counts(num_envs: int) -> tuple[int, int]:

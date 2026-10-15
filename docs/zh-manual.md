@@ -371,8 +371,11 @@ examples/_experimental/ppo/
 - `behavior_clone_adaptive.py`：训练固定 padding 画布的自适应多尺寸行为克隆 warm start。
 - `train_adaptive.py`：训练一个可在多个有效棋盘尺寸上运行的 adaptive PPO checkpoint。
 - `evaluate_adaptive_policy.py`：按尺寸和座位矩阵评估 adaptive checkpoint。
-- `network.py`：Equinox 策略价值网络。
-- `common.py`：地图生成、动作编码、策略动作选择等共享工具。
+- `generals/agents/ppo_policy_agent.py`：固定尺寸 Equinox 策略价值网络和输入编码。
+- `common.py`：地图生成、动作编码、策略动作选择、checkpoint 路径和评测汇总等共享工具。
+- `adaptive_common.py`：自适应输入、观测裁剪、迷雾记忆和记分板历史。
+- `dataset_utils.py`：数据集路径展开、类别权重和 NPZ/JSON 分片保存。
+- `gate_training.py`：command gate 和 adapter gate 共用的加权二分类训练。
 
 ### 7.1 4x4 smoke 训练
 

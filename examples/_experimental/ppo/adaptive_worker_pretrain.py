@@ -37,7 +37,7 @@ from adaptive_network import load_or_create_adaptive_network
 from generals.core import game
 from generals.core.action import DIRECTIONS
 from generals.core.rewards import shortest_path_distance_map
-from train import checkpoint_path_for_iteration, prune_old_checkpoints
+from common import checkpoint_path_for_iteration, prune_old_checkpoints
 
 WORKER_EXTRA_CHANNELS = 3
 WORKER_INPUT_CHANNELS = ADAPTIVE_INPUT_CHANNELS + WORKER_EXTRA_CHANNELS

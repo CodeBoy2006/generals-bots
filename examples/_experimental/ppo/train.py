@@ -17,9 +17,7 @@ import jax.random as jrandom
 import equinox as eqx
 import optax
 
-from generals.core.action import compute_valid_move_mask
 from generals.core import game
-from generals.core.grid import generate_grid
 from generals.core.rewards import (
     composite_reward_fn,
     general_target_reward_fn,
@@ -27,89 +25,27 @@ from generals.core.rewards import (
 )
 
 from common import (
-    OPPONENT_NAME_TO_ID,
     OPPONENT_NAMES,
-    POLICY_INPUT_NAME_TO_ID,
-    POLICY_INPUT_NAMES,
-    POLICY_MODE_NAME_TO_ID,
+    OPPONENT_NAME_TO_ID,
     POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
+    checkpoint_path_for_iteration,
+    make_initial_states,
+    make_state_pool,
     opponent_action,
     policy_input_array_and_mask,
     policy_input_default_channels,
     policy_state_action,
+    prune_old_checkpoints,
+    random_action,
+    stack_learner_actions,
 )
-from network import PolicyValueNetwork
-from generals.agents.ppo_policy_agent import parse_policy_channels
-
-
-def random_action(key, obs):
-    """Random valid action."""
-    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
-    valid = jnp.argwhere(mask, size=mask.size, fill_value=-1)
-    num_valid = jnp.sum(jnp.all(valid >= 0, axis=-1))
-
-    k1, k2 = jrandom.split(key)
-
-    idx = jrandom.randint(k1, (), 0, jnp.maximum(num_valid, 1))
-    move = jnp.where(
-        num_valid > 0,
-        valid[idx],
-        jnp.array([0, 0, 0], dtype=jnp.int32),
-    )
-    should_pass = num_valid == 0
-    is_half = jrandom.randint(k2, (), 0, 2)
-
-    return jnp.array([should_pass, move[0], move[1], move[2], is_half], dtype=jnp.int32)
-
-
-def make_simple_general_grid(key, grid_size):
-    """Create an empty square grid with two random generals."""
-    grid = jnp.zeros((grid_size, grid_size), dtype=jnp.int32)
-    idx = jrandom.choice(key, grid_size * grid_size, shape=(2,), replace=False)
-    pos_a = (idx[0] // grid_size, idx[0] % grid_size)
-    pos_b = (idx[1] // grid_size, idx[1] % grid_size)
-    return grid.at[pos_a].set(1).at[pos_b].set(2)
-
-
-def make_state_pool(
-    key,
-    pool_size,
-    grid_size,
-    map_generator,
-    mountain_density_range,
-    num_cities_range,
-    min_generals_distance,
-    max_generals_distance,
-    castle_val_range,
-):
-    """Generate a reusable pool of initial states for auto-reset."""
-    keys = jrandom.split(key, pool_size)
-
-    if map_generator == "simple":
-        grids = jax.vmap(lambda k: make_simple_general_grid(k, grid_size))(keys)
-    else:
-        grids = jax.vmap(
-            lambda k: generate_grid(
-                k,
-                grid_dims=(grid_size, grid_size),
-                pad_to=grid_size,
-                mountain_density_range=mountain_density_range,
-                num_cities_range=num_cities_range,
-                min_generals_distance=min_generals_distance,
-                max_generals_distance=max_generals_distance,
-                castle_val_range=castle_val_range,
-            )
-        )(keys)
-
-    return jax.vmap(game.create_initial_state)(grids)
-
-
-def make_initial_states(pool, num_envs):
-    """Take initial states from the pool and spread future reset indices."""
-    states = jax.tree.map(lambda x: x[:num_envs], pool)
-    pool_size = pool.armies.shape[0]
-    pool_idx = (jnp.arange(num_envs, dtype=jnp.int32) + num_envs) % pool_size
-    return states._replace(pool_idx=pool_idx)
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    PolicyValueNetwork,
+    parse_policy_channels,
+)
 
 
 def parse_opponent_policy_pool(pool_value, modes_value):
@@ -239,29 +175,6 @@ def load_or_create_network(key, grid_size, init_model_path=None, channels=None, 
         )
         return network
     return eqx.tree_deserialise_leaves(path, network)
-
-
-def checkpoint_path_for_iteration(checkpoint_dir, model_stem, iteration):
-    """Return the periodic checkpoint path for one training iteration."""
-    return Path(checkpoint_dir) / f"{model_stem}-iter-{iteration:06d}.eqx"
-
-
-def prune_old_checkpoints(paths, keep):
-    """Delete older periodic checkpoints when a positive keep limit is configured."""
-    if keep is None or keep <= 0:
-        return
-    for path in list(paths)[:-keep]:
-        Path(path).unlink(missing_ok=True)
-
-
-def stack_learner_actions(learner_actions, opponent_actions, learner_player):
-    """Place learner/opponent actions into the environment's player slots."""
-    return jax.lax.cond(
-        learner_player == 0,
-        lambda _: jnp.stack([learner_actions, opponent_actions], axis=1),
-        lambda _: jnp.stack([opponent_actions, learner_actions], axis=1),
-        None,
-    )
 
 
 def select_learner_obs(obs_p0, obs_p1, learner_player):
@@ -705,34 +618,6 @@ def ppo_loss(network, obs, mask, action, old_logprob, advantage, ret, clip=0.2):
     entropy_loss = -0.01 * entropy
     
     return policy_loss + value_loss + entropy_loss
-
-
-@eqx.filter_jit
-def train_step(network, opt_state, batch, optimizer):
-    """Single training step."""
-    obs, masks, actions, old_logprobs, advantages, returns = batch
-    
-    # Flatten batch
-    bs = obs.shape[0] * obs.shape[1]
-    obs_flat = obs.reshape(bs, *obs.shape[2:])
-    masks_flat = masks.reshape(bs, *masks.shape[2:])
-    actions_flat = actions.reshape(bs, -1)
-    old_logprobs_flat = old_logprobs.reshape(-1)
-    advantages_flat = advantages.reshape(-1)
-    returns_flat = returns.reshape(-1)
-    
-    def loss_fn(net):
-        losses = jax.vmap(lambda o, m, a, olp, adv, r: ppo_loss(net, o, m, a, olp, adv, r))(
-            obs_flat, masks_flat, actions_flat, old_logprobs_flat, advantages_flat, returns_flat
-        )
-        return jnp.mean(losses)
-
-    loss, grads = eqx.filter_value_and_grad(loss_fn)(network)
-    params = eqx.filter(network, eqx.is_inexact_array)
-    updates, opt_state = optimizer.update(grads, opt_state, params)
-    network = eqx.apply_updates(network, updates)
-
-    return network, opt_state, loss
 
 
 @eqx.filter_jit

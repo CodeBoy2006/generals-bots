@@ -23,21 +23,24 @@ for path in (REPO_ROOT, SCRIPT_DIR):
 from common import (
     HEURISTIC_NAMES,
     OPPONENT_NAME_TO_ID,
-    POLICY_INPUT_NAME_TO_ID,
-    POLICY_INPUT_NAMES,
-    POLICY_MODE_NAME_TO_ID,
     POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
     make_grids,
     opponent_action,
     policy_input_default_channels,
     policy_state_action,
+    random_action,
+    summarize_policy_results,
 )
-from evaluate_policy import evaluate_batch, evaluate_policy_opponent_batch, summarize_policy_results
-from generals.agents.ppo_policy_agent import parse_policy_channels
+from evaluate_policy import evaluate_batch, evaluate_policy_opponent_batch
+from generals.agents.ppo_policy_agent import (
+    POLICY_INPUT_NAMES,
+    POLICY_INPUT_NAME_TO_ID,
+    PolicyValueNetwork,
+    parse_policy_channels,
+)
 from generals.core import game
-from network import PolicyValueNetwork
 from search_policy import rollout_search_action
-from train import random_action
 
 REQUIRED_HEURISTIC_OPPONENTS = tuple(HEURISTIC_NAMES)
 

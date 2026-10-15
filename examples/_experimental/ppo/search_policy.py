@@ -28,9 +28,14 @@ from generals.core.action import compute_valid_move_mask
 from generals.core.game import GameInfo
 from generals.core.observation import Observation
 
-from common import POLICY_MODE_NAME_TO_ID, POLICY_MODE_NAMES, make_grids, policy_network_action
-from network import PolicyValueNetwork, obs_to_array
-from generals.agents.ppo_policy_agent import index_to_action
+from common import (
+    POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
+    make_grids,
+    policy_network_action,
+    summarize_policy_results,
+)
+from generals.agents.ppo_policy_agent import PolicyValueNetwork, index_to_action, obs_to_array
 
 
 def score_observation(
@@ -218,23 +223,6 @@ def evaluate_rollout_search_batch(
     return jax.vmap(game.get_info)(states)
 
 
-def summarize(info, player, num_games):
-    opponent = 1 - player
-    wins = int(jnp.sum(info.winner == player))
-    losses = int(jnp.sum(info.winner == opponent))
-    draws = int(jnp.sum(info.winner < 0))
-    decisive = wins + losses
-    return {
-        "wins": wins,
-        "losses": losses,
-        "draws": draws,
-        "win_rate": wins / num_games,
-        "decisive_win_rate": wins / max(decisive, 1),
-        "draw_rate": draws / num_games,
-        "mean_time": float(jnp.mean(info.time)),
-    }
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a rollout-search policy around a PPO checkpoint.")
     parser.add_argument("model_path")
@@ -316,7 +304,7 @@ def main():
     )
     jax.block_until_ready(info.winner)
     elapsed = time.time() - t0
-    summary = summarize(info, args.search_player, args.num_games)
+    summary = summarize_policy_results(info, args.search_player, args.num_games)
 
     print("Rollout-search policy evaluation")
     print(f"Model:              {args.model_path}")

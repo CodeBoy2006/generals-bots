@@ -8,7 +8,6 @@ marginals. The script intentionally writes only ignored `runs/` artifacts.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -27,7 +26,6 @@ import numpy as np
 
 from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
-    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     AdaptiveFogMemory,
     active_cells_for_size,
     adaptive_action_to_index,
@@ -36,7 +34,9 @@ from adaptive_common import (
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    crop_observation,
     empty_adaptive_fog_memory,
+    empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
@@ -48,20 +48,23 @@ from adaptive_common import (
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
 from adaptive_search_distill import adaptive_score_observation, outcome_class_from_winner
 from adaptive_teacher_imitation import policy_action_from_logits
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, POLICY_MODE_NAMES, opponent_action, policy_network_action
+from common import (
+    OPPONENT_NAMES,
+    OPPONENT_NAME_TO_ID,
+    POLICY_MODE_NAMES,
+    opponent_action,
+    policy_network_action,
+    random_action,
+    stack_learner_actions,
+)
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, parse_policy_channels
 from generals.core import game
 from generals.core.action import DIRECTIONS
-from train import random_action, stack_learner_actions
-from train_adaptive import crop_observation, split_mixed_env_counts
+from train_adaptive import split_mixed_env_counts
+from dataset_utils import save_shard
 
 POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_NAMES)}
 CANDIDATE_MODE_TO_ID = {"heuristic": 0, "model": 1, "model-worker": 2, "belief": 3, "main-stack": 4}
-
-
-def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
-    """Return empty previous-scoreboard features for vectorized collection."""
-    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
 
 
 def reset_single_fog_memory(memory: AdaptiveFogMemory, done: jnp.ndarray) -> AdaptiveFogMemory:
@@ -1656,13 +1659,6 @@ def filter_plan_q_arrays(
                 keep[kept_base_win[allowed_base_wins:]] = False
     filtered = {name: value[keep] for name, value in arrays.items()}
     return filtered, original_count, int(np.sum(keep))
-
-
-def save_shard(path: Path, arrays: dict[str, np.ndarray], metadata: dict) -> None:
-    """Write one compressed NPZ shard and sidecar metadata."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **arrays)
-    path.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def parse_args():

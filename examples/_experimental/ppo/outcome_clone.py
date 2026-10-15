@@ -28,9 +28,16 @@ import optax
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
 
-from common import POLICY_MODE_NAME_TO_ID, POLICY_MODE_NAMES, action_to_index, make_grids, policy_network_action
-from network import PolicyValueNetwork, obs_to_array
-from train import load_or_create_network, stack_learner_actions
+from common import (
+    POLICY_MODE_NAMES,
+    POLICY_MODE_NAME_TO_ID,
+    action_to_index,
+    make_grids,
+    policy_network_action,
+    stack_learner_actions,
+)
+from train import load_or_create_network
+from generals.agents.ppo_policy_agent import obs_to_array
 
 SAMPLE_SOURCE_NAMES = ("both", "learner", "opponent")
 SAMPLE_SOURCE_NAME_TO_ID = {name: idx for idx, name in enumerate(SAMPLE_SOURCE_NAMES)}

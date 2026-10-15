@@ -21,15 +21,16 @@ import optax
 
 from adaptive_common import (
     ADAPTIVE_INPUT_CHANNELS,
-    ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS,
     adaptive_action_to_index,
-    adaptive_input_channel_count,
     adaptive_index_to_action,
+    adaptive_input_channel_count,
     adaptive_obs_to_array,
     adaptive_scoreboard_features,
     adaptive_scoreboard_history_context,
     compute_adaptive_valid_move_mask,
+    crop_observation,
     empty_adaptive_fog_memory,
+    empty_scoreboard_history,
     make_adaptive_initial_states,
     make_adaptive_state_pool,
     parse_grid_size_weights,
@@ -39,11 +40,19 @@ from adaptive_common import (
     update_adaptive_fog_memory,
 )
 from adaptive_network import adaptive_network_input_channels, load_or_create_adaptive_network
-from common import OPPONENT_NAME_TO_ID, OPPONENT_NAMES, opponent_action, policy_network_action
+from common import (
+    OPPONENT_NAMES,
+    OPPONENT_NAME_TO_ID,
+    checkpoint_path_for_iteration,
+    opponent_action,
+    policy_network_action,
+    prune_old_checkpoints,
+    random_action,
+    stack_learner_actions,
+)
 from generals.agents.ppo_policy_agent import PolicyValueNetwork, obs_to_array, parse_policy_channels
 from generals.core import game
 from generals.core.action import compute_valid_move_mask
-from train import checkpoint_path_for_iteration, prune_old_checkpoints, random_action, stack_learner_actions
 from train_adaptive import (
     OUTCOME_DRAW,
     OUTCOME_LOSS,
@@ -58,11 +67,6 @@ POLICY_MODE_NAME_TO_ID = {name: index for index, name in enumerate(POLICY_MODE_N
 OUTCOME_WEIGHT_MODES = ("none", "terminal")
 
 
-def empty_scoreboard_history(num_envs: int) -> jnp.ndarray:
-    """Return empty previous-scoreboard features for vectorized imitation rollouts."""
-    return jnp.zeros((num_envs, ADAPTIVE_SCOREBOARD_FEATURE_CHANNELS), dtype=jnp.float32)
-
-
 def policy_action_from_logits(logits: jnp.ndarray, key: jnp.ndarray, policy_mode_id: int, pad_size: int) -> jnp.ndarray:
     """Sample or greedily select one adaptive action from logits."""
     index = jax.lax.cond(
@@ -72,21 +76,6 @@ def policy_action_from_logits(logits: jnp.ndarray, key: jnp.ndarray, policy_mode
         None,
     )
     return adaptive_index_to_action(index, pad_size)
-
-
-def crop_observation(obs, size: int):
-    """Crop padded adaptive observations before feeding a fixed-size policy."""
-    return obs._replace(
-        armies=obs.armies[:size, :size],
-        generals=obs.generals[:size, :size],
-        cities=obs.cities[:size, :size],
-        mountains=obs.mountains[:size, :size],
-        neutral_cells=obs.neutral_cells[:size, :size],
-        owned_cells=obs.owned_cells[:size, :size],
-        opponent_cells=obs.opponent_cells[:size, :size],
-        fog_cells=obs.fog_cells[:size, :size],
-        structures_in_fog=obs.structures_in_fog[:size, :size],
-    )
 
 
 def fixed_policy_logits_to_adaptive_logits(logits: jnp.ndarray, grid_size: int, pad_size: int) -> jnp.ndarray:
