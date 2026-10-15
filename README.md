@@ -8,7 +8,7 @@ README 只保留入口信息和常用命令。完整实验路线、长命令、�
 
 - 完整中文手册：[docs/zh-manual.md](docs/zh-manual.md)
 - Expander/多尺寸训练路线与结果：[docs/expander-training-strategy.md](docs/expander-training-strategy.md)
-- 项目状态流水账：[statusquo.md](statusquo.md)
+- 本地任务记录：`statusquo.md`（不纳入版本控制）
 - 早期训练与实验日志：[docs/devlogs/](docs/devlogs/)
 
 ## 项目结构
@@ -28,6 +28,8 @@ uv sync --extra dev
 ```
 
 如需 GPU/JAX 后端，请按本机 CUDA/JAX 版本单独配置。项目默认命令都通过 `uv run` 执行。
+
+Makefile 使用同一套 `uv` 工具链：`make install` 安装开发环境，`make remote` 运行远程客户端，`make test` 运行测试，`make build` 构建发行包，`make clean` 清理构建产物。
 
 ## 快速运行
 
